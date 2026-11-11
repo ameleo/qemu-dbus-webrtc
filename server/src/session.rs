@@ -248,6 +248,11 @@ rtcp-fb-nack-pli=(boolean)true \
                     gst_webrtc::WebRTCRTPTransceiverDirection::Sendonly
                 };
                 transceiver.set_property("direction", direction);
+                // The video: a client that lost packets asks for them again (NACK) and gets
+                // them on a retransmission stream (RTX), rather than a whole new keyframe.
+                if index == 0 {
+                    transceiver.set_property("do-nack", true);
+                }
             }
             let offers = offers.clone();
             let local = webrtc.clone();
@@ -477,6 +482,33 @@ rtcp-fb-nack-pli=(boolean)true \
         {
             warn!(?channel, error = %e, "data channel message not sent");
         }
+    }
+
+    /// Log what the client reports of its reception (RTCP receiver reports): lost packets,
+    /// jitter, round trip. At debug level.
+    pub fn report_reception(&self) {
+        let promise = gst::Promise::with_change_func(|reply| {
+            let Ok(Some(stats)) = reply else { return };
+            for (_, value) in stats.iter() {
+                let Ok(stat) = value.get::<gst::Structure>() else {
+                    continue;
+                };
+                if stat.name() != "remote-inbound-rtp" {
+                    continue;
+                }
+                let kind = stat.get::<String>("kind").unwrap_or_default();
+                debug!(
+                    kind,
+                    lost = stat.get::<i64>("packets-lost").unwrap_or_default(),
+                    fraction_lost = stat.get::<f64>("fraction-lost").unwrap_or_default(),
+                    jitter = stat.get::<f64>("jitter").unwrap_or_default(),
+                    round_trip = stat.get::<f64>("round-trip-time").unwrap_or_default(),
+                    "client reception"
+                );
+            }
+        });
+        self.webrtc
+            .emit_by_name::<()>("get-stats", &[&None::<gst::Pad>, &promise]);
     }
 
     pub fn apply_answer(&self, sdp: &str) -> Result<()> {

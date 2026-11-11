@@ -88,6 +88,8 @@ const media = new MediaStream();
 pc.ontrack = (event) => {
   media.addTrack(event.track);
   if (video.srcObject !== media) video.srcObject = media;
+  // Firefox stops playing when a track joins the stream: play again (nothing in Chrome).
+  video.play().catch(() => {});
 };
 const unmute = () => { video.muted = false; };
 window.addEventListener("pointerdown", unmute, { once: true });

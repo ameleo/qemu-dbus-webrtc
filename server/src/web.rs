@@ -232,8 +232,10 @@ async fn run(
 ) -> Result<()> {
     // Pointer updates wait for the pointer channel to open.
     let mut sent: Option<pointer::Sent> = None;
+    let mut reception = tokio::time::interval(std::time::Duration::from_secs(5));
     loop {
         tokio::select! {
+            _ = reception.tick() => session.report_reception(),
             signal = signals.recv() => match signal {
                 Some(Signal::Offer(sdp)) => {
                     send(socket, server_message::Message::Offer(SessionDescription { sdp })).await?
