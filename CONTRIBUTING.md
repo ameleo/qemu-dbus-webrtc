@@ -3,6 +3,9 @@
 Thank you for your interest. The project is at an early stage: before a large change, please
 open an issue to discuss it.
 
+This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md); report unacceptable behavior to
+opensource@ameleo.fr.
+
 ## Developer Certificate of Origin
 
 Every commit must be signed off, certifying that you wrote it or have the right to submit it
