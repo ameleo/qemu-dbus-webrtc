@@ -89,6 +89,13 @@ keeps the encoder's timestamps: they become the RTP timestamps, from which the r
 the samples. Browsers play sound only after the user did something on the page: the page
 starts muted and unmutes on the first click or key.
 
+The client's microphone comes back on the sound's track, which is two-way: the server decodes it
+and feeds the guest's microphone through QEMU (`AudioInListener`). QEMU reads the samples from
+its main loop and waits for the answer, so the server keeps them ready in the guest's format,
+100 ms at most so that the delay cannot grow. One viewer speaks at a time: the one sending
+sound, until it has been silent for a second. In the browser page, a button turns the
+microphone on and off: browsers want a click and a permission.
+
 ## Devices: RDP channel formats over data channels
 
 WebRTC carries video and audio natively, including the browser's camera and microphone

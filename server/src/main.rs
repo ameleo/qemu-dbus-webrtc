@@ -215,6 +215,7 @@ async fn main() -> Result<()> {
         console: shown,
         viewers: viewers[&shown].clone(),
         audio_viewers: audio_viewers.clone(),
+        mic: audio.mic.clone(),
         requests: requests_tx,
         input: qdw_qemu::input::Input::new(&vm_connection, shown).await?,
         pointer: pointer_rx,

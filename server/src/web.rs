@@ -26,6 +26,7 @@ use qdw_video::encode::Codec;
 
 use std::sync::Arc;
 
+use crate::audio::Mic;
 use crate::clipboard::{Clipboard, ViewerClipboard, ViewerFollow};
 use crate::input::ViewerInput;
 use crate::pointer::{self, Pointer};
@@ -48,6 +49,8 @@ pub struct Shared {
     pub viewers: Viewers,
     /// The viewers of the guest's sound.
     pub audio_viewers: AudioViewers,
+    /// The guest's microphone.
+    pub mic: Arc<Mic>,
     pub requests: mpsc::UnboundedSender<Request>,
     /// The keyboard and pointer of the shown console.
     pub input: qdw_qemu::input::Input,
@@ -164,6 +167,7 @@ async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
         shared.codec,
         shared.viewers.clone(),
         shared.audio_viewers.clone(),
+        shared.mic.clone(),
         signals_tx,
         move || {
             let _ = requests.send(Request::Keyframe { console });

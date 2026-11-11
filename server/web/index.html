@@ -11,11 +11,15 @@
   #stats { position: fixed; top: 8px; left: 8px; padding: 6px 10px; background: rgba(0, 0, 0, .65);
            border-radius: 4px; white-space: pre; font-family: ui-monospace, monospace; pointer-events: none; }
   #stats.error { background: #8b1a1a; }
+  #mic { position: fixed; top: 8px; right: 8px; padding: 6px 10px; border: 0; border-radius: 4px;
+         background: rgba(0, 0, 0, .65); color: #eee; font: inherit; cursor: pointer; }
+  #mic.on { background: #1a6b2e; }
 </style>
 </head>
 <body>
 <video id="video" autoplay muted playsinline></video>
 <div id="stats">connecting…</div>
+<button id="mic" type="button" title="Send this computer's microphone to the guest">Mic off</button>
 <script>
 "use strict";
 const video = document.getElementById("video");
@@ -116,6 +120,8 @@ ws.onmessage = async (event) => {
   const message = pb.parse(new Uint8Array(event.data));
   if (message.has(1)) {
     await pc.setRemoteDescription({ type: "offer", sdp: str(pb.parse(message.get(1)[0]), 1) });
+    // Sound both ways: the microphone can then go on the sound's track without renegotiating.
+    for (const t of pc.getTransceivers()) if (t.receiver.track.kind === "audio") t.direction = "sendrecv";
     await pc.setLocalDescription(await pc.createAnswer());
     send(answer(pc.localDescription.sdp));
   } else if (message.has(2)) {
@@ -383,6 +389,40 @@ async function clipboardMessage(bytes) {
   }
 }
 window.addEventListener("focus", () => clip.focused());
+
+// The microphone, on demand: the button asks for it (browsers want a click and a permission)
+// and sends it on the sound's track; a second click stops it.
+const micButton = document.getElementById("mic");
+let micTrack = null;
+micButton.addEventListener("click", async () => {
+  const sender = pc.getTransceivers().find((t) => t.receiver.track.kind === "audio")?.sender;
+  if (!sender || !navigator.mediaDevices) {
+    micButton.textContent = !sender ? "Mic: not connected yet" : "Mic: needs HTTPS";
+    return;
+  }
+  if (micTrack) {
+    micTrack.stop();
+    micTrack = null;
+    await sender.replaceTrack(null);
+  } else {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+      micTrack = stream.getAudioTracks()[0];
+      await sender.replaceTrack(micTrack);
+    } catch (e) {
+      // NotAllowedError: refused, or blocked for this site (the address bar shows it).
+      micButton.textContent = e.name === "NotAllowedError" ? "Mic: blocked by the browser" : `Mic: ${e.message}`;
+      console.error("microphone", e);
+      micButton.blur();
+      return;
+    }
+  }
+  micButton.textContent = micTrack ? "Mic on" : "Mic off";
+  micButton.classList.toggle("on", !!micTrack);
+  micButton.blur();   // keys go to the guest, not to the button
+});
 
 // Once a second: what is decoded, and how well.
 let last = null;

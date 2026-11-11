@@ -24,6 +24,8 @@ use tracing::{debug, info, warn};
 use qdw_protocol::{CLIPBOARD_CHANNEL, INPUT_CHANNEL, POINTER_CHANNEL};
 use qdw_video::encode::Codec;
 
+use crate::audio::Mic;
+
 /// The payload type of the video. Fixed: there is one video stream for now.
 const VIDEO_PT: u32 = 96;
 
@@ -147,6 +149,7 @@ impl Session {
         codec: Codec,
         viewers: Viewers,
         audio_viewers: AudioViewers,
+        mic: Arc<Mic>,
         signals: mpsc::UnboundedSender<Signal>,
         keyframe: impl Fn() + Send + Sync + 'static,
     ) -> Result<Self> {
@@ -215,7 +218,8 @@ rtcp-fb-nack-pli=(boolean)true \
             if offered.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 return None;
             }
-            // Send only: the client receives the video and the sound.
+            // The client receives the video, and the sound both ways: its microphone comes back
+            // on the sound's track (the second, after the video).
             for index in 0.. {
                 let Some(transceiver) = webrtc
                     .emit_by_name::<Option<gst_webrtc::WebRTCRTPTransceiver>>(
@@ -225,10 +229,12 @@ rtcp-fb-nack-pli=(boolean)true \
                 else {
                     break;
                 };
-                transceiver.set_property(
-                    "direction",
-                    gst_webrtc::WebRTCRTPTransceiverDirection::Sendonly,
-                );
+                let direction = if index == 1 {
+                    gst_webrtc::WebRTCRTPTransceiverDirection::Sendrecv
+                } else {
+                    gst_webrtc::WebRTCRTPTransceiverDirection::Sendonly
+                };
+                transceiver.set_property("direction", direction);
             }
             let offers = offers.clone();
             let local = webrtc.clone();
@@ -323,6 +329,20 @@ rtcp-fb-nack-pli=(boolean)true \
             debug!(?state, "ICE gathering");
         });
 
+        // The client's microphone: a stream coming out of webrtcbin, decoded for the guest.
+        let speaker = mic.viewer();
+        let weak = pipeline.downgrade();
+        webrtc.connect_pad_added(move |_, pad| {
+            if pad.direction() != gst::PadDirection::Src {
+                return;
+            }
+            if let Some(pipeline) = weak.upgrade()
+                && let Err(e) = Self::decode_mic(&pipeline, pad, mic.clone(), speaker)
+            {
+                warn!(error = %format!("{e:#}"), "client microphone not decoded");
+            }
+        });
+
         pipeline.add(&webrtc)?;
         // The video and the sound first, then the data channels, which webrtcbin makes from
         // READY on. It negotiates once caps arrive on both tracks, after PLAYING: one offer
@@ -342,7 +362,7 @@ rtcp-fb-nack-pli=(boolean)true \
                     let _ = messages.send(Signal::Message(channel, data.to_vec()));
                 }
             });
-            data_channel.connect_on_close(move |_| warn!(?channel, "data channel closed"));
+            data_channel.connect_on_close(move |_| debug!(?channel, "data channel closed"));
             data_channel
                 .connect_on_error(move |_, error| warn!(?channel, %error, "data channel error"));
             let opened = closed_on_input.clone();
@@ -366,6 +386,43 @@ rtcp-fb-nack-pli=(boolean)true \
             audio_src,
             audio_viewers,
         })
+    }
+
+    /// Decode the client's sound coming out of webrtcbin's `pad`, for the guest's microphone.
+    fn decode_mic(
+        pipeline: &gst::Pipeline,
+        pad: &gst::Pad,
+        mic: Arc<Mic>,
+        speaker: u64,
+    ) -> Result<()> {
+        let decoder = gst::parse::bin_from_description(
+            &format!(
+                "queue ! rtpopusdepay ! opusdec ! audioconvert ! audioresample ! {} \
+                 ! appsink name=mic sync=false",
+                qdw_audio::mic::CANONICAL
+            ),
+            true,
+        )?;
+        let appsink = decoder
+            .by_name("mic")
+            .and_then(|e| e.downcast::<gst_app::AppSink>().ok())
+            .context("no appsink")?;
+        appsink.set_callbacks(
+            gst_app::AppSinkCallbacks::builder()
+                .new_sample(move |appsink| {
+                    let sample = appsink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                    let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
+                    let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
+                    mic.push(speaker, &map);
+                    Ok(gst::FlowSuccess::Ok)
+                })
+                .build(),
+        );
+        pipeline.add(&decoder)?;
+        decoder.sync_state_with_parent()?;
+        pad.link(&decoder.static_pad("sink").context("no decoder sink")?)?;
+        debug!(speaker, "client microphone");
+        Ok(())
     }
 
     /// A reliable, ordered data channel.

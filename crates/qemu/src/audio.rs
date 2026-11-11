@@ -5,6 +5,11 @@
 //! As for the display, a listener gets it: a socket pair, one end given to QEMU with
 //! `RegisterOutListener`, on which we serve `org.qemu.Display1.AudioOutListener`. QEMU then
 //! announces each playback stream (`Init`), its volume, and writes its samples as they come.
+//!
+//! The guest's microphone goes the other way, through `RegisterInListener` and
+//! `org.qemu.Display1.AudioInListener`: QEMU announces each record stream and reads its samples
+//! (`Read`), from its main loop, waiting for the answer: a [`Recorder`] answers at once with
+//! what it has.
 
 use std::os::unix::net::UnixStream as StdUnixStream;
 
@@ -19,6 +24,7 @@ use zbus::zvariant::OwnedFd;
 )]
 trait Audio {
     fn register_out_listener(&self, listener: OwnedFd) -> zbus::Result<()>;
+    fn register_in_listener(&self, listener: OwnedFd) -> zbus::Result<()>;
 }
 
 /// The sample format of a stream.
@@ -134,5 +140,90 @@ pub async fn listen(
     let (connection, registered) =
         tokio::join!(connection, audio.register_out_listener(theirs.into()));
     registered.context("registering an audio listener")?;
+    Ok(connection?)
+}
+
+/// What feeds the guest's microphone.
+pub trait Recorder: Send + Sync + 'static {
+    /// A record stream begins, in this format.
+    fn init(&self, id: u64, format: Format);
+    /// The stream ends.
+    fn fini(&self, id: u64);
+    /// Up to `size` bytes of samples, in the stream's format; fewer if there are not as many.
+    /// Called from QEMU's main loop, which waits: return at once.
+    fn read(&self, id: u64, size: u64) -> Vec<u8>;
+}
+
+/// `org.qemu.Display1.AudioInListener`.
+struct InListener {
+    recorder: std::sync::Arc<dyn Recorder>,
+}
+
+// One call at a time, in order, as for the playback.
+#[zbus::interface(name = "org.qemu.Display1.AudioInListener", spawn = false)]
+impl InListener {
+    #[allow(clippy::too_many_arguments)]
+    async fn init(
+        &self,
+        id: u64,
+        bits: u8,
+        is_signed: bool,
+        is_float: bool,
+        freq: u32,
+        nchannels: u8,
+        _bytes_per_frame: u32,
+        _bytes_per_second: u32,
+        be: bool,
+    ) {
+        let format = Format {
+            bits,
+            signed: is_signed,
+            float: is_float,
+            big_endian: be,
+            rate: freq,
+            channels: nchannels,
+        };
+        self.recorder.init(id, format);
+    }
+
+    async fn fini(&self, id: u64) {
+        self.recorder.fini(id);
+    }
+
+    async fn set_enabled(&self, _id: u64, _enabled: bool) {}
+
+    async fn set_volume(&self, _id: u64, _mute: bool, _volume: Vec<u8>) {}
+
+    async fn read(&self, id: u64, size: u64) -> Vec<u8> {
+        self.recorder.read(id, size)
+    }
+
+    #[zbus(property)]
+    fn interfaces(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+const IN_LISTENER_PATH: &str = "/org/qemu/Display1/AudioInListener";
+
+/// Feed the guest's microphone from `recorder`. The returned connection carries it: keep it
+/// alive for as long as it is wanted.
+pub async fn record(
+    vm: &zbus::Connection,
+    recorder: std::sync::Arc<dyn Recorder>,
+) -> Result<zbus::Connection> {
+    let audio = AudioProxy::new(vm).await?;
+    let (ours, theirs) = StdUnixStream::pair()?;
+    ours.set_nonblocking(true)?;
+    let stream = tokio::net::UnixStream::from_std(ours)?;
+    let connection = zbus::connection::Builder::unix_stream(stream)
+        .p2p()
+        .serve_at(IN_LISTENER_PATH, InListener { recorder })?
+        .build();
+    // QEMU authenticates the listener connection before it answers: both at once.
+    let theirs: std::os::fd::OwnedFd = theirs.into();
+    let (connection, registered) =
+        tokio::join!(connection, audio.register_in_listener(theirs.into()));
+    registered.context("registering a microphone listener")?;
     Ok(connection?)
 }

@@ -16,6 +16,8 @@
 //! jitter, and stamping each buffer on arrival made gaps and overlaps, heard as crackles. The
 //! stamps go back to the clock only when they drift from it, after the guest paused.
 
+pub mod mic;
+
 use std::sync::Mutex;
 use std::time::Duration;
 
