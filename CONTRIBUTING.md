@@ -31,9 +31,19 @@ files start with the SPDX identifier:
 
 ## AI-assisted contributions
 
-AI-assisted contributions are welcome. You remain responsible for understanding, reviewing and
-testing everything you submit. Say so in the pull request description, and credit the assistant
-with a `Co-authored-by:` trailer if you wish.
+AI coding assistants may be used, as in the Linux kernel and LLVM, on these conditions:
+
+- A human reviews, understands and tests everything submitted, and answers for it in review.
+- Substantial AI assistance is disclosed with an `Assisted-by:` trailer naming the assistant and
+  model, and any tools it ran:
+
+      Assisted-by: Claude:claude-opus-5-5
+      Signed-off-by: Your Name <you@example.com>
+
+- Only the human contributor signs off: an assistant cannot certify the Developer Certificate of
+  Origin, and is not credited as a co-author.
+
+Routine tools (editor completion of a few words, formatters, compilers) need no mention.
 
 ## Reporting security issues
 

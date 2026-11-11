@@ -10,4 +10,4 @@
 
 - [ ] Every commit is signed off (`git commit -s`).
 - [ ] `cargo fmt`, `cargo clippy` and `cargo test` pass.
-- [ ] AI assistance, if any, is mentioned above.
+- [ ] Substantial AI assistance, if any, is disclosed with an `Assisted-by:` trailer.
