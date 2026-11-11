@@ -8,7 +8,7 @@
 //! interfaces at `/fr/ameleo/Agent`, we export ours at `/fr/ameleo/Host`.
 //!
 //! Only what this program uses of the agent's contract is declared here: the core interface
-//! and the clipboard.
+//! and the clipboard, files included.
 
 use std::os::unix::net::UnixStream as StdUnixStream;
 
@@ -25,6 +25,19 @@ pub const HOST_PATH: &str = "/fr/ameleo/Host";
 pub mod mime {
     pub const TEXT: &str = "text/plain;charset=utf-8";
     pub const PNG: &str = "image/png";
+    /// Files and directories: the Windows format name, whose data is a CLIPRDR_FILELIST (see
+    /// [`super::files`]); the contents come through `FileClipboard1`.
+    pub const FILE_LIST: &str = "FileGroupDescriptorW";
+}
+
+/// `FileContents` flags (MS-RDPECLIP 2.2.5.3).
+pub mod file_contents {
+    /// Return the file size, 8 bytes little endian.
+    pub const SIZE: u32 = 0x1;
+    /// Return the requested bytes from the position.
+    pub const RANGE: u32 = 0x2;
+    /// The largest piece the agent returns in one call.
+    pub const MAX_RANGE: u32 = 4 * 1024 * 1024;
 }
 
 #[zbus::proxy(interface = "org.qemu.Display1.Chardev", default_service = "org.qemu")]
@@ -70,21 +83,49 @@ pub trait Clipboard {
     fn released(&self) -> zbus::Result<()>;
 }
 
-/// Connect to the guest agent, exporting `host` (our callbacks) at [`HOST_PATH`]. Returns once
-/// the agent answered the handshake, so not before the guest runs it.
-pub async fn connect<I>(vm: &zbus::Connection, host: I) -> Result<zbus::Connection>
-where
-    I: zbus::object_server::Interface,
-{
+/// Files copied in the guest (MS-RDPECLIP File Contents Request and Lock/Unlock Clipboard Data):
+/// `lindex` is the index in the file list of the grab, `flags` [`file_contents::SIZE`] or
+/// [`file_contents::RANGE`]; with `has_clip_data_id`, the request is about the content locked
+/// under `clip_data_id`, otherwise the current one. The host exports the same calls as
+/// `fr.ameleo.Host.FileClipboard1`, for files copied on the client.
+#[zbus::proxy(
+    interface = "fr.ameleo.Agent.FileClipboard1",
+    default_service = "fr.ameleo.Agent",
+    default_path = "/fr/ameleo/Agent"
+)]
+pub trait FileClipboard {
+    fn lock_clip_data(&self, clip_data_id: u32) -> zbus::Result<()>;
+    fn unlock_clip_data(&self, clip_data_id: u32) -> zbus::Result<()>;
+    fn file_contents(
+        &self,
+        lindex: i32,
+        flags: u32,
+        position: u64,
+        requested: u32,
+        clip_data_id: u32,
+        has_clip_data_id: bool,
+    ) -> zbus::Result<Vec<u8>>;
+}
+
+/// Connect to the guest agent. `host` adds our interfaces (the calls the guest makes) to the
+/// connection, at [`HOST_PATH`]. Returns once the agent answered the handshake, so not before
+/// the guest runs it.
+pub async fn connect(
+    vm: &zbus::Connection,
+    host: impl FnOnce(
+        zbus::connection::Builder<'static>,
+    ) -> zbus::Result<zbus::connection::Builder<'static>>,
+) -> Result<zbus::Connection> {
     let chardev = find_chardev(vm).await?;
     let (ours, theirs) = StdUnixStream::pair()?;
     ours.set_nonblocking(true)?;
     let stream = tokio::net::UnixStream::from_std(ours)?;
-    let connection = zbus::connection::Builder::unix_stream(stream)
-        .p2p()
-        .auth_mechanism(zbus::AuthMechanism::Anonymous)
-        .serve_at(HOST_PATH, host)?
-        .build();
+    let connection = host(
+        zbus::connection::Builder::unix_stream(stream)
+            .p2p()
+            .auth_mechanism(zbus::AuthMechanism::Anonymous),
+    )?
+    .build();
     // The handshake goes through QEMU once it holds the other end: both at once.
     let theirs: std::os::fd::OwnedFd = theirs.into();
     let (connection, registered) = tokio::join!(connection, chardev.register(theirs.into()));

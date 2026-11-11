@@ -276,7 +276,8 @@ function pointerUpdate(bytes) {
 // pages in HTTPS (or from localhost) only.
 // ClipboardMessage: grab = 1, release = 2, request = 3, data = 4.
 
-const TEXT = "text/plain;charset=utf-8", PNG = "image/png", CHUNK = 64 * 1024;
+// CHUNK: MAX_CHUNK of qdw-protocol, so that a whole message fits in 64 KiB.
+const TEXT = "text/plain;charset=utf-8", PNG = "image/png", CHUNK = 60 * 1024;
 const clip = {
   channel: null,
   guest: [],             // the types the guest clipboard holds

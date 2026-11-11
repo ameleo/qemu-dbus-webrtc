@@ -4,5 +4,6 @@
 
 pub mod agent;
 pub mod display;
+pub mod files;
 pub mod input;
 mod qmp;

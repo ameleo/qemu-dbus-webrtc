@@ -26,7 +26,7 @@ use qdw_video::encode::Codec;
 
 use std::sync::Arc;
 
-use crate::clipboard::{Clipboard, Paste, ViewerClipboard};
+use crate::clipboard::{Clipboard, ViewerClipboard, ViewerFollow};
 use crate::input::ViewerInput;
 use crate::pointer::{self, Pointer};
 use crate::session::{Channel, Session, Signal, Viewers};
@@ -167,7 +167,7 @@ async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
         },
     )?;
     let mut input = ViewerInput::new(shared.input.clone());
-    let (mut clipboard, guest_clipboard, pastes) = shared.clipboard.viewer();
+    let (mut clipboard, clip) = shared.clipboard.viewer();
     let ended = run(
         &mut socket,
         &session,
@@ -176,8 +176,7 @@ async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
         &mut clipboard,
         Follow {
             pointer: shared.pointer.clone(),
-            guest_clipboard,
-            pastes,
+            clip,
         },
     )
     .await;
@@ -191,8 +190,7 @@ async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
 /// What a viewer follows besides its connection.
 struct Follow {
     pointer: watch::Receiver<Pointer>,
-    guest_clipboard: watch::Receiver<Vec<String>>,
-    pastes: mpsc::UnboundedReceiver<Paste>,
+    clip: ViewerFollow,
 }
 
 fn send_all(session: &Session, channel: Channel, messages: Vec<Vec<u8>>) {
@@ -236,7 +234,7 @@ async fn run(
                     sent = Some(fresh);
                 }
                 Some(Signal::Open(Channel::Clipboard)) => {
-                    let guest = follow.guest_clipboard.borrow_and_update().clone();
+                    let guest = follow.clip.guest.borrow_and_update().clone();
                     send_all(session, Channel::Clipboard, clipboard.opened(guest));
                 }
                 Some(Signal::Open(Channel::Input)) => {}
@@ -247,13 +245,14 @@ async fn run(
                     send_all(session, Channel::Pointer, sent.update(&follow.pointer.borrow_and_update()));
                 }
             }
-            Ok(()) = follow.guest_clipboard.changed() => {
-                let guest = follow.guest_clipboard.borrow_and_update().clone();
+            Ok(()) = follow.clip.guest.changed() => {
+                let guest = follow.clip.guest.borrow_and_update().clone();
                 send_all(session, Channel::Clipboard, clipboard.guest_changed(guest));
             }
-            Some(paste) = follow.pastes.recv() => {
-                send_all(session, Channel::Clipboard, clipboard.paste(paste));
+            Some(call) = follow.clip.calls.recv() => {
+                send_all(session, Channel::Clipboard, clipboard.host_call(call));
             }
+            Some(message) = follow.clip.outgoing.recv() => session.send(Channel::Clipboard, message),
             message = receive(socket) => match message? {
                 Some(client_message::Message::Answer(SessionDescription { sdp })) => session.apply_answer(&sdp)?,
                 // An empty candidate marks the end of the client's candidates.

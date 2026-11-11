@@ -255,9 +255,13 @@ rtcp-fb-nack-pli=(boolean)true \
             let messages = closed_on_input.clone();
             data_channel.connect_on_message_data(move |_, data| {
                 if let Some(data) = data {
+                    debug!(?channel, bytes = data.len(), "data channel message");
                     let _ = messages.send(Signal::Message(channel, data.to_vec()));
                 }
             });
+            data_channel.connect_on_close(move |_| warn!(?channel, "data channel closed"));
+            data_channel
+                .connect_on_error(move |_, error| warn!(?channel, %error, "data channel error"));
             let opened = closed_on_input.clone();
             data_channel.connect_on_open(move |_| {
                 let _ = opened.send(Signal::Open(channel));

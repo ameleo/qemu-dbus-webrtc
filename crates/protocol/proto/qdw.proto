@@ -155,7 +155,14 @@ message PointerShape {
 //
 // Modelled on the clipboard of RDP (MS-RDPECLIP): whoever copied last owns the clipboard and
 // announces what it holds; the other side asks for the data when it needs it. Data are typed
-// by media type: "text/plain;charset=utf-8", "image/png".
+// by media type: "text/plain;charset=utf-8", "image/png", and for files and directories
+// "application/vnd.qdw.file-list", whose data is a ClipboardFileList.
+//
+// Files, as RDP does: the owner announces the file list type; the other side asks for the
+// list, then for the contents of each file by its index in the list, piece by piece
+// (ClipboardFileRequest). A paste that takes time first locks the clipboard content
+// (ClipboardLock), so that its files stay readable when the clipboard changes, and unlocks it
+// at the end.
 
 message ClipboardMessage {
   oneof message {
@@ -163,6 +170,10 @@ message ClipboardMessage {
     ClipboardRelease release = 2;
     ClipboardRequest request = 3;
     ClipboardData data = 4;
+    ClipboardLock lock = 5;
+    ClipboardUnlock unlock = 6;
+    ClipboardFileRequest file_request = 7;
+    ClipboardFileData file_data = 8;
   }
 }
 
@@ -181,8 +192,8 @@ message ClipboardRequest {
   repeated string mimes = 2;
 }
 
-// The answer to a request, in chunks: a data channel message has a size limit (MAX_CHUNK in
-// qdw-protocol).
+// The answer to a request, in chunks of 60 KiB of data at most (MAX_CHUNK in qdw-protocol): a
+// data channel message is 64 KiB at most, whole, unless the other side announces more.
 message ClipboardData {
   uint32 id = 1;
   // The type of the data; empty when the owner has nothing to give.
@@ -190,4 +201,56 @@ message ClipboardData {
   bytes data = 3;
   // The last chunk of the answer.
   bool last = 4;
+}
+
+// The files and directories copied, as the data of the "application/vnd.qdw.file-list" type.
+message ClipboardFileList {
+  repeated ClipboardFile files = 1;
+}
+
+message ClipboardFile {
+  // Relative to the copied set, '/' separated; a directory comes before what it contains.
+  string path = 1;
+  bool directory = 2;
+  // In bytes; 0 for a directory.
+  uint64 size = 3;
+  // Last modification, in milliseconds since 1970-01-01 UTC; 0 if unknown.
+  int64 modified_ms = 4;
+}
+
+// Freeze the owner's current clipboard content under clip_data_id: its files stay readable after
+// the clipboard changes, until unlocked.
+message ClipboardLock {
+  uint32 clip_data_id = 1;
+}
+
+message ClipboardUnlock {
+  uint32 clip_data_id = 1;
+}
+
+// Ask the owner for the size or a piece of a file of its file list.
+message ClipboardFileRequest {
+  // Echoed in the answer.
+  uint32 id = 1;
+  // The index of the file in the file list.
+  uint32 index = 2;
+  // The size of the file, rather than a piece of it.
+  bool size = 3;
+  // The piece: offset and length in bytes.
+  uint64 offset = 4;
+  uint32 length = 5;
+  // The locked content the request is about; the current one when absent.
+  optional uint32 clip_data_id = 6;
+}
+
+// The answer to a ClipboardFileRequest, in chunks as ClipboardData.
+message ClipboardFileData {
+  uint32 id = 1;
+  // The size of the file, for a size request.
+  uint64 size = 2;
+  // A chunk of the piece, for a piece request.
+  bytes data = 3;
+  bool last = 4;
+  // The file could not be read: no size, no data.
+  bool failed = 5;
 }

@@ -25,9 +25,17 @@ pub const POINTER_CHANNEL: &str = "pointer";
 /// The data channel of the clipboard, both ways: [`v1::ClipboardMessage`] messages.
 pub const CLIPBOARD_CHANNEL: &str = "clipboard";
 
-/// The largest data chunk of a [`v1::ClipboardData`]: 64 KiB, well within what browsers accept
-/// in one data channel message (256 KiB for Chromium).
-pub const MAX_CHUNK: usize = 64 * 1024;
+/// The largest data chunk of a [`v1::ClipboardData`] or [`v1::ClipboardFileData`]: 60 KiB.
+/// A data channel message is 64 KiB at most, whole, when the other side announces no larger
+/// limit in its SDP (RFC 8841, and the server announces none); libwebrtc does not send a
+/// larger one. The 4 KiB left are for the message's other fields.
+pub const MAX_CHUNK: usize = 60 * 1024;
+
+/// The clipboard type of files and directories: its data is a [`v1::ClipboardFileList`].
+pub const FILE_LIST_MIME: &str = "application/vnd.qdw.file-list";
+
+/// The largest piece of a file a [`v1::ClipboardFileRequest`] asks for: 4 MiB.
+pub const MAX_FILE_PIECE: u32 = 4 * 1024 * 1024;
 
 /// The largest clipboard content either side sends: 32 MiB.
 pub const MAX_CLIPBOARD: usize = 32 * 1024 * 1024;
