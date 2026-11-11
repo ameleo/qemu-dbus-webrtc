@@ -212,6 +212,7 @@ async fn main() -> Result<()> {
     tokio::spawn(clipboard.clone().run_agent(vm_connection.clone()));
     let shared = web::Shared {
         codec: args.settings.codec,
+        full_chroma: args.settings.full_chroma,
         console: shown,
         viewers: viewers[&shown].clone(),
         audio_viewers: audio_viewers.clone(),

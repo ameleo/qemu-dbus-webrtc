@@ -44,6 +44,8 @@ pub enum Request {
 #[derive(Clone)]
 pub struct Shared {
     pub codec: Codec,
+    /// The video is in 4:4:4.
+    pub full_chroma: bool,
     /// The console shown to viewers, and its viewers.
     pub console: u32,
     pub viewers: Viewers,
@@ -165,6 +167,7 @@ async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
     let (requests, console) = (shared.requests.clone(), shared.console);
     let session = Session::start(
         shared.codec,
+        shared.full_chroma,
         shared.viewers.clone(),
         shared.audio_viewers.clone(),
         shared.mic.clone(),

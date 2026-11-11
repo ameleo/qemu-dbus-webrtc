@@ -153,6 +153,7 @@ impl Session {
     /// `keyframe` is called when the client needs a keyframe (a lost frame, or the start).
     pub fn start(
         codec: Codec,
+        full_chroma: bool,
         viewers: Viewers,
         audio_viewers: AudioViewers,
         mic: Arc<Mic>,
@@ -164,7 +165,7 @@ impl Session {
             "appsrc name=src is-live=true format=time do-timestamp=true caps={caps} \
              ! queue \
              ! {payloader} pt={VIDEO_PT} mtu=1200 \
-             ! application/x-rtp,media=video,encoding-name={encoding},payload={VIDEO_PT},clock-rate=90000,\
+             ! application/x-rtp,media=video,encoding-name={encoding},payload={VIDEO_PT},clock-rate=90000{extra},\
 rtcp-fb-nack-pli=(boolean)true \
              ! capsfilter name=rtp \
              appsrc name=audio is-live=true format=time caps={audio_caps} \
@@ -173,6 +174,7 @@ rtcp-fb-nack-pli=(boolean)true \
              ! application/x-rtp,media=audio,encoding-name=OPUS,payload={AUDIO_PT},clock-rate=48000 \
              ! capsfilter name=audiortp",
             caps = codec.stream_caps(),
+            extra = codec.rtp_extra(full_chroma),
             audio_caps = qdw_audio::STREAM_CAPS,
         );
         let pipeline = gst::parse::launch(&description)?

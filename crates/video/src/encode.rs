@@ -130,6 +130,15 @@ impl Codec {
         }
     }
 
+    /// What the RTP caps add for this codec, as the offer's fmtp line will say it: VP9 in 4:4:4
+    /// is profile 1, which a client must decode to take the offer.
+    pub fn rtp_extra(self, full_chroma: bool) -> &'static str {
+        match (self, full_chroma) {
+            (Self::Vp9, true) => ",profile-id=(string)1",
+            _ => "",
+        }
+    }
+
     /// The codec's media type in a browser (`RTCRtpReceiver.getCapabilities`).
     pub fn mime_type(self) -> &'static str {
         match self {
