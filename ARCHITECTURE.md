@@ -57,6 +57,18 @@ may not (VP9 4:4:4). The codec is negotiated in SDP, from the best the client of
 VP9 4:2:0, which every current browser decodes. H.264 is left out: the project targets current
 hardware, and the royalty-free codecs cover it.
 
+One client uses the session at a time, as with RDP: its keyboard and pointer, clipboard,
+microphone, drives and printers go to the guest, and the guest's screen takes the size of its
+window. A new client takes the session over, and the last one's ends with a reason. Shadow
+clients (`shadow` in their hello) only watch and listen, as many as wanted; handing them the
+keyboard and pointer on request comes later.
+
+The size follows the user's window: once a size has settled (300 ms), the server asks the guest
+for it (`SetUIInfo`, even and within 200 to 8192 pixels). A request sent while the guest boots
+is lost, its display driver restoring the mode Windows remembered: the size stays the goal,
+asked again when the guest still shows another 3 s after, three times at most. The guest keeps
+the size when the user goes.
+
 ## Codecs
 
 | Codec | Chroma | Royalties | Use |

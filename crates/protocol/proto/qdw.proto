@@ -40,6 +40,12 @@ message Hello {
   // parameters when it has any: "video/VP9;profile-id=1" for VP9 in 4:4:4. A type without
   // parameters stands for the codec's default profile.
   repeated string codecs = 1;
+  // Watch only: a shadow client sees and hears the guest, and nothing more. Without it, the
+  // client is the user of the session: its keyboard and pointer, clipboard, microphone, drives
+  // and printers go to the guest, and the guest takes the size of its window. There is one user
+  // at a time: a new one takes the session over, and the server ends the last one's with an
+  // error. Shadow clients come and go as they like.
+  bool shadow = 2;
 }
 
 message SessionDescription {
@@ -264,6 +270,7 @@ message ClipboardFileData {
 message ControlMessage {
   oneof message {
     VideoPause video_pause = 1;
+    MonitorLayout monitor_layout = 2;
   }
 }
 
@@ -272,6 +279,26 @@ message ControlMessage {
 // resumes, the server sends a keyframe at once.
 message VideoPause {
   bool paused = 1;
+}
+
+// The size the client wants the guest's screen at: the size of its window, in its own pixels,
+// so that the video shows unscaled. Sent when the session starts and whenever the window
+// changes size; the server waits for the size to settle before applying it. The guest keeps
+// it after the client goes. Shadow clients' layouts are ignored.
+message MonitorLayout {
+  // One for now: the guest's first screen; later one per client monitor.
+  repeated Monitor monitors = 1;
+}
+
+message Monitor {
+  // Where the monitor is among the others, in pixels; 0, 0 for the first.
+  int32 x = 1;
+  int32 y = 2;
+  uint32 width = 3;
+  uint32 height = 4;
+  // Its physical size, for the guest's DPI; 0 when unknown.
+  uint32 width_mm = 5;
+  uint32 height_mm = 6;
 }
 
 // ---------------------------------------------------------------------------------------------

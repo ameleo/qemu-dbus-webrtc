@@ -73,7 +73,12 @@ const str = (fields, n) => pb.text.decode(fields.get(n)?.[0] || new Uint8Array()
 const uint = (fields, n) => fields.get(n)?.[0] || 0;
 
 // ClientMessage: hello = 1, answer = 2, ice = 3.
-const hello = (codecs) => pb.message((o) => pb.bytes(o, 1, pb.message((h) => codecs.forEach((c) => pb.string(h, 1, c)))));
+// Hello: codecs = 1, shadow = 2. With ?shadow in the address, the page only watches.
+const shadow = new URLSearchParams(location.search).has("shadow");
+const hello = (codecs) => pb.message((o) => pb.bytes(o, 1, pb.message((h) => {
+  codecs.forEach((c) => pb.string(h, 1, c));
+  if (shadow) pb.uint(h, 2, 1);
+})));
 const answer = (sdp) => pb.message((o) => pb.bytes(o, 2, pb.message((d) => pb.string(d, 1, sdp))));
 const ice = (candidate, mline) => pb.message((o) => pb.bytes(o, 3, pb.message((c) => { pb.string(c, 1, candidate); pb.uint(c, 2, mline); })));
 
@@ -103,7 +108,7 @@ pc.ondatachannel = ({ channel }) => {
   if (channel.label === "pointer") channel.onmessage = (event) => pointerUpdate(new Uint8Array(event.data));
   if (channel.label === "control") {
     control.channel = channel;
-    channel.onopen = () => control.videoPause();
+    channel.onopen = () => { control.videoPause(); control.layout(); };
   }
   if (channel.label === "clipboard") {
     clip.channel = channel;
@@ -404,6 +409,7 @@ window.addEventListener("focus", () => clip.focused());
 // The microphone, on demand: the button asks for it (browsers want a click and a permission)
 // and sends it on the sound's track; a second click stops it.
 const micButton = document.getElementById("mic");
+if (shadow) micButton.hidden = true;
 let micTrack = null;
 micButton.addEventListener("click", async () => {
   const sender = pc.getTransceivers().find((t) => t.receiver.track.kind === "audio")?.sender;
@@ -447,6 +453,18 @@ const control = {
   },
 };
 document.addEventListener("visibilitychange", () => control.videoPause());
+
+// The guest's screen at the size of the window, in device pixels, so that the video shows
+// unscaled; the server waits for the size to settle. ControlMessage: monitor_layout = 2;
+// MonitorLayout: monitors = 1; Monitor: width = 3, height = 4.
+control.layout = function () {
+  if (shadow || this.channel?.readyState !== "open") return;
+  const width = Math.round(window.innerWidth * devicePixelRatio);
+  const height = Math.round(window.innerHeight * devicePixelRatio);
+  this.channel.send(new Uint8Array(pb.message((o) => pb.bytes(o, 2, pb.message((l) =>
+    pb.bytes(l, 1, pb.message((m) => { pb.uint(m, 3, width); pb.uint(m, 4, height); })))))));
+};
+window.addEventListener("resize", () => control.layout());
 
 // Once a second: what is decoded, and how well.
 let last = null;

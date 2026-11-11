@@ -14,11 +14,11 @@ use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{info, warn};
 
 use qdw_protocol::v1::{
-    ClientMessage, ControlMessage, Error, Hello, IceCandidate, Input, ServerMessage,
+    ClientMessage, ControlMessage, Error, Hello, IceCandidate, Input, MonitorLayout, ServerMessage,
     SessionDescription, VideoPause, client_message, control_message, server_message,
 };
 use qdw_protocol::{Message, SIGNALLING_PATH};
@@ -30,6 +30,7 @@ use crate::audio::Mic;
 use crate::clipboard::{Clipboard, ViewerClipboard, ViewerFollow};
 use crate::drives::{Drives, DrivesFollow, ViewerDrives};
 use crate::input::ViewerInput;
+use crate::layout::{Layout, Size};
 use crate::pointer::{self, Pointer};
 use crate::printers::{Printers, PrintersFollow, ViewerPrinters};
 use crate::session::{AudioViewers, Channel, Session, Signal, Viewers};
@@ -63,6 +64,40 @@ pub struct Shared {
     pub clipboard: Arc<Clipboard>,
     pub drives: Arc<Drives>,
     pub printers: Arc<Printers>,
+    /// The size of the shown console's screen.
+    pub layout: Arc<Layout>,
+    /// The user of the session.
+    pub user: Arc<User>,
+}
+
+/// The one client that uses the session; the others are shadow clients, which only watch.
+#[derive(Default)]
+pub struct User {
+    /// Its id, and how to end its session when another takes it over.
+    current: std::sync::Mutex<Option<(u64, oneshot::Sender<()>)>>,
+    next: std::sync::atomic::AtomicU64,
+}
+
+impl User {
+    /// A new user takes the session over: the last one's session ends. Returns the new user's
+    /// id, and what tells it its own session was taken over.
+    fn take_over(&self) -> (u64, oneshot::Receiver<()>) {
+        let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (end, ended) = oneshot::channel();
+        if let Some((_, last)) = self.current.lock().unwrap().replace((id, end)) {
+            info!("a new client takes the session over");
+            let _ = last.send(());
+        }
+        (id, ended)
+    }
+
+    /// The user `id` left; nobody uses the session until the next one comes.
+    fn leave(&self, id: u64) {
+        let mut current = self.current.lock().unwrap();
+        if current.as_ref().is_some_and(|(user, _)| *user == id) {
+            *current = None;
+        }
+    }
 }
 
 /// A certificate and its private key, PEM files.
@@ -151,7 +186,9 @@ async fn receive(socket: &mut WebSocket) -> Result<Option<client_message::Messag
 
 async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
     // The client first says which codecs it decodes.
-    let Some(client_message::Message::Hello(Hello { codecs })) = receive(&mut socket).await? else {
+    let Some(client_message::Message::Hello(Hello { codecs, shadow })) =
+        receive(&mut socket).await?
+    else {
         anyhow::bail!("no hello");
     };
     if !codecs
@@ -181,12 +218,14 @@ async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
         shared.full_chroma,
         shared.viewers.clone(),
         shared.audio_viewers.clone(),
-        shared.mic.clone(),
+        (!shadow).then(|| shared.mic.clone()),
         signals_tx,
         move || {
             let _ = requests.send(Request::Keyframe { console });
         },
     )?;
+    let user = (!shadow).then(|| shared.user.take_over());
+    info!(shadow, "viewer session");
     let (clipboard, clip) = shared.clipboard.viewer();
     let (drives, drives_follow) = shared.drives.viewer();
     let (printers, printers_follow) = shared.printers.viewer();
@@ -196,6 +235,7 @@ async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
         drives,
         printers,
     };
+    let (user_id, taken_over) = user.unzip();
     let ended = run(
         &mut socket,
         &session,
@@ -206,7 +246,9 @@ async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
             clip,
             drives: drives_follow,
             printers: printers_follow,
+            taken_over,
         },
+        &shared.layout,
         || {
             let _ = shared.requests.send(Request::Keyframe {
                 console: shared.console,
@@ -220,6 +262,9 @@ async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
     state.clipboard.release().await?;
     state.drives.release().await;
     state.printers.release().await;
+    if let Some(id) = user_id {
+        shared.user.leave(id);
+    }
     ended
 }
 
@@ -238,6 +283,8 @@ struct Follow {
     clip: ViewerFollow,
     drives: DrivesFollow,
     printers: PrintersFollow,
+    /// For the user: another client took the session over. `None` for a shadow client.
+    taken_over: Option<oneshot::Receiver<()>>,
 }
 
 fn send_all(session: &Session, channel: Channel, messages: Vec<Vec<u8>>) {
@@ -252,8 +299,22 @@ async fn run(
     signals: &mut mpsc::UnboundedReceiver<Signal>,
     state: &mut ViewerState,
     mut follow: Follow,
+    layout: &Layout,
     keyframe: impl Fn(),
 ) -> Result<()> {
+    // A shadow client only watches: what it sends to the guest is ignored, and it gets nothing
+    // of the guest's clipboard.
+    let taken_over = follow.taken_over.take();
+    let user = taken_over.is_some();
+    let taken_over = async move {
+        match taken_over {
+            Some(taken_over) => {
+                let _ = taken_over.await;
+            }
+            None => std::future::pending().await,
+        }
+    };
+    tokio::pin!(taken_over);
     let ViewerState {
         input,
         clipboard,
@@ -266,6 +327,12 @@ async fn run(
     loop {
         tokio::select! {
             _ = reception.tick() => session.report_reception(),
+            () = &mut taken_over => {
+                let message = "another client took the session over".to_string();
+                send(socket, server_message::Message::Error(Error { message: message.clone() })).await?;
+                info!("{message}");
+                return Ok(());
+            }
             signal = signals.recv() => match signal {
                 Some(Signal::Offer(sdp)) => {
                     send(socket, server_message::Message::Offer(SessionDescription { sdp })).await?
@@ -274,6 +341,7 @@ async fn run(
                     let ice = IceCandidate { candidate, sdp_mline_index: mline_index };
                     send(socket, server_message::Message::Ice(ice)).await?
                 }
+                Some(Signal::Message(Channel::Input | Channel::Clipboard | Channel::Drive | Channel::Printer, _)) if !user => {}
                 Some(Signal::Message(Channel::Input, bytes)) => match Input::decode(bytes.as_slice()) {
                     Ok(events) => input.apply(events).await?,
                     Err(e) => warn!(error = %e, "undecodable input"),
@@ -286,6 +354,11 @@ async fn run(
                     Ok(ControlMessage { message: Some(control_message::Message::VideoPause(VideoPause { paused })) }) => {
                         if session.pause_video(paused) {
                             keyframe();
+                        }
+                    }
+                    Ok(ControlMessage { message: Some(control_message::Message::MonitorLayout(MonitorLayout { monitors })) }) => {
+                        if user && let Some(size) = monitors.first().and_then(Size::of) {
+                            layout.want(size);
                         }
                     }
                     Ok(_) => {}
@@ -307,6 +380,7 @@ async fn run(
                     send_all(session, Channel::Pointer, fresh.update(&follow.pointer.borrow_and_update()));
                     sent = Some(fresh);
                 }
+                Some(Signal::Open(Channel::Clipboard)) if !user => {}
                 Some(Signal::Open(Channel::Clipboard)) => {
                     let guest = follow.clip.guest.borrow_and_update().clone();
                     send_all(session, Channel::Clipboard, clipboard.opened(guest));
@@ -319,7 +393,7 @@ async fn run(
                     send_all(session, Channel::Pointer, sent.update(&follow.pointer.borrow_and_update()));
                 }
             }
-            Ok(()) = follow.clip.guest.changed() => {
+            Ok(()) = follow.clip.guest.changed(), if user => {
                 let guest = follow.clip.guest.borrow_and_update().clone();
                 send_all(session, Channel::Clipboard, clipboard.guest_changed(guest));
             }

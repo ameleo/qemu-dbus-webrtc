@@ -46,6 +46,18 @@ pub trait Vm {
 #[zbus::proxy(interface = "org.qemu.Display1.Console", default_service = "org.qemu")]
 pub trait Console {
     fn register_listener(&self, listener: OwnedFd) -> zbus::Result<()>;
+    /// Ask the guest for a screen of `width` x `height` pixels, `width_mm` x `height_mm` large,
+    /// at `xoff`, `yoff` among the others (the guest's display driver applies it, or not).
+    #[zbus(name = "SetUIInfo")]
+    fn set_ui_info(
+        &self,
+        width_mm: u16,
+        height_mm: u16,
+        xoff: i32,
+        yoff: i32,
+        width: u32,
+        height: u32,
+    ) -> zbus::Result<()>;
     #[zbus(property)]
     fn label(&self) -> zbus::Result<String>;
     #[zbus(property)]

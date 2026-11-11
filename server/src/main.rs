@@ -10,6 +10,7 @@ mod audio;
 mod clipboard;
 mod drives;
 mod input;
+mod layout;
 mod pointer;
 mod printers;
 mod session;
@@ -214,6 +215,13 @@ async fn main() -> Result<()> {
     let clipboard = clipboard::Clipboard::new();
     let drives = drives::Drives::new();
     let printers = printers::Printers::new();
+    // The shown console at the size of the user's window.
+    let layout = layout::Layout::start(
+        display::ConsoleProxy::builder(&vm_connection)
+            .path(format!("/org/qemu/Display1/Console_{shown}"))?
+            .build()
+            .await?,
+    );
     tokio::spawn(agent::run(
         vm_connection.clone(),
         clipboard.clone(),
@@ -233,6 +241,8 @@ async fn main() -> Result<()> {
         clipboard: clipboard.clone(),
         drives: drives.clone(),
         printers: printers.clone(),
+        layout: layout.clone(),
+        user: Default::default(),
     };
     if !args.listen.ip().is_loopback() {
         warn!(listen = %args.listen, "no authentication yet: anyone who reaches this address sees the VM");
@@ -325,6 +335,9 @@ async fn main() -> Result<()> {
                     bytes = data.len(),
                     "scanout (shared memory), not encoded"
                 );
+                if console == shown {
+                    layout.shown(width, height);
+                }
                 if let Some(encoder) = encoders.remove(&console) {
                     encoder.finish();
                 }
@@ -350,6 +363,9 @@ async fn main() -> Result<()> {
                     "scanout (DMA-BUF)"
                 );
                 fresh.insert(console);
+                if console == shown {
+                    layout.shown(width, height);
+                }
                 if let Err(e) = scanout(
                     viewers.get(&console).cloned(),
                     &args,

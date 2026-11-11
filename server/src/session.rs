@@ -172,7 +172,7 @@ impl Session {
         full_chroma: bool,
         viewers: Viewers,
         audio_viewers: AudioViewers,
-        mic: Arc<Mic>,
+        mic: Option<Arc<Mic>>,
         signals: mpsc::UnboundedSender<Signal>,
         keyframe: impl Fn() + Send + Sync + 'static,
     ) -> Result<Self> {
@@ -363,17 +363,25 @@ rtcp-fb-nack-pli=(boolean)true \
             debug!(?state, "ICE gathering");
         });
 
-        // The client's microphone: a stream coming out of webrtcbin, decoded for the guest.
-        let speaker = mic.viewer();
+        // The client's microphone: a stream coming out of webrtcbin, decoded for the guest; or
+        // dropped, for a client without `mic` (a shadow client).
+        let speaker = mic.as_ref().map(|mic| mic.viewer());
         let weak = pipeline.downgrade();
         webrtc.connect_pad_added(move |_, pad| {
             if pad.direction() != gst::PadDirection::Src {
                 return;
             }
-            if let Some(pipeline) = weak.upgrade()
-                && let Err(e) = Self::decode_mic(&pipeline, pad, mic.clone(), speaker)
-            {
-                warn!(error = %format!("{e:#}"), "client microphone not decoded");
+            let Some(pipeline) = weak.upgrade() else {
+                return;
+            };
+            let linked = match (&mic, speaker) {
+                (Some(mic), Some(speaker)) => {
+                    Self::decode_mic(&pipeline, pad, mic.clone(), speaker)
+                }
+                _ => Self::drop_stream(&pipeline, pad),
+            };
+            if let Err(e) = linked {
+                warn!(error = %format!("{e:#}"), "client microphone not handled");
             }
         });
 
@@ -438,6 +446,22 @@ rtcp-fb-nack-pli=(boolean)true \
         }
         debug!(paused, "client video");
         !paused
+    }
+
+    /// Drop the stream coming out of webrtcbin's `pad`: an unlinked pad would stop the pipeline.
+    fn drop_stream(pipeline: &gst::Pipeline, pad: &gst::Pad) -> Result<()> {
+        let sink = gst::ElementFactory::make("fakesink")
+            .property("sync", false)
+            .property("async", false)
+            .build()?;
+        pipeline.add(&sink)?;
+        sink.sync_state_with_parent()?;
+        pad.link(
+            &sink
+                .static_pad("sink")
+                .context("fakesink without a sink pad")?,
+        )?;
+        Ok(())
     }
 
     /// Decode the client's sound coming out of webrtcbin's `pad`, for the guest's microphone.
