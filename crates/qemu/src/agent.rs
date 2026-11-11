@@ -7,8 +7,8 @@
 //! the server and we are the client (anonymous authentication). The guest exports its
 //! interfaces at `/fr/ameleo/Agent`, we export ours at `/fr/ameleo/Host`.
 //!
-//! Only what this program uses of the agent's contract is declared here: the core interface
-//! and the clipboard, files included.
+//! Only what this program uses of the agent's contract is declared here: the core interface,
+//! the clipboard (files included) and the client drives.
 
 use std::os::unix::net::UnixStream as StdUnixStream;
 
@@ -105,6 +105,36 @@ pub trait FileClipboard {
         clip_data_id: u32,
         has_clip_data_id: bool,
     ) -> zbus::Result<Vec<u8>>;
+}
+
+/// Client drives shown in the guest as drive letters (RDP drive redirection, MS-RDPEFS). The
+/// guest mounts each with Dokany, and sends every file operation of its applications to the
+/// host as it happens (`fr.ameleo.Host.Drive1`). Ids are chosen by the host. Paths are relative
+/// to the drive root, `\` separated, without a leading `\`.
+#[zbus::proxy(
+    interface = "fr.ameleo.Agent.Drive1",
+    default_service = "fr.ameleo.Agent",
+    default_path = "/fr/ameleo/Agent"
+)]
+pub trait Drive {
+    /// `name`: the client's name of the drive (`C`); `label`: the volume label shown in the
+    /// guest. Returns the guest's drive letter.
+    fn add_drive(&self, id: u32, name: &str, label: &str) -> zbus::Result<String>;
+    fn remove_drive(&self, id: u32) -> zbus::Result<()>;
+    /// Changes made on the client drive, in order: `(action, path)`, the
+    /// `FILE_NOTIFY_INFORMATION` actions.
+    fn changed(&self, id: u32, changes: Vec<(u32, String)>) -> zbus::Result<()>;
+}
+
+/// Drive limits and wire types of the agent's contract.
+pub mod drive {
+    /// Client drives shown at the same time.
+    pub const MAX_DRIVES: usize = 24;
+    /// Largest read length or write data, in bytes.
+    pub const IO_MAX: u32 = 1024 * 1024;
+    /// A file or directory: `(name, attributes, size, creation_time, last_access_time,
+    /// last_write_time, change_time)`, times as FILETIME.
+    pub type Entry = (String, u32, u64, u64, u64, u64, u64);
 }
 
 /// Connect to the guest agent. `host` adds our interfaces (the calls the guest makes) to the

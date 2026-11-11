@@ -273,3 +273,213 @@ message ControlMessage {
 message VideoPause {
   bool paused = 1;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Data channel "drive", both ways, reliable and ordered: one DriveMessage per message.
+//
+// Client drives (folders or disks of the client) shown in the guest as drive letters, as RDP
+// redirects drives (MS-RDPEFS): every file operation of a guest application goes to the client
+// as it happens, and nothing of the client's files stays in the guest. The client announces its
+// drives; the server sends it the guest's operations (DriveRequest), with the guest's Windows
+// (NT) parameters as they are, and the client answers each (DriveReply) with an NTSTATUS:
+// 0 success, 0xC0000034 not found, 0xC0000022 access denied, 0xC0000043 sharing violation...
+// Several requests may be pending at once, on the same file too.
+//
+// Paths are relative to the drive root, '/' separated, without a leading '/'; "" is the root.
+// Times are FILETIME: 100 ns since 1601-01-01 UTC, 0 when unknown.
+//
+// A message larger than a data channel takes (a read or a write carries up to 1 MiB) goes as
+// DriveFragment messages: its encoded bytes in pieces of MAX_CHUNK at most, sent one after the
+// other with nothing in between, the last one marked.
+
+message DriveMessage {
+  oneof message {
+    // Client to server.
+    DriveAnnounce announce = 1;
+    DriveRemove remove = 2;
+    DriveChanged changed = 3;
+    DriveReply reply = 4;
+    // Server to client.
+    DriveAdded added = 5;
+    DriveRequest request = 6;
+    // Both ways.
+    DriveFragment fragment = 7;
+  }
+}
+
+message DriveFragment {
+  bytes part = 1;
+  bool last = 2;
+}
+
+// A drive of the client, to show in the guest. The client chooses the id.
+message DriveAnnounce {
+  uint32 id = 1;
+  // The client's name of the drive ("C").
+  string name = 2;
+  // The volume label shown in the guest ("C on PC-CLIENT").
+  string label = 3;
+}
+
+// The client's drive is gone.
+message DriveRemove {
+  uint32 id = 1;
+}
+
+// What became of an announced drive: the guest's drive letter ("Z"), or why it is not shown.
+message DriveAdded {
+  uint32 id = 1;
+  string letter = 2;
+  string error = 3;
+}
+
+// Changes made on the client drive, in order (FILE_NOTIFY_INFORMATION): the guest refreshes
+// what it shows. A client that cannot watch its drive sends none.
+message DriveChanged {
+  uint32 id = 1;
+  repeated DriveChange changes = 2;
+}
+
+message DriveChange {
+  // 1 added, 2 removed, 3 modified, 4 renamed (old name), 5 renamed (new name).
+  uint32 action = 1;
+  string path = 2;
+}
+
+// A file or directory.
+message DriveEntry {
+  // Its own name in a listing; the path's last component otherwise.
+  string name = 1;
+  // FILE_ATTRIBUTE_* flags (0x10: directory).
+  uint32 attributes = 2;
+  uint64 size = 3;
+  uint64 creation_time = 4;
+  uint64 last_access_time = 5;
+  uint64 last_write_time = 6;
+  uint64 change_time = 7;
+}
+
+// An operation of the guest on a client drive, as Windows makes it (IRP_MJ_*).
+message DriveRequest {
+  // Echoed in the reply.
+  uint32 request_id = 1;
+  uint32 drive_id = 2;
+  oneof operation {
+    DriveOpen open = 3;
+    DriveFile close = 4;
+    DriveRead read = 5;
+    DriveWrite write = 6;
+    DriveFile flush = 7;
+    DriveFile query = 8;
+    DriveSetBasic set_basic = 9;
+    DriveSetSize set_size = 10;
+    DriveSetDelete set_delete = 11;
+    DriveRename rename = 12;
+    DriveList list = 13;
+    DriveVolume volume = 14;
+  }
+}
+
+// IRP_MJ_CREATE, with the guest application's own parameters (NtCreateFile).
+message DriveOpen {
+  string path = 1;
+  uint32 desired_access = 2;
+  uint32 file_attributes = 3;
+  uint32 share_access = 4;
+  // FILE_OPEN 1, FILE_CREATE 2, FILE_OPEN_IF 3, FILE_OVERWRITE 4, FILE_OVERWRITE_IF 5,
+  // FILE_SUPERSEDE 0.
+  uint32 create_disposition = 5;
+  // FILE_DIRECTORY_FILE 0x1, FILE_NON_DIRECTORY_FILE 0x40...
+  uint32 create_options = 6;
+}
+
+// An open file, by the id the client gave it in its DriveOpened.
+message DriveFile {
+  uint32 file_id = 1;
+}
+
+// At most `length` bytes (1 MiB at most) from `offset`; fewer at the end, none past it.
+message DriveRead {
+  uint32 file_id = 1;
+  uint64 offset = 2;
+  uint32 length = 3;
+}
+
+// `data` (1 MiB at most) at `offset`.
+message DriveWrite {
+  uint32 file_id = 1;
+  uint64 offset = 2;
+  bytes data = 3;
+}
+
+// FileBasicInformation: attributes 0 and times 0 leave them as they are.
+message DriveSetBasic {
+  uint32 file_id = 1;
+  uint32 attributes = 2;
+  uint64 creation_time = 3;
+  uint64 last_access_time = 4;
+  uint64 last_write_time = 5;
+}
+
+// The end of file (FileEndOfFileInformation), or with `allocation` the allocation size.
+message DriveSetSize {
+  uint32 file_id = 1;
+  uint64 size = 2;
+  bool allocation = 3;
+}
+
+// Deleted when the file is closed, or not anymore (FileDispositionInformation). A non-empty
+// directory answers STATUS_DIRECTORY_NOT_EMPTY.
+message DriveSetDelete {
+  uint32 file_id = 1;
+  bool delete = 2;
+}
+
+// FileRenameInformation: `new_path` from the drive root; `replace` an existing one.
+message DriveRename {
+  uint32 file_id = 1;
+  string new_path = 2;
+  bool replace = 3;
+}
+
+// The entries of a directory, without "." and "..".
+message DriveList {
+  string path = 1;
+}
+
+// The volume: its size, free space for the user, label and file system.
+message DriveVolume {}
+
+// The client's answer to a DriveRequest.
+message DriveReply {
+  uint32 request_id = 1;
+  // NTSTATUS: 0 success.
+  uint32 status = 2;
+  oneof result {
+    DriveOpened opened = 3;
+    bytes data = 4;
+    uint32 written = 5;
+    DriveEntry entry = 6;
+    DriveListing listing = 7;
+    DriveVolumeInfo volume = 8;
+  }
+}
+
+message DriveOpened {
+  // The client's id for the open file, used by the requests that follow.
+  uint32 file_id = 1;
+  // What the client did: 0 superseded, 1 opened, 2 created, 3 overwritten.
+  uint32 information = 2;
+}
+
+message DriveListing {
+  repeated DriveEntry entries = 1;
+}
+
+message DriveVolumeInfo {
+  uint64 total_bytes = 1;
+  uint64 free_bytes = 2;
+  string label = 3;
+  // "NTFS"...
+  string file_system = 4;
+}

@@ -28,6 +28,7 @@ use std::sync::Arc;
 
 use crate::audio::Mic;
 use crate::clipboard::{Clipboard, ViewerClipboard, ViewerFollow};
+use crate::drives::{Drives, DrivesFollow, ViewerDrives};
 use crate::input::ViewerInput;
 use crate::pointer::{self, Pointer};
 use crate::session::{AudioViewers, Channel, Session, Signal, Viewers};
@@ -59,6 +60,7 @@ pub struct Shared {
     /// The guest pointer of the shown console.
     pub pointer: watch::Receiver<Pointer>,
     pub clipboard: Arc<Clipboard>,
+    pub drives: Arc<Drives>,
 }
 
 /// A certificate and its private key, PEM files.
@@ -183,17 +185,22 @@ async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
             let _ = requests.send(Request::Keyframe { console });
         },
     )?;
-    let mut input = ViewerInput::new(shared.input.clone());
-    let (mut clipboard, clip) = shared.clipboard.viewer();
+    let (clipboard, clip) = shared.clipboard.viewer();
+    let (drives, drives_follow) = shared.drives.viewer();
+    let mut state = ViewerState {
+        input: ViewerInput::new(shared.input.clone()),
+        clipboard,
+        drives,
+    };
     let ended = run(
         &mut socket,
         &session,
         &mut signals,
-        &mut input,
-        &mut clipboard,
+        &mut state,
         Follow {
             pointer: shared.pointer.clone(),
             clip,
+            drives: drives_follow,
         },
         || {
             let _ = shared.requests.send(Request::Keyframe {
@@ -204,15 +211,24 @@ async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
     .await;
     // Whatever ended the session, leave no key or button pressed in the guest, and the
     // clipboard to the guest.
-    input.release_all().await?;
-    clipboard.release().await?;
+    state.input.release_all().await?;
+    state.clipboard.release().await?;
+    state.drives.release().await;
     ended
+}
+
+/// What a viewer has of the guest: its keyboard and pointer, the clipboard, its drives.
+struct ViewerState {
+    input: ViewerInput,
+    clipboard: ViewerClipboard,
+    drives: ViewerDrives,
 }
 
 /// What a viewer follows besides its connection.
 struct Follow {
     pointer: watch::Receiver<Pointer>,
     clip: ViewerFollow,
+    drives: DrivesFollow,
 }
 
 fn send_all(session: &Session, channel: Channel, messages: Vec<Vec<u8>>) {
@@ -225,11 +241,15 @@ async fn run(
     socket: &mut WebSocket,
     session: &Session,
     signals: &mut mpsc::UnboundedReceiver<Signal>,
-    input: &mut ViewerInput,
-    clipboard: &mut ViewerClipboard,
+    state: &mut ViewerState,
     mut follow: Follow,
     keyframe: impl Fn(),
 ) -> Result<()> {
+    let ViewerState {
+        input,
+        clipboard,
+        drives,
+    } = state;
     // Pointer updates wait for the pointer channel to open.
     let mut sent: Option<pointer::Sent> = None;
     let mut reception = tokio::time::interval(std::time::Duration::from_secs(5));
@@ -261,6 +281,11 @@ async fn run(
                     Ok(_) => {}
                     Err(e) => warn!(error = %e, "undecodable control message"),
                 },
+                Some(Signal::Message(Channel::Drive, bytes)) => {
+                    if let Err(e) = drives.message(&bytes).await {
+                        warn!(error = %format!("{e:#}"), "drive");
+                    }
+                }
                 Some(Signal::Message(Channel::Pointer, _)) => {}
                 Some(Signal::Open(Channel::Pointer)) => {
                     let mut fresh = pointer::Sent::default();
@@ -271,7 +296,7 @@ async fn run(
                     let guest = follow.clip.guest.borrow_and_update().clone();
                     send_all(session, Channel::Clipboard, clipboard.opened(guest));
                 }
-                Some(Signal::Open(Channel::Input | Channel::Control)) => {}
+                Some(Signal::Open(Channel::Input | Channel::Control | Channel::Drive)) => {}
                 Some(Signal::Closed) | None => return Ok(()),
             },
             Ok(()) = follow.pointer.changed() => {
@@ -287,6 +312,8 @@ async fn run(
                 send_all(session, Channel::Clipboard, clipboard.host_call(call));
             }
             Some(message) = follow.clip.outgoing.recv() => session.send(Channel::Clipboard, message),
+            Some(call) = follow.drives.calls.recv() => send_all(session, Channel::Drive, drives.call(call)),
+            Some(message) = follow.drives.outgoing.recv() => session.send(Channel::Drive, message),
             message = receive(socket) => match message? {
                 Some(client_message::Message::Answer(SessionDescription { sdp })) => session.apply_answer(&sdp)?,
                 // An empty candidate marks the end of the client's candidates.

@@ -94,7 +94,10 @@ pc.ontrack = (event) => {
 const unmute = () => { video.muted = false; };
 window.addEventListener("pointerdown", unmute, { once: true });
 window.addEventListener("keydown", unmute, { once: true });
+// Every data channel, by its label: those the page uses, and the others, for debugging.
+const channels = {};
 pc.ondatachannel = ({ channel }) => {
+  channels[channel.label] = channel;
   channel.binaryType = "arraybuffer";
   if (channel.label === "input") input.channel = channel;
   if (channel.label === "pointer") channel.onmessage = (event) => pointerUpdate(new Uint8Array(event.data));

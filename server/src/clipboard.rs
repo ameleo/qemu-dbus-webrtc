@@ -27,13 +27,10 @@ use qdw_protocol::{FILE_LIST_MIME, MAX_CHUNK, MAX_CLIPBOARD, MAX_FILE_PIECE, Mes
 use qdw_qemu::agent::{self, ClipboardProxy, FileClipboardProxy, file_contents, mime};
 use qdw_qemu::files::{self, File};
 use tokio::sync::{mpsc, oneshot, watch};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 /// How long the guest waits for a viewer's data before giving up on a paste.
 const PASTE_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// How long before trying the agent again, when it went away.
-const AGENT_RETRY: Duration = Duration::from_secs(3);
 
 /// The types that go between the guest and the viewers: the agent's name, ours.
 const SHARED: [(&str, &str); 3] = [
@@ -168,49 +165,34 @@ impl Clipboard {
         }
     }
 
-    /// Keep a connection to the guest agent, and follow the guest clipboard. Runs until the
-    /// program ends; without an agent device on the VM, there is no clipboard.
-    pub async fn run_agent(self: Arc<Self>, vm: zbus::Connection) {
-        loop {
-            let host = |builder: zbus::connection::Builder<'static>| {
-                builder
-                    .serve_at(
-                        agent::HOST_PATH,
-                        HostClipboard {
-                            clipboard: self.clone(),
-                        },
-                    )?
-                    .serve_at(
-                        agent::HOST_PATH,
-                        HostFileClipboard {
-                            clipboard: self.clone(),
-                        },
-                    )
-            };
-            match agent::connect(&vm, host).await {
-                Ok(connection) => {
-                    info!("guest agent connected");
-                    if let Err(e) = self.follow(&connection).await {
-                        warn!(error = %format!("{e:#}"), "guest agent");
-                    }
-                    info!("guest agent gone");
-                    *self.agent.lock().unwrap() = None;
-                    self.guest.send_replace(Vec::new());
-                }
-                Err(e) => {
-                    let e = format!("{e:#}");
-                    if e.contains("no fr.ameleo.agent.0") {
-                        info!("no guest agent device on this VM: no clipboard");
-                        return;
-                    }
-                    warn!(error = %e, "guest agent not reachable");
-                }
-            }
-            tokio::time::sleep(AGENT_RETRY).await;
-        }
+    /// Add the interfaces the guest calls back for the clipboard to an agent connection.
+    pub fn serve(
+        self: &Arc<Self>,
+        builder: zbus::connection::Builder<'static>,
+    ) -> zbus::Result<zbus::connection::Builder<'static>> {
+        builder
+            .serve_at(
+                agent::HOST_PATH,
+                HostClipboard {
+                    clipboard: self.clone(),
+                },
+            )?
+            .serve_at(
+                agent::HOST_PATH,
+                HostFileClipboard {
+                    clipboard: self.clone(),
+                },
+            )
     }
 
-    async fn follow(&self, connection: &zbus::Connection) -> Result<()> {
+    /// The agent went away: no guest clipboard until it comes back.
+    pub fn detach(&self) {
+        *self.agent.lock().unwrap() = None;
+        self.guest.send_replace(Vec::new());
+    }
+
+    /// Follow the guest clipboard through the agent connection, until it closes.
+    pub async fn follow(&self, connection: &zbus::Connection) -> Result<()> {
         let clipboard = ClipboardProxy::new(connection).await?;
         let files = FileClipboardProxy::new(connection).await?;
         let mut grabbed = clipboard.receive_grabbed().await?;

@@ -110,7 +110,7 @@ Only channels with no patent listed in Microsoft's Open Specifications patent ma
 | Function | Format | Data channel | Browser | Native client (later) |
 |---|---|---|---|---|
 | Clipboard | project format, modelled on MS-RDPECLIP | `clipboard` | text, images (HTTPS) | full, files later |
-| Drives | MS-RDPEFS | `rdpdr` | a chosen folder (Chromium) | full |
+| Drives | project format, modelled on MS-RDPEFS | `drive` | no | full |
 | Printers | MS-RDPEPC, MS-RDPEXPS | `rdpdr` | no | yes |
 | Monitor layout, resize | MS-RDPEDISP | `disp` | yes | yes |
 | Smart cards | MS-RDPESC | `rdpdr` | no | yes |
@@ -133,8 +133,15 @@ Windows clipboard. A browser page cannot watch the local clipboard: it reads it 
 focus, and offers it to the guest if it changed; and browsers give the clipboard only to pages
 served in HTTPS (`--tls`) or from localhost.
 
-Only the channel crates of IronRDP are used: `ironrdp-rdpdr`,
-`ironrdp-displaycontrol` (and `ironrdp-rdpeusb` later), with their base crates. They do no I/O:
+Drives follow RDP's drive redirection: a client announces its drives, the Ameleo guest agent
+mounts each on a drive letter (with Dokany), and every file operation of a guest application
+comes to the client as it happens, with Windows' own parameters and the client's NTSTATUS in
+return; nothing of the client's files stays in the guest. The server refuses paths through `..`
+before asking the client, and removes a viewer's drives when it goes. A read or a write carries
+up to 1 MiB: larger than a data channel message, it goes in fragments.
+
+Only the channel crates of IronRDP are used: `ironrdp-displaycontrol` (and `ironrdp-rdpeusb`
+later), with their base crates. They do no I/O:
 bytes received on a data channel go in, the messages to send come out. The RDP server, connection
 and graphics crates are not needed: WebRTC provides the transport, security and media.
 

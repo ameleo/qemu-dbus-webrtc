@@ -6,6 +6,8 @@
 //! This crate holds the Rust types generated from it, with [`prost::Message`] to encode and
 //! decode them.
 
+pub mod drive;
+
 pub use prost::Message;
 
 /// Version 1 of the protocol (`package qdw.v1`).
@@ -27,6 +29,12 @@ pub const CLIPBOARD_CHANNEL: &str = "clipboard";
 
 /// The data channel of what the client wants of its session: [`v1::ControlMessage`] messages.
 pub const CONTROL_CHANNEL: &str = "control";
+
+/// The data channel of the client's drives, both ways: [`v1::DriveMessage`] messages.
+pub const DRIVE_CHANNEL: &str = "drive";
+
+/// The most a drive read or write carries: 1 MiB.
+pub const MAX_DRIVE_IO: u32 = 1024 * 1024;
 
 /// The largest data chunk of a [`v1::ClipboardData`] or [`v1::ClipboardFileData`]: 60 KiB.
 /// A data channel message is 64 KiB at most, whole, when the other side announces no larger

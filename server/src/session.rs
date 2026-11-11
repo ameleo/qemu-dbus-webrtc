@@ -22,7 +22,9 @@ use gstreamer_webrtc as gst_webrtc;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use qdw_protocol::{CLIPBOARD_CHANNEL, CONTROL_CHANNEL, INPUT_CHANNEL, POINTER_CHANNEL};
+use qdw_protocol::{
+    CLIPBOARD_CHANNEL, CONTROL_CHANNEL, DRIVE_CHANNEL, INPUT_CHANNEL, POINTER_CHANNEL,
+};
 use qdw_video::encode::Codec;
 
 use crate::audio::Mic;
@@ -60,10 +62,18 @@ pub enum Channel {
     Clipboard,
     /// What the client wants of its session, from the client.
     Control,
+    /// The client's drives, both ways.
+    Drive,
 }
 
 impl Channel {
-    const ALL: [Self; 4] = [Self::Input, Self::Pointer, Self::Clipboard, Self::Control];
+    const ALL: [Self; 5] = [
+        Self::Input,
+        Self::Pointer,
+        Self::Clipboard,
+        Self::Control,
+        Self::Drive,
+    ];
 
     fn label(self) -> &'static str {
         match self {
@@ -71,6 +81,7 @@ impl Channel {
             Self::Pointer => POINTER_CHANNEL,
             Self::Clipboard => CLIPBOARD_CHANNEL,
             Self::Control => CONTROL_CHANNEL,
+            Self::Drive => DRIVE_CHANNEL,
         }
     }
 }

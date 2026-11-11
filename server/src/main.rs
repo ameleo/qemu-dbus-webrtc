@@ -5,8 +5,10 @@
 //! For now (milestone 3), it attaches to a running VM, encodes each console with the host GPU,
 //! shows the first one in a browser over WebRTC, and can record the streams to files.
 
+mod agent;
 mod audio;
 mod clipboard;
+mod drives;
 mod input;
 mod pointer;
 mod session;
@@ -209,7 +211,12 @@ async fn main() -> Result<()> {
     let (pointer_tx, pointer_rx) = tokio::sync::watch::channel(pointer::Pointer::default());
     // The clipboard, through the guest agent, if the VM has one.
     let clipboard = clipboard::Clipboard::new();
-    tokio::spawn(clipboard.clone().run_agent(vm_connection.clone()));
+    let drives = drives::Drives::new();
+    tokio::spawn(agent::run(
+        vm_connection.clone(),
+        clipboard.clone(),
+        drives.clone(),
+    ));
     let shared = web::Shared {
         codec: args.settings.codec,
         full_chroma: args.settings.full_chroma,
@@ -221,6 +228,7 @@ async fn main() -> Result<()> {
         input: qdw_qemu::input::Input::new(&vm_connection, shown).await?,
         pointer: pointer_rx,
         clipboard: clipboard.clone(),
+        drives: drives.clone(),
     };
     if !args.listen.ip().is_loopback() {
         warn!(listen = %args.listen, "no authentication yet: anyone who reaches this address sees the VM");
