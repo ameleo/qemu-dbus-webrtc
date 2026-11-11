@@ -29,7 +29,7 @@ use std::sync::Arc;
 use crate::clipboard::{Clipboard, ViewerClipboard, ViewerFollow};
 use crate::input::ViewerInput;
 use crate::pointer::{self, Pointer};
-use crate::session::{Channel, Session, Signal, Viewers};
+use crate::session::{AudioViewers, Channel, Session, Signal, Viewers};
 
 const PAGE: &str = include_str!("../web/index.html");
 
@@ -46,6 +46,8 @@ pub struct Shared {
     /// The console shown to viewers, and its viewers.
     pub console: u32,
     pub viewers: Viewers,
+    /// The viewers of the guest's sound.
+    pub audio_viewers: AudioViewers,
     pub requests: mpsc::UnboundedSender<Request>,
     /// The keyboard and pointer of the shown console.
     pub input: qdw_qemu::input::Input,
@@ -161,6 +163,7 @@ async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
     let session = Session::start(
         shared.codec,
         shared.viewers.clone(),
+        shared.audio_viewers.clone(),
         signals_tx,
         move || {
             let _ = requests.send(Request::Keyframe { console });

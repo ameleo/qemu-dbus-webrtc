@@ -27,6 +27,9 @@ use qdw_video::encode::Codec;
 /// The payload type of the video. Fixed: there is one video stream for now.
 const VIDEO_PT: u32 = 96;
 
+/// The payload type of the sound: apart from the video's, which may grow to several screens.
+const AUDIO_PT: u32 = 111;
+
 /// What the session has to send to the browser.
 #[derive(Debug)]
 pub enum Signal {
@@ -69,6 +72,63 @@ impl Channel {
 /// The appsrcs of a console's current viewers, which its encoder feeds.
 pub type Viewers = Arc<Mutex<Vec<gst_app::AppSrc>>>;
 
+/// A viewer of the guest's sound, with the offset from the encoder's timestamps to its clock.
+pub struct AudioViewer {
+    src: gst_app::AppSrc,
+    offset: Option<i64>,
+}
+
+/// The current viewers of the guest's sound.
+pub type AudioViewers = Arc<Mutex<Vec<AudioViewer>>>;
+
+/// Send an encoded sound frame to every viewer. Unlike the video, the sound keeps the encoder's
+/// timestamps, moved once to each viewer's clock: they become the RTP timestamps, from which the
+/// receiver places the samples, and frames stamped on arrival come out of the encoder two at a
+/// time, nearly on the same stamp: the receiver took one of each pair for a duplicate and
+/// concealed half of the sound.
+pub fn fan_out_audio(viewers: &AudioViewers, frame: &gst::Buffer) {
+    let Some(pts) = frame.pts() else { return };
+    let pts = pts.nseconds() as i64;
+    for viewer in viewers.lock().unwrap().iter_mut() {
+        let Some(now) = viewer.src.current_running_time() else {
+            continue;
+        };
+        let offset = *viewer.offset.get_or_insert(now.nseconds() as i64 - pts);
+        let Ok(stamp) = u64::try_from(pts + offset) else {
+            continue;
+        };
+        let mut moved = frame.copy();
+        {
+            let moved = moved.get_mut().unwrap();
+            moved.set_pts(gst::ClockTime::from_nseconds(stamp));
+            moved.set_dts(gst::ClockTime::NONE);
+        }
+        let _ = viewer.src.push_buffer(moved);
+    }
+}
+
+/// Send an encoded frame to every viewer.
+pub fn fan_out(viewers: &Viewers, frame: &gst::Buffer) {
+    let viewers = viewers.lock().unwrap();
+    if viewers.is_empty() {
+        return;
+    }
+    // Each viewer's pipeline has its own clock, started when the viewer came: drop the
+    // encoder's timestamps so that its appsrc stamps the frame on arrival. Kept, they would be
+    // ahead of the viewer's clock by the time between the two starts, and the frame held back
+    // for that long.
+    let mut unstamped = frame.copy();
+    {
+        let unstamped = unstamped.get_mut().unwrap();
+        unstamped.set_pts(gst::ClockTime::NONE);
+        unstamped.set_dts(gst::ClockTime::NONE);
+    }
+    for viewer in viewers.iter() {
+        // A viewer that is going away refuses it; it is removed with its session.
+        let _ = viewer.push_buffer(unstamped.clone());
+    }
+}
+
 pub struct Session {
     pipeline: gst::Pipeline,
     webrtc: gst::Element,
@@ -76,14 +136,17 @@ pub struct Session {
     channels: Vec<gst_webrtc::WebRTCDataChannel>,
     src: gst_app::AppSrc,
     viewers: Viewers,
+    audio_src: gst_app::AppSrc,
+    audio_viewers: AudioViewers,
 }
 
 impl Session {
-    /// Start a session for a console's stream, encoded with `codec`. `keyframe` is called when
-    /// the browser needs a keyframe (a lost frame, or the start).
+    /// Start a session for a console's stream, encoded with `codec`, and the guest's sound.
+    /// `keyframe` is called when the client needs a keyframe (a lost frame, or the start).
     pub fn start(
         codec: Codec,
         viewers: Viewers,
+        audio_viewers: AudioViewers,
         signals: mpsc::UnboundedSender<Signal>,
         keyframe: impl Fn() + Send + Sync + 'static,
     ) -> Result<Self> {
@@ -94,13 +157,26 @@ impl Session {
              ! {payloader} pt={VIDEO_PT} mtu=1200 \
              ! application/x-rtp,media=video,encoding-name={encoding},payload={VIDEO_PT},clock-rate=90000,\
 rtcp-fb-nack-pli=(boolean)true \
-             ! capsfilter name=rtp",
+             ! capsfilter name=rtp \
+             appsrc name=audio is-live=true format=time caps={audio_caps} \
+             ! queue \
+             ! rtpopuspay pt={AUDIO_PT} \
+             ! application/x-rtp,media=audio,encoding-name=OPUS,payload={AUDIO_PT},clock-rate=48000 \
+             ! capsfilter name=audiortp",
             caps = codec.stream_caps(),
+            audio_caps = qdw_audio::STREAM_CAPS,
         );
         let pipeline = gst::parse::launch(&description)?
             .downcast::<gst::Pipeline>()
             .map_err(|_| anyhow!("not a pipeline"))?;
         let rtp = pipeline.by_name("rtp").context("no RTP capsfilter")?;
+        let audio_rtp = pipeline
+            .by_name("audiortp")
+            .context("no audio RTP capsfilter")?;
+        let audio_src = pipeline
+            .by_name("audio")
+            .and_then(|e| e.downcast::<gst_app::AppSrc>().ok())
+            .context("no audio appsrc")?;
         // webrtcbin is linked only once its signals are connected: linking it is what asks for
         // the negotiation.
         let webrtc = gst::ElementFactory::make("webrtcbin")
@@ -136,19 +212,24 @@ rtcp-fb-nack-pli=(boolean)true \
             let Ok(webrtc) = values[0].get::<gst::Element>() else {
                 return None;
             };
-            // The video transceiver, there by construction (see below).
-            let video = webrtc.emit_by_name::<Option<gst_webrtc::WebRTCRTPTransceiver>>(
-                "get-transceiver",
-                &[&0i32],
-            )?;
             if offered.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 return None;
             }
-            // Send only: the client receives the video.
-            video.set_property(
-                "direction",
-                gst_webrtc::WebRTCRTPTransceiverDirection::Sendonly,
-            );
+            // Send only: the client receives the video and the sound.
+            for index in 0.. {
+                let Some(transceiver) = webrtc
+                    .emit_by_name::<Option<gst_webrtc::WebRTCRTPTransceiver>>(
+                        "get-transceiver",
+                        &[&index],
+                    )
+                else {
+                    break;
+                };
+                transceiver.set_property(
+                    "direction",
+                    gst_webrtc::WebRTCRTPTransceiverDirection::Sendonly,
+                );
+            }
             let offers = offers.clone();
             let local = webrtc.clone();
             let promise = gst::Promise::with_change_func(move |reply| {
@@ -243,9 +324,11 @@ rtcp-fb-nack-pli=(boolean)true \
         });
 
         pipeline.add(&webrtc)?;
-        // The video first, then the data channels, which webrtcbin makes from READY on. It
-        // negotiates once caps arrive on the video, after PLAYING: one offer covers all three.
+        // The video and the sound first, then the data channels, which webrtcbin makes from
+        // READY on. It negotiates once caps arrive on both tracks, after PLAYING: one offer
+        // covers them all.
         rtp.link(&webrtc)?;
+        audio_rtp.link(&webrtc)?;
         pipeline.set_state(gst::State::Ready)?;
         let mut channels = Vec::new();
         for channel in Channel::ALL {
@@ -270,12 +353,18 @@ rtcp-fb-nack-pli=(boolean)true \
         }
         pipeline.set_state(gst::State::Playing)?;
         viewers.lock().unwrap().push(src.clone());
+        audio_viewers.lock().unwrap().push(AudioViewer {
+            src: audio_src.clone(),
+            offset: None,
+        });
         Ok(Self {
             pipeline,
             webrtc,
             channels,
             src,
             viewers,
+            audio_src,
+            audio_viewers,
         })
     }
 
@@ -321,6 +410,10 @@ rtcp-fb-nack-pli=(boolean)true \
 impl Drop for Session {
     fn drop(&mut self) {
         self.viewers.lock().unwrap().retain(|src| src != &self.src);
+        self.audio_viewers
+            .lock()
+            .unwrap()
+            .retain(|viewer| viewer.src != self.audio_src);
         let _ = self.pipeline.set_state(gst::State::Null);
     }
 }

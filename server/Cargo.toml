@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+qdw-audio.workspace = true
 qdw-protocol.workspace = true
 qdw-qemu.workspace = true
 qdw-video.workspace = true

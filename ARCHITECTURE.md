@@ -34,8 +34,9 @@ libvirt, plain QEMU) starts and stops it.
 | Directory | Crate | Role |
 |---|---|---|
 | `crates/protocol` | `qdw-protocol` | the `.proto` file and the Rust types generated from it |
-| `crates/qemu` | `qdw-qemu` | attachment to QEMU: QMP, the D-Bus display |
+| `crates/qemu` | `qdw-qemu` | attachment to QEMU: QMP, the D-Bus display and sound, the guest agent |
 | `crates/video` | `qdw-video` | hardware encoding of a framebuffer, recording |
+| `crates/audio` | `qdw-audio` | Opus encoding of the guest's sound |
 | `server` | `qemu-dbus-webrtc` | the server: viewer sessions, signalling, the browser page |
 
 A native client will sit next to them and share `qdw-protocol`.
@@ -81,7 +82,12 @@ so the conversion from the guest's RGB uses BT.601.
 > user's browser or operating system. Whether your deployment needs a patent license depends on
 > your use and jurisdiction; this is not legal advice.
 
-Audio is Opus.
+Audio is Opus, 128 kbit/s in 10 ms frames, encoded once for every viewer. A silent source keeps
+the stream going while the guest plays nothing: a WebRTC sender needs the audio to flow before
+it can make its offer. The samples are stamped by their count, not on arrival, and each viewer
+keeps the encoder's timestamps: they become the RTP timestamps, from which the receiver places
+the samples. Browsers play sound only after the user did something on the page: the page
+starts muted and unmutes on the first click or key.
 
 ## Devices: RDP channel formats over data channels
 

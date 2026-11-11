@@ -5,6 +5,7 @@
 //! For now (milestone 3), it attaches to a running VM, encodes each console with the host GPU,
 //! shows the first one in a browser over WebRTC, and can record the streams to files.
 
+mod audio;
 mod clipboard;
 mod input;
 mod pointer;
@@ -135,23 +136,7 @@ fn stream_sink(
     };
     Ok(move |frame: &gst::Buffer| {
         if let Some(viewers) = &viewers {
-            let viewers = viewers.lock().unwrap();
-            if !viewers.is_empty() {
-                // Each viewer's pipeline has its own clock, started when the viewer came: drop
-                // the encoder's timestamps so that its appsrc stamps the frame on arrival.
-                // Kept, they would be ahead of the viewer's clock by the time between the two
-                // starts, and the frame held back for that long.
-                let mut unstamped = frame.copy();
-                {
-                    let unstamped = unstamped.get_mut().unwrap();
-                    unstamped.set_pts(gst::ClockTime::NONE);
-                    unstamped.set_dts(gst::ClockTime::NONE);
-                }
-                for viewer in viewers.iter() {
-                    // A viewer that is going away refuses it; it is removed with its session.
-                    let _ = viewer.push_buffer(unstamped.clone());
-                }
-            }
+            session::fan_out(viewers, frame);
         }
         if let Some(r) = &mut recorder {
             let written = frame
@@ -218,6 +203,9 @@ async fn main() -> Result<()> {
     let shown = shown.context("the VM has no graphic console")?;
     let viewers: HashMap<u32, Viewers> = HashMap::from([(shown, Viewers::default())]);
     let (requests_tx, mut requests) = mpsc::unbounded_channel();
+    // The guest's sound, encoded once for every viewer.
+    let audio_viewers = session::AudioViewers::default();
+    let audio = audio::start(&vm_connection, audio_viewers.clone()).await?;
     let (pointer_tx, pointer_rx) = tokio::sync::watch::channel(pointer::Pointer::default());
     // The clipboard, through the guest agent, if the VM has one.
     let clipboard = clipboard::Clipboard::new();
@@ -226,6 +214,7 @@ async fn main() -> Result<()> {
         codec: args.settings.codec,
         console: shown,
         viewers: viewers[&shown].clone(),
+        audio_viewers: audio_viewers.clone(),
         requests: requests_tx,
         input: qdw_qemu::input::Input::new(&vm_connection, shown).await?,
         pointer: pointer_rx,
@@ -438,6 +427,7 @@ async fn main() -> Result<()> {
         encoder.finish();
     }
     drop(listeners);
+    drop(audio);
     Ok(())
 }
 

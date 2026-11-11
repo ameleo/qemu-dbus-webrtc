@@ -11,6 +11,7 @@ repository = "https://github.com/ameleo/qemu-dbus-webrtc"
 publish = false
 
 [workspace.dependencies]
+qdw-audio = { path = "crates/audio" }
 qdw-protocol = { path = "crates/protocol" }
 qdw-qemu = { path = "crates/qemu" }
 qdw-video = { path = "crates/video" }
@@ -21,6 +22,7 @@ axum-server = { version = "0.9", default-features = false, features = ["tls-rust
 gstreamer = "0.24"
 gstreamer-allocators = "0.24"
 gstreamer-app = "0.24"
+gstreamer-audio = "0.24"
 gstreamer-sdp = "0.24"
 gstreamer-video = "0.24"
 gstreamer-webrtc = "0.24"

@@ -1,0 +1,16 @@
+[package]
+name = "qdw-audio"
+description = "Opus encoding of the guest's sound"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+gstreamer.workspace = true
+gstreamer-app.workspace = true
+gstreamer-audio.workspace = true
+tracing.workspace = true

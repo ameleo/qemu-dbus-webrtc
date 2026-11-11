@@ -78,7 +78,16 @@ ws.binaryType = "arraybuffer";
 const pc = new RTCPeerConnection();
 const send = (bytes) => ws.send(new Uint8Array(bytes));
 
-pc.ontrack = (event) => { video.srcObject = event.streams[0] || new MediaStream([event.track]); };
+// The video and the sound play in one element. Browsers play sound only after the user did
+// something on the page: the element starts muted, and the first click or key unmutes it.
+const media = new MediaStream();
+pc.ontrack = (event) => {
+  media.addTrack(event.track);
+  if (video.srcObject !== media) video.srcObject = media;
+};
+const unmute = () => { video.muted = false; };
+window.addEventListener("pointerdown", unmute, { once: true });
+window.addEventListener("keydown", unmute, { once: true });
 pc.ondatachannel = ({ channel }) => {
   channel.binaryType = "arraybuffer";
   if (channel.label === "input") input.channel = channel;
