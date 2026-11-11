@@ -140,6 +140,15 @@ impl Codec {
     }
 }
 
+/// The rate control buffer, in kbit: half a second of the bitrate, which bounds the size of a
+/// frame. The encoders default to two seconds, which lets a keyframe outgrow the buffer that
+/// the VA encoders allocate for one frame (1.5 MB for AV1 at 3440x1440): the driver then writes
+/// past it, and GStreamer, which does not check for that, reads past it and crashes. A smaller
+/// buffer also keeps the bursts on the network short.
+fn cpb_size(bitrate: u32) -> u32 {
+    (bitrate / 2).max(1)
+}
+
 /// Encoder settings.
 #[derive(Debug, Clone)]
 pub struct Settings {
@@ -204,11 +213,12 @@ impl Encoder {
              ! queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 \
              ! vapostproc \
              ! video/x-raw(memory:VAMemory),format={raw},colorimetry=bt601 \
-             ! {encoder} name=encoder rate-control=cbr bitrate={bitrate} \
+             ! {encoder} name=encoder rate-control=cbr bitrate={bitrate} cpb-size={cpb} \
              ! {profile} \
              ! {parser} ! {stream_caps} \
              ! appsink name=sink sync=false",
             bitrate = settings.bitrate,
+            cpb = cpb_size(settings.bitrate),
             parser = settings.codec.parser().0,
             stream_caps = settings.codec.stream_caps(),
         );
