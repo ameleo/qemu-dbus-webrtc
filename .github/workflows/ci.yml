@@ -13,6 +13,11 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+      - name: GStreamer development files
+        if: hashFiles('Cargo.toml') != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
       - name: Format
         if: hashFiles('Cargo.toml') != ''
         run: cargo fmt --all -- --check

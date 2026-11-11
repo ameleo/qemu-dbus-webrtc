@@ -97,7 +97,7 @@ pub enum DisplayEvent {
         data: Vec<u8>,
     },
     /// Part of the shared-memory framebuffer changed.
-    /// Its pixels are not kept until there is an encoder (milestone 2).
+    /// Its pixels are not kept: only DMA-BUF scanouts are encoded.
     Update {
         console: u32,
         x: i32,
@@ -145,8 +145,7 @@ pub enum DisplayEvent {
 
 #[derive(Debug)]
 pub struct Plane {
-    #[expect(dead_code, reason = "imported into the encoder in milestone 2")]
-    pub fd: OwnedFd,
+    pub fd: std::os::fd::OwnedFd,
     pub offset: u32,
     pub stride: u32,
 }
@@ -164,7 +163,9 @@ impl Listener {
     }
 }
 
-#[zbus::interface(name = "org.qemu.Display1.Listener")]
+// Calls are handled one at a time, in the order QEMU sends them: a scanout must not overtake
+// the one before it, nor the updates that follow it.
+#[zbus::interface(name = "org.qemu.Display1.Listener", spawn = false)]
 impl Listener {
     async fn scanout(
         &self,
@@ -217,7 +218,7 @@ impl Listener {
         y0_top: bool,
     ) {
         let planes = vec![Plane {
-            fd: dmabuf,
+            fd: dmabuf.into(),
             offset: 0,
             stride,
         }];
@@ -283,7 +284,7 @@ struct ScanoutDmabuf2 {
     events: mpsc::UnboundedSender<DisplayEvent>,
 }
 
-#[zbus::interface(name = "org.qemu.Display1.Listener.Unix.ScanoutDMABUF2")]
+#[zbus::interface(name = "org.qemu.Display1.Listener.Unix.ScanoutDMABUF2", spawn = false)]
 impl ScanoutDmabuf2 {
     #[zbus(name = "ScanoutDMABUF2")]
     #[allow(clippy::too_many_arguments)]
@@ -308,7 +309,11 @@ impl ScanoutDmabuf2 {
             .zip(offset)
             .zip(stride)
             .take(num_planes as usize)
-            .map(|((fd, offset), stride)| Plane { fd, offset, stride })
+            .map(|((fd, offset), stride)| Plane {
+                fd: fd.into(),
+                offset,
+                stride,
+            })
             .collect();
         let _ = self.events.send(DisplayEvent::ScanoutDmabuf {
             console: self.console,

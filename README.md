@@ -17,8 +17,8 @@ welcome, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Design
 
-See [ARCHITECTURE.md](ARCHITECTURE.md): WebRTC through GStreamer `webrtcbin`, HEVC by default
-(see the note on patent royalties there), and the device redirection formats of the Remote
+See [ARCHITECTURE.md](ARCHITECTURE.md): WebRTC through GStreamer `webrtcbin`, royalty-free AV1
+by default and VP9 4:4:4 for sharp coloured text, and the device redirection formats of the Remote
 Desktop Protocol carried over WebRTC data channels.
 
 ## License

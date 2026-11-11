@@ -2,7 +2,7 @@
 name = "qemu-dbus-webrtc"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MPL-2.0"
 description = "WebRTC console for QEMU virtual machines through QEMU's D-Bus display"
 repository = "https://github.com/ameleo/qemu-dbus-webrtc"
@@ -10,7 +10,11 @@ publish = false
 
 [dependencies]
 anyhow = "1"
-rustix = { version = "1", features = ["net"] }
+gstreamer = "0.24"
+gstreamer-allocators = "0.24"
+gstreamer-app = "0.24"
+gstreamer-video = "0.24"
+rustix = { version = "1", features = ["fs", "net"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1"
