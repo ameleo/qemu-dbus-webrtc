@@ -24,6 +24,7 @@ use tracing::{debug, info, warn};
 
 use qdw_protocol::{
     CLIPBOARD_CHANNEL, CONTROL_CHANNEL, DRIVE_CHANNEL, INPUT_CHANNEL, POINTER_CHANNEL,
+    PRINTER_CHANNEL,
 };
 use qdw_video::encode::Codec;
 
@@ -64,15 +65,18 @@ pub enum Channel {
     Control,
     /// The client's drives, both ways.
     Drive,
+    /// The client's printers, both ways.
+    Printer,
 }
 
 impl Channel {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Input,
         Self::Pointer,
         Self::Clipboard,
         Self::Control,
         Self::Drive,
+        Self::Printer,
     ];
 
     fn label(self) -> &'static str {
@@ -82,6 +86,7 @@ impl Channel {
             Self::Clipboard => CLIPBOARD_CHANNEL,
             Self::Control => CONTROL_CHANNEL,
             Self::Drive => DRIVE_CHANNEL,
+            Self::Printer => PRINTER_CHANNEL,
         }
     }
 }

@@ -483,3 +483,132 @@ message DriveVolumeInfo {
   // "NTFS"...
   string file_system = 4;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Data channel "printer", both ways, reliable and ordered: one PrinterMessage per message.
+//
+// Client printers shown in the guest as Windows printers, as RDP redirects printers (Easy
+// Print, MS-RDPEPC and MS-RDPEXPS): the guest prints to them as to any printer, and every job
+// comes to the client, which prints it on its own printer. The client announces its printers
+// with what their driver can do (PrintCapabilities) and its settings (PrintTicket), both Print
+// Schema XML as Windows' PrintTicket API gives them; the guest shows the same options.
+//
+// Jobs come as PrinterJob, PrinterJobData for each piece in order, then PrinterJobEnd; or
+// PrinterJobAbort at any time, when the guest cancels the job. A job's document is OpenXPS
+// (`application/oxps`) with the job's PrintTicket inside, for the client's driver: print it as
+// it is (XPS Print API). The client acknowledges each piece it took (PrinterJobAck): the
+// server keeps at most PRINTER_WINDOW (1 MiB) unacknowledged; and tells when it has the whole
+// job (PrinterJobDone), with an error if it could not print it.
+//
+// A message larger than a data channel takes (a piece of a job, capabilities or tickets of up
+// to 4 MiB) goes as PrinterFragment messages, as for the drives.
+
+message PrinterMessage {
+  oneof message {
+    // Client to server.
+    PrinterAnnounce announce = 1;
+    PrinterRemove remove = 2;
+    PrinterJobAck job_ack = 3;
+    PrinterJobDone job_done = 4;
+    PrinterPropertiesDone properties_done = 5;
+    // Server to client.
+    PrinterAdded added = 6;
+    PrinterJob job = 7;
+    PrinterJobData job_data = 8;
+    PrinterJobEnd job_end = 9;
+    PrinterJobAbort job_abort = 10;
+    PrinterProperties properties = 11;
+    // Both ways.
+    PrinterFragment fragment = 12;
+  }
+}
+
+message PrinterFragment {
+  bytes part = 1;
+  bool last = 2;
+}
+
+// A printer of the client, to show in the guest. The client chooses the id.
+message PrinterAnnounce {
+  uint32 id = 1;
+  // Shown in the guest.
+  string name = 2;
+  // The client's default printer: made the default printer in the guest.
+  bool is_default = 3;
+  // The driver's PrintCapabilities XML; empty: the guest printer has generic options only.
+  string capabilities = 4;
+  // The PrintTicket of the printer's default settings (the user's printing preferences on the
+  // client): the guest printer's defaults. Empty: the guest guesses them.
+  string default_ticket = 5;
+}
+
+// The client's printer is gone.
+message PrinterRemove {
+  uint32 id = 1;
+}
+
+// What became of an announced printer: empty error when the guest installs it (at once, or
+// when its user logs on).
+message PrinterAdded {
+  uint32 id = 1;
+  string error = 2;
+}
+
+// A job begins on printer `printer_id`. The server chooses the job id.
+message PrinterJob {
+  uint32 job_id = 1;
+  uint32 printer_id = 2;
+  // The document's media type: "application/oxps".
+  string document_format = 3;
+  // As the guest application and user gave them; may be empty.
+  string job_name = 4;
+  string user_name = 5;
+  // The job's settings, for the client's driver; the document carries them already
+  // (Metadata/Job_PT.xml): given for information.
+  string print_ticket = 6;
+}
+
+// The next piece of a job's document.
+message PrinterJobData {
+  uint32 job_id = 1;
+  bytes data = 2;
+}
+
+// The client took `bytes` more bytes of the job.
+message PrinterJobAck {
+  uint32 job_id = 1;
+  uint32 bytes = 2;
+}
+
+// The whole document was sent.
+message PrinterJobEnd {
+  uint32 job_id = 1;
+}
+
+// The guest cancelled the job: drop it.
+message PrinterJobAbort {
+  uint32 job_id = 1;
+}
+
+// The client has the whole job and handed it to its printer, or could not (`error`).
+message PrinterJobDone {
+  uint32 job_id = 1;
+  string error = 2;
+}
+
+// Show the driver's own document properties dialog of printer `printer_id`, starting from
+// `print_ticket` (the guest printer's current settings: the ticket the user chose last, whose
+// PageDevmodeSnapshot, in the driver's namespace, is the DEVMODE to start the dialog from).
+// The user may keep the dialog open as long as they like.
+message PrinterProperties {
+  uint32 request_id = 1;
+  uint32 printer_id = 2;
+  string print_ticket = 3;
+}
+
+// The dialog was closed: the PrintTicket the user chose, or `cancelled`.
+message PrinterPropertiesDone {
+  uint32 request_id = 1;
+  string print_ticket = 2;
+  bool cancelled = 3;
+}

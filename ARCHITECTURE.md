@@ -111,7 +111,7 @@ Only channels with no patent listed in Microsoft's Open Specifications patent ma
 |---|---|---|---|---|
 | Clipboard | project format, modelled on MS-RDPECLIP | `clipboard` | text, images (HTTPS) | full, files later |
 | Drives | project format, modelled on MS-RDPEFS | `drive` | no | full |
-| Printers | MS-RDPEPC, MS-RDPEXPS | `rdpdr` | no | yes |
+| Printers | project format, modelled on MS-RDPEPC and MS-RDPEXPS | `printer` | no | full |
 | Monitor layout, resize | MS-RDPEDISP | `disp` | yes | yes |
 | Smart cards | MS-RDPESC | `rdpdr` | no | yes |
 | USB | MS-RDPEUSB | `urbdrc` | no | yes |
@@ -139,6 +139,15 @@ comes to the client as it happens, with Windows' own parameters and the client's
 return; nothing of the client's files stays in the guest. The server refuses paths through `..`
 before asking the client, and removes a viewer's drives when it goes. A read or a write carries
 up to 1 MiB: larger than a data channel message, it goes in fragments.
+
+Printers follow RDP's Easy Print: a client announces its printers with their driver's
+PrintCapabilities and default PrintTicket (Print Schema XML, as Windows' PrintTicket API gives
+them), and the Ameleo guest agent makes each a virtual printer of its Print Support App, with
+the same options, on Windows' inbox driver. A guest job comes to the client as it is printed:
+OpenXPS with its PrintTicket inside, for the client's own driver, sent a window of 1 MiB ahead
+of the client's acknowledgements; the guest learns whether the client could print it. The
+driver's own settings dialog opens on the client, and the guest keeps what the user chose
+there. Capabilities, tickets and pieces of a job go in fragments, as drive reads do.
 
 Only the channel crates of IronRDP are used: `ironrdp-displaycontrol` (and `ironrdp-rdpeusb`
 later), with their base crates. They do no I/O:

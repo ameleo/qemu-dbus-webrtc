@@ -11,6 +11,7 @@ mod clipboard;
 mod drives;
 mod input;
 mod pointer;
+mod printers;
 mod session;
 mod web;
 
@@ -212,10 +213,12 @@ async fn main() -> Result<()> {
     // The clipboard, through the guest agent, if the VM has one.
     let clipboard = clipboard::Clipboard::new();
     let drives = drives::Drives::new();
+    let printers = printers::Printers::new();
     tokio::spawn(agent::run(
         vm_connection.clone(),
         clipboard.clone(),
         drives.clone(),
+        printers.clone(),
     ));
     let shared = web::Shared {
         codec: args.settings.codec,
@@ -229,6 +232,7 @@ async fn main() -> Result<()> {
         pointer: pointer_rx,
         clipboard: clipboard.clone(),
         drives: drives.clone(),
+        printers: printers.clone(),
     };
     if !args.listen.ip().is_loopback() {
         warn!(listen = %args.listen, "no authentication yet: anyone who reaches this address sees the VM");

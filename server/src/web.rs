@@ -31,6 +31,7 @@ use crate::clipboard::{Clipboard, ViewerClipboard, ViewerFollow};
 use crate::drives::{Drives, DrivesFollow, ViewerDrives};
 use crate::input::ViewerInput;
 use crate::pointer::{self, Pointer};
+use crate::printers::{Printers, PrintersFollow, ViewerPrinters};
 use crate::session::{AudioViewers, Channel, Session, Signal, Viewers};
 
 const PAGE: &str = include_str!("../web/index.html");
@@ -61,6 +62,7 @@ pub struct Shared {
     pub pointer: watch::Receiver<Pointer>,
     pub clipboard: Arc<Clipboard>,
     pub drives: Arc<Drives>,
+    pub printers: Arc<Printers>,
 }
 
 /// A certificate and its private key, PEM files.
@@ -187,10 +189,12 @@ async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
     )?;
     let (clipboard, clip) = shared.clipboard.viewer();
     let (drives, drives_follow) = shared.drives.viewer();
+    let (printers, printers_follow) = shared.printers.viewer();
     let mut state = ViewerState {
         input: ViewerInput::new(shared.input.clone()),
         clipboard,
         drives,
+        printers,
     };
     let ended = run(
         &mut socket,
@@ -201,6 +205,7 @@ async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
             pointer: shared.pointer.clone(),
             clip,
             drives: drives_follow,
+            printers: printers_follow,
         },
         || {
             let _ = shared.requests.send(Request::Keyframe {
@@ -214,14 +219,17 @@ async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
     state.input.release_all().await?;
     state.clipboard.release().await?;
     state.drives.release().await;
+    state.printers.release().await;
     ended
 }
 
-/// What a viewer has of the guest: its keyboard and pointer, the clipboard, its drives.
+/// What a viewer has of the guest: its keyboard and pointer, the clipboard, its drives and
+/// printers.
 struct ViewerState {
     input: ViewerInput,
     clipboard: ViewerClipboard,
     drives: ViewerDrives,
+    printers: ViewerPrinters,
 }
 
 /// What a viewer follows besides its connection.
@@ -229,6 +237,7 @@ struct Follow {
     pointer: watch::Receiver<Pointer>,
     clip: ViewerFollow,
     drives: DrivesFollow,
+    printers: PrintersFollow,
 }
 
 fn send_all(session: &Session, channel: Channel, messages: Vec<Vec<u8>>) {
@@ -249,6 +258,7 @@ async fn run(
         input,
         clipboard,
         drives,
+        printers,
     } = state;
     // Pointer updates wait for the pointer channel to open.
     let mut sent: Option<pointer::Sent> = None;
@@ -286,6 +296,11 @@ async fn run(
                         warn!(error = %format!("{e:#}"), "drive");
                     }
                 }
+                Some(Signal::Message(Channel::Printer, bytes)) => {
+                    if let Err(e) = printers.message(&bytes).await {
+                        warn!(error = %format!("{e:#}"), "printer");
+                    }
+                }
                 Some(Signal::Message(Channel::Pointer, _)) => {}
                 Some(Signal::Open(Channel::Pointer)) => {
                     let mut fresh = pointer::Sent::default();
@@ -296,7 +311,7 @@ async fn run(
                     let guest = follow.clip.guest.borrow_and_update().clone();
                     send_all(session, Channel::Clipboard, clipboard.opened(guest));
                 }
-                Some(Signal::Open(Channel::Input | Channel::Control | Channel::Drive)) => {}
+                Some(Signal::Open(Channel::Input | Channel::Control | Channel::Drive | Channel::Printer)) => {}
                 Some(Signal::Closed) | None => return Ok(()),
             },
             Ok(()) = follow.pointer.changed() => {
@@ -314,6 +329,8 @@ async fn run(
             Some(message) = follow.clip.outgoing.recv() => session.send(Channel::Clipboard, message),
             Some(call) = follow.drives.calls.recv() => send_all(session, Channel::Drive, drives.call(call)),
             Some(message) = follow.drives.outgoing.recv() => session.send(Channel::Drive, message),
+            Some(call) = follow.printers.calls.recv() => send_all(session, Channel::Printer, printers.call(call)),
+            Some(message) = follow.printers.outgoing.recv() => session.send(Channel::Printer, message),
             message = receive(socket) => match message? {
                 Some(client_message::Message::Answer(SessionDescription { sdp })) => session.apply_answer(&sdp)?,
                 // An empty candidate marks the end of the client's candidates.

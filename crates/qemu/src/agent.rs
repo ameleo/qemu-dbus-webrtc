@@ -8,7 +8,7 @@
 //! interfaces at `/fr/ameleo/Agent`, we export ours at `/fr/ameleo/Host`.
 //!
 //! Only what this program uses of the agent's contract is declared here: the core interface,
-//! the clipboard (files included) and the client drives.
+//! the clipboard (files included), the client drives and the client printers.
 
 use std::os::unix::net::UnixStream as StdUnixStream;
 
@@ -135,6 +135,45 @@ pub mod drive {
     /// A file or directory: `(name, attributes, size, creation_time, last_access_time,
     /// last_write_time, change_time)`, times as FILETIME.
     pub type Entry = (String, u32, u64, u64, u64, u64, u64);
+}
+
+/// Client printers shown in the guest as Windows printers (RDP Easy Print): virtual printers
+/// of the guest's Print Support App, which hands each job to the host as OpenXPS
+/// (`fr.ameleo.Host.Printer1`). Ids are chosen by the host.
+#[zbus::proxy(
+    interface = "fr.ameleo.Agent.Printer1",
+    default_service = "fr.ameleo.Agent",
+    default_path = "/fr/ameleo/Agent"
+)]
+pub trait Printer {
+    /// `capabilities`: the client driver's PrintCapabilities XML; `default_ticket`: the
+    /// PrintTicket of its default settings. Either may be empty. Returns at once; the guest
+    /// installs the printer for the logged on user, at once or when the user logs on.
+    fn add_printer(
+        &self,
+        id: u32,
+        name: &str,
+        is_default: bool,
+        capabilities: &str,
+        default_ticket: &str,
+    ) -> zbus::Result<()>;
+    fn remove_printer(&self, id: u32) -> zbus::Result<()>;
+    /// Answer to `Host.Printer1.DocumentProperties`: the PrintTicket the user chose in the
+    /// client driver's dialog, or `cancelled`.
+    fn document_properties_done(
+        &self,
+        request_id: u32,
+        print_ticket: &str,
+        cancelled: bool,
+    ) -> zbus::Result<()>;
+}
+
+/// Printer limits of the agent's contract.
+pub mod printer {
+    /// Client printers shown at the same time.
+    pub const MAX_PRINTERS: usize = 32;
+    /// Largest PrintCapabilities or PrintTicket, in bytes.
+    pub const MAX_XML: usize = 4 * 1024 * 1024;
 }
 
 /// Connect to the guest agent. `host` adds our interfaces (the calls the guest makes) to the

@@ -7,6 +7,8 @@
 //! decode them.
 
 pub mod drive;
+pub mod fragment;
+pub mod printer;
 
 pub use prost::Message;
 
@@ -32,6 +34,13 @@ pub const CONTROL_CHANNEL: &str = "control";
 
 /// The data channel of the client's drives, both ways: [`v1::DriveMessage`] messages.
 pub const DRIVE_CHANNEL: &str = "drive";
+
+/// The data channel of the client's printers, both ways: [`v1::PrinterMessage`] messages.
+pub const PRINTER_CHANNEL: &str = "printer";
+
+/// The most bytes of a print job the server sends before the client acknowledges them:
+/// 1 MiB.
+pub const PRINTER_WINDOW: u32 = 1024 * 1024;
 
 /// The most a drive read or write carries: 1 MiB.
 pub const MAX_DRIVE_IO: u32 = 1024 * 1024;
