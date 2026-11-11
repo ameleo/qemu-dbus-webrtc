@@ -18,8 +18,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{info, warn};
 
 use qdw_protocol::v1::{
-    ClientMessage, ControlMessage, Error, Hello, IceCandidate, Input, MonitorLayout, ServerMessage,
-    SessionDescription, VideoPause, client_message, control_message, server_message,
+    BandwidthEstimate, ClientMessage, ControlMessage, Error, Hello, IceCandidate, Input,
+    MonitorLayout, ServerMessage, SessionDescription, VideoPause, client_message, control_message,
+    server_message,
 };
 use qdw_protocol::{Message, SIGNALLING_PATH};
 use qdw_video::encode::Codec;
@@ -33,7 +34,7 @@ use crate::input::ViewerInput;
 use crate::layout::{Layout, Size};
 use crate::pointer::{self, Pointer};
 use crate::printers::{Printers, PrintersFollow, ViewerPrinters};
-use crate::session::{AudioViewers, Channel, Session, Signal, Viewers};
+use crate::session::{AudioViewers, Bitrates, Channel, Session, Signal, Viewers};
 
 const PAGE: &str = include_str!("../web/index.html");
 
@@ -42,6 +43,8 @@ const PAGE: &str = include_str!("../web/index.html");
 pub enum Request {
     /// The viewer needs a keyframe of this console.
     Keyframe { console: u32 },
+    /// The user's connection takes this video bitrate, in kbit/s.
+    Bitrate { console: u32, bitrate: u32 },
 }
 
 #[derive(Clone)]
@@ -68,6 +71,8 @@ pub struct Shared {
     pub layout: Arc<Layout>,
     /// The user of the session.
     pub user: Arc<User>,
+    /// The bounds of the bandwidth estimation.
+    pub bitrates: Bitrates,
 }
 
 /// The one client that uses the session; the others are shadow clients, which only watch.
@@ -219,6 +224,7 @@ async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
         shared.viewers.clone(),
         shared.audio_viewers.clone(),
         (!shadow).then(|| shared.mic.clone()),
+        shared.bitrates,
         signals_tx,
         move || {
             let _ = requests.send(Request::Keyframe { console });
@@ -248,12 +254,7 @@ async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
             printers: printers_follow,
             taken_over,
         },
-        &shared.layout,
-        || {
-            let _ = shared.requests.send(Request::Keyframe {
-                console: shared.console,
-            });
-        },
+        &shared,
     )
     .await;
     // Whatever ended the session, leave no key or button pressed in the guest, and the
@@ -266,6 +267,17 @@ async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
         shared.user.leave(id);
     }
     ended
+}
+
+/// The client hears of the bandwidth estimate at most this often.
+const ESTIMATE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The sound's share of a connection, in kbit/s: Opus at 128 kbit/s, with its packet headers.
+const AUDIO_BITRATE: u32 = 150;
+
+/// The video bitrate for a bandwidth estimate, in kbit/s: what the sound leaves.
+fn video_bitrate(estimate: u32) -> u32 {
+    estimate.saturating_sub(AUDIO_BITRATE).max(1)
 }
 
 /// What a viewer has of the guest: its keyboard and pointer, the clipboard, its drives and
@@ -299,9 +311,14 @@ async fn run(
     signals: &mut mpsc::UnboundedReceiver<Signal>,
     state: &mut ViewerState,
     mut follow: Follow,
-    layout: &Layout,
-    keyframe: impl Fn(),
+    shared: &Shared,
 ) -> Result<()> {
+    let console = shared.console;
+    let keyframe = || {
+        let _ = shared.requests.send(Request::Keyframe { console });
+    };
+    // The last estimate sent to the client, and when.
+    let mut estimate_sent: Option<(std::time::Instant, u32)> = None;
     // A shadow client only watches: what it sends to the guest is ignored, and it gets nothing
     // of the guest's clipboard.
     let taken_over = follow.taken_over.take();
@@ -358,7 +375,7 @@ async fn run(
                     }
                     Ok(ControlMessage { message: Some(control_message::Message::MonitorLayout(MonitorLayout { monitors })) }) => {
                         if user && let Some(size) = monitors.first().and_then(Size::of) {
-                            layout.want(size);
+                            shared.layout.want(size);
                         }
                     }
                     Ok(_) => {}
@@ -386,6 +403,28 @@ async fn run(
                     send_all(session, Channel::Clipboard, clipboard.opened(guest));
                 }
                 Some(Signal::Open(Channel::Input | Channel::Control | Channel::Drive | Channel::Printer)) => {}
+                Some(Signal::Estimate(estimate)) => {
+                    // The user's bandwidth sets the bitrate of the video, which all viewers
+                    // share: a shadow client on a slower connection gets what it can.
+                    if user {
+                        let _ = shared.requests.send(Request::Bitrate {
+                            console,
+                            bitrate: video_bitrate(estimate),
+                        });
+                    }
+                    let due = estimate_sent.is_none_or(|(at, sent)| {
+                        sent != estimate && at.elapsed() >= ESTIMATE_INTERVAL
+                    });
+                    if due {
+                        estimate_sent = Some((std::time::Instant::now(), estimate));
+                        let message = ControlMessage {
+                            message: Some(control_message::Message::BandwidthEstimate(
+                                BandwidthEstimate { kbps: estimate },
+                            )),
+                        };
+                        session.send(Channel::Control, message.encode_to_vec());
+                    }
+                }
                 Some(Signal::Closed) | None => return Ok(()),
             },
             Ok(()) = follow.pointer.changed() => {

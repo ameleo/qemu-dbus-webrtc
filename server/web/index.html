@@ -109,6 +109,11 @@ pc.ondatachannel = ({ channel }) => {
   if (channel.label === "control") {
     control.channel = channel;
     channel.onopen = () => { control.videoPause(); control.layout(); };
+    // ControlMessage: bandwidth_estimate = 3; BandwidthEstimate: kbps = 1.
+    channel.onmessage = (event) => {
+      const message = pb.parse(new Uint8Array(event.data));
+      if (message.has(3)) control.estimate = uint(pb.parse(message.get(3)[0]), 1);
+    };
   }
   if (channel.label === "clipboard") {
     clip.channel = channel;
@@ -446,6 +451,8 @@ micButton.addEventListener("click", async () => {
 // shows again. The sound goes on. ControlMessage: video_pause = 1; VideoPause: paused = 1.
 const control = {
   channel: null,
+  // The server's estimate of the bandwidth to this page, in kbit/s.
+  estimate: null,
   videoPause() {
     if (this.channel?.readyState !== "open") return;
     const paused = document.hidden;
@@ -467,14 +474,15 @@ control.layout = function () {
 window.addEventListener("resize", () => control.layout());
 
 // Once a second: what is decoded, and how well.
-let last = null;
+let last = null, lastAudio = null;
 setInterval(async () => {
   if (stats.className === "error") return;
   const report = await pc.getStats();
-  let inbound = null;
+  let inbound = null, audio = null;
   const codecs = new Map();
   report.forEach((s) => {
     if (s.type === "inbound-rtp" && s.kind === "video") inbound = s;
+    if (s.type === "inbound-rtp" && s.kind === "audio") audio = s;
     if (s.type === "codec") codecs.set(s.id, s);
   });
   if (!inbound) { stats.textContent = `connection: ${pc.connectionState}`; return; }
@@ -482,14 +490,29 @@ setInterval(async () => {
   let kbps = 0;
   if (last) kbps = (8 * (inbound.bytesReceived - last.bytesReceived)) / (inbound.timestamp - last.timestamp);
   last = inbound;
+  // The sound over the last second: the share of samples the browser made up for packets
+  // late or lost, and how long its jitter buffer holds them.
+  let sound = "sound    -";
+  if (audio && lastAudio) {
+    const samples = audio.totalSamplesReceived - lastAudio.totalSamplesReceived;
+    const concealed = audio.concealedSamples - lastAudio.concealedSamples;
+    const emitted = audio.jitterBufferEmittedCount - lastAudio.jitterBufferEmittedCount;
+    const held = audio.jitterBufferDelay - lastAudio.jitterBufferDelay;
+    sound = `sound    jitter ${((audio.jitter || 0) * 1000).toFixed(1)} ms, `
+      + `concealed ${samples > 0 ? ((100 * concealed) / samples).toFixed(1) : "0.0"} %, `
+      + `buffer ${emitted > 0 ? ((1000 * held) / emitted).toFixed(0) : "?"} ms, `
+      + `lost ${audio.packetsLost || 0}`;
+  }
+  lastAudio = audio;
   stats.textContent = [
     `codec    ${codec ? codec.mimeType + (codec.sdpFmtpLine ? " " + codec.sdpFmtpLine : "") : "?"}`,
     `decoder  ${inbound.decoderImplementation || "?"}${inbound.powerEfficientDecoder ? " (hardware)" : ""}`,
     `size     ${inbound.frameWidth || 0}x${inbound.frameHeight || 0}`,
     `fps      ${(inbound.framesPerSecond || 0).toFixed(0)}`,
-    `bitrate  ${kbps.toFixed(0)} kbit/s`,
+    `bitrate  ${kbps.toFixed(0)} kbit/s, estimate ${control.estimate ?? "?"} kbit/s`,
     `lost     ${inbound.packetsLost || 0} packets, ${inbound.pliCount || 0} PLI, ${inbound.freezeCount || 0} freezes`,
     `jitter   ${((inbound.jitter || 0) * 1000).toFixed(1)} ms`,
+    sound,
   ].join("\n");
 }, 1000);
 </script>

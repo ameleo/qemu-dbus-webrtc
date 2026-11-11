@@ -386,6 +386,16 @@ impl Encoder {
         self.frame()
     }
 
+    /// Change the target bitrate, in kbit/s, and the rate control buffer with it. The VA
+    /// encoders of GStreamer 1.26 reconfigure for it, which resets the GOP and costs a
+    /// keyframe; patched (the `.daas` build), they take it with the next frame.
+    pub fn set_bitrate(&self, bitrate: u32) {
+        if let Some(encoder) = self.pipeline.by_name("encoder") {
+            encoder.set_property("cpb-size", cpb_size(bitrate));
+            encoder.set_property("bitrate", bitrate);
+        }
+    }
+
     /// The head is off: nothing to encode until the next framebuffer.
     pub fn clear_framebuffer(&mut self) {
         self.framebuffer = None;

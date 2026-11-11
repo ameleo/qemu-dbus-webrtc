@@ -264,14 +264,23 @@ message ClipboardFileData {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Data channel "control", client to server, reliable and ordered: one ControlMessage per
-// message. What the client wants of its session.
+// Data channel "control", both ways, reliable and ordered: one ControlMessage per message.
+// What the client wants of its session, and what the server knows of it.
 
 message ControlMessage {
   oneof message {
     VideoPause video_pause = 1;
     MonitorLayout monitor_layout = 2;
+    // Server to client.
+    BandwidthEstimate bandwidth_estimate = 3;
   }
+}
+
+// The server's estimate of the bandwidth to the client (Google Congestion Control, from the
+// client's transport-wide congestion control reports): what the connection takes, sound and
+// video. Sent when it changes, once a second at most.
+message BandwidthEstimate {
+  uint32 kbps = 1;
 }
 
 // Whether the client wants the video now: paused while its window is hidden or minimized, which

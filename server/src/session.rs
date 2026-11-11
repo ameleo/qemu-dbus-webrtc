@@ -48,6 +48,8 @@ pub enum Signal {
     Open(Channel),
     /// A message came on a data channel.
     Message(Channel, Vec<u8>),
+    /// A new estimate of the bandwidth to the client, in kbit/s.
+    Estimate(u32),
     /// The connection failed or ended; the session is over.
     Closed,
 }
@@ -151,6 +153,19 @@ pub fn fan_out(viewers: &Viewers, frame: &gst::Buffer) {
     }
 }
 
+/// The transport-wide congestion control header extension: the client reports when each packet
+/// arrived, which the bandwidth estimation needs.
+const TWCC_URI: &str = "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01";
+
+/// The bounds of the bandwidth estimation, in kbit/s: the estimate starts at `start` and stays
+/// within `min` and `max`.
+#[derive(Debug, Clone, Copy)]
+pub struct Bitrates {
+    pub min: u32,
+    pub start: u32,
+    pub max: u32,
+}
+
 pub struct Session {
     pipeline: gst::Pipeline,
     webrtc: gst::Element,
@@ -167,12 +182,14 @@ pub struct Session {
 impl Session {
     /// Start a session for a console's stream, encoded with `codec`, and the guest's sound.
     /// `keyframe` is called when the client needs a keyframe (a lost frame, or the start).
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         codec: Codec,
         full_chroma: bool,
         viewers: Viewers,
         audio_viewers: AudioViewers,
         mic: Option<Arc<Mic>>,
+        bitrates: Bitrates,
         signals: mpsc::UnboundedSender<Signal>,
         keyframe: impl Fn() + Send + Sync + 'static,
     ) -> Result<Self> {
@@ -182,12 +199,13 @@ impl Session {
              ! queue \
              ! {payloader} pt={VIDEO_PT} mtu=1200 \
              ! application/x-rtp,media=video,encoding-name={encoding},payload={VIDEO_PT},clock-rate=90000{extra},\
-rtcp-fb-nack-pli=(boolean)true \
+rtcp-fb-nack-pli=(boolean)true,rtcp-fb-transport-cc=(boolean)true,extmap-1=(string){TWCC_URI} \
              ! capsfilter name=rtp \
              appsrc name=audio is-live=true format=time caps={audio_caps} \
              ! queue leaky=downstream max-size-time=40000000 max-size-buffers=0 max-size-bytes=0 \
              ! rtpopuspay pt={AUDIO_PT} \
-             ! application/x-rtp,media=audio,encoding-name=OPUS,payload={AUDIO_PT},clock-rate=48000 \
+             ! application/x-rtp,media=audio,encoding-name=OPUS,payload={AUDIO_PT},clock-rate=48000,\
+rtcp-fb-transport-cc=(boolean)true,extmap-1=(string){TWCC_URI} \
              ! capsfilter name=audiortp",
             caps = codec.stream_caps(),
             extra = codec.rtp_extra(full_chroma),
@@ -209,6 +227,31 @@ rtcp-fb-nack-pli=(boolean)true \
         let webrtc = gst::ElementFactory::make("webrtcbin")
             .property_from_str("bundle-policy", "max-bundle")
             .build()?;
+        // Google Congestion Control: webrtcbin asks for the element that sends its packets,
+        // which estimates the bandwidth from the client's reports and paces the packets to it.
+        let estimates = signals.clone();
+        webrtc.connect("request-aux-sender", false, move |_| {
+            // A panic cannot leave a GLib callback: no unwrap in here.
+            let bwe = gst::ElementFactory::make("rtpgccbwe")
+                .property("min-bitrate", bitrates.min.saturating_mul(1000))
+                .property("max-bitrate", bitrates.max.saturating_mul(1000))
+                .property("estimated-bitrate", bitrates.start.saturating_mul(1000))
+                .property_from_str("estimator", "linear-regression")
+                .build();
+            let bwe = match bwe {
+                Ok(bwe) => bwe,
+                Err(e) => {
+                    warn!(error = %e, "no bandwidth estimation (rtpgccbwe)");
+                    return None;
+                }
+            };
+            let estimates = estimates.clone();
+            bwe.connect_notify(Some("estimated-bitrate"), move |bwe, _| {
+                let estimate = bwe.property::<u32>("estimated-bitrate") / 1000;
+                let _ = estimates.send(Signal::Estimate(estimate));
+            });
+            Some(bwe.to_value())
+        });
         let src = pipeline
             .by_name("src")
             .and_then(|e| e.downcast::<gst_app::AppSrc>().ok())

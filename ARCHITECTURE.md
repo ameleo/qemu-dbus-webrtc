@@ -52,6 +52,15 @@ congestion control, retransmission, jitter buffer, SCTP data channels), so a pro
 is seen in the other. Bitrate estimation runs on the sending side, in this server, whatever the
 client.
 
+Each connection estimates its bandwidth with Google Congestion Control (`rtpgccbwe`, from the
+client's transport-wide congestion control reports), which also paces its packets. The user's
+estimate sets the bitrate of the video, which all viewers share, within 4 and 30 Mbit/s
+(`--bitrate`), starting at 10; each client gets its own estimate on the `control` channel. Two
+fixes to GStreamer go with it, to be offered upstream: the VA encoders change their bitrate
+without a keyframe (by default, each change resets the GOP), and `rtpgccbwe` holds its estimate
+when the sender uses less than two thirds of it (by default, it grows with no evidence until
+losses show it far above the link).
+
 What differs is decoding: the native client brings its own decoders and can take what browsers
 may not (VP9 4:4:4). The codec is negotiated in SDP, from the best the client offers down to
 VP9 4:2:0, which every current browser decodes. H.264 is left out: the project targets current

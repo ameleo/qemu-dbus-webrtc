@@ -33,7 +33,7 @@ use session::Viewers;
 use web::Request;
 
 const USAGE: &str = "usage: qemu-dbus-webrtc (--qmp <QMP socket> | --dbus <D-Bus address>) \
-                     [--codec av1|vp9|hevc] [--chroma 420|444] [--bitrate <kbit/s>] \
+                     [--codec av1|vp9|hevc] [--chroma 420|444] [--bitrate <max kbit/s>] \
                      [--record <path prefix>] [--listen <address:port>] \
                      [--tls <certificate.pem> <key.pem>]";
 
@@ -50,12 +50,29 @@ const STILL_FRAME_INTERVAL: Duration = Duration::from_millis(250);
 /// At most one keyframe per console in this interval, whatever the viewers ask.
 const KEYFRAME_INTERVAL: Duration = Duration::from_millis(300);
 
+/// The bandwidth estimation, in kbit/s: never below `MIN_BITRATE` (a desktop below 4 Mbit/s is
+/// not usable, so the session rather fails visibly), starting at `START_BITRATE` (sharp at
+/// once on today's connections, where a ramp from the floor would show a blurred screen for
+/// seconds), up to `--bitrate`.
+const MIN_BITRATE: u32 = 4_000;
+const START_BITRATE: u32 = 10_000;
+const MAX_BITRATE: u32 = 30_000;
+
+/// The video bitrate follows the user's estimate when it changes by this share at least...
+const BITRATE_STEP: f64 = 0.05;
+/// ...and at most this often, unless it falls by `BITRATE_DROP` or more (the connection is
+/// congested): a bitrate change resets the rate control of the encoder, which needs a few
+/// frames to settle.
+const BITRATE_INTERVAL: Duration = Duration::from_millis(500);
+const BITRATE_DROP: f64 = 0.15;
+
 /// How often the rates of each console are reported.
 const RATE_INTERVAL: Duration = Duration::from_secs(5);
 
 struct Args {
     attach: Attach,
     settings: Settings,
+    bitrates: session::Bitrates,
     /// Record each console's stream to `<prefix>-<console>.<extension>`.
     record: Option<String>,
     /// The address of the viewer page and its signalling.
@@ -69,8 +86,9 @@ fn parse_args() -> Result<Args> {
     let mut settings = Settings {
         codec: Codec::Av1,
         full_chroma: false,
-        bitrate: 10_000,
+        bitrate: START_BITRATE,
     };
+    let mut max_bitrate = MAX_BITRATE;
     let mut record = None;
     let mut listen: SocketAddr = DEFAULT_LISTEN.parse()?;
     let mut tls = None;
@@ -94,7 +112,7 @@ fn parse_args() -> Result<Args> {
                     _ => bail!(USAGE),
                 }
             }
-            "--bitrate" => settings.bitrate = value.parse().context(USAGE)?,
+            "--bitrate" => max_bitrate = value.parse().context(USAGE)?,
             "--record" => record = Some(value),
             "--listen" => listen = value.parse().context(USAGE)?,
             "--tls" => {
@@ -111,9 +129,17 @@ fn parse_args() -> Result<Args> {
     if settings.full_chroma && !settings.codec.has_full_chroma() {
         bail!("{:?} has no 4:4:4 on the hardware encoders", settings.codec);
     }
+    let max = max_bitrate.max(MIN_BITRATE);
+    let bitrates = session::Bitrates {
+        min: MIN_BITRATE,
+        start: START_BITRATE.min(max),
+        max,
+    };
+    settings.bitrate = bitrates.start;
     Ok(Args {
         attach,
         settings,
+        bitrates,
         record,
         listen,
         tls,
@@ -243,6 +269,7 @@ async fn main() -> Result<()> {
         printers: printers.clone(),
         layout: layout.clone(),
         user: Default::default(),
+        bitrates: args.bitrates,
     };
     if !args.listen.ip().is_loopback() {
         warn!(listen = %args.listen, "no authentication yet: anyone who reaches this address sees the VM");
@@ -254,6 +281,9 @@ async fn main() -> Result<()> {
         }
     });
     let mut last_keyframe: HashMap<u32, Instant> = HashMap::new();
+    // The video bitrate, and when it last changed: new encoders start at it.
+    let mut settings = args.settings.clone();
+    let mut bitrate_changed = Instant::now();
     // A console is encoded when someone watches it (a paused viewer does not) or records it:
     // otherwise its updates cost nothing. A viewer that comes or resumes asks for a keyframe,
     // which encodes the screen as it is.
@@ -300,6 +330,21 @@ async fn main() -> Result<()> {
             }
             Some(request) = requests.recv() => {
                 match request {
+                    Request::Bitrate { console, bitrate } => {
+                        let current = f64::from(settings.bitrate);
+                        let change = (f64::from(bitrate) - current).abs() / current;
+                        let congested = f64::from(bitrate) <= current * (1.0 - BITRATE_DROP);
+                        if change >= BITRATE_STEP
+                            && (congested || bitrate_changed.elapsed() >= BITRATE_INTERVAL)
+                        {
+                            debug!(console, from = settings.bitrate, to = bitrate, "video bitrate");
+                            settings.bitrate = bitrate;
+                            bitrate_changed = Instant::now();
+                            if let Some(encoder) = encoders.get(&console) {
+                                encoder.set_bitrate(bitrate);
+                            }
+                        }
+                    }
                     Request::Keyframe { console } => {
                         let due = last_keyframe.get(&console).is_none_or(|t| t.elapsed() >= KEYFRAME_INTERVAL);
                         if due && let Some(encoder) = encoders.get(&console) {
@@ -369,6 +414,7 @@ async fn main() -> Result<()> {
                 if let Err(e) = scanout(
                     viewers.get(&console).cloned(),
                     &args,
+                    &settings,
                     &mut encoders,
                     console,
                     &planes,
@@ -479,6 +525,7 @@ async fn main() -> Result<()> {
 fn scanout(
     viewers: Option<Viewers>,
     args: &Args,
+    settings: &Settings,
     encoders: &mut HashMap<u32, Encoder>,
     console: u32,
     planes: &[display::Plane],
@@ -496,7 +543,7 @@ fn scanout(
     let encoder = match encoders.entry(console) {
         std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
         std::collections::hash_map::Entry::Vacant(entry) => entry.insert(Encoder::new(
-            &args.settings,
+            settings,
             stream_sink(args, console, viewers)?,
         )?),
     };
