@@ -36,7 +36,9 @@ message ServerMessage {
 // The first message of a client.
 message Hello {
   // The video codecs the client decodes, as media types ("video/AV1", "video/VP9",
-  // "video/H265"), as RTCRtpReceiver.getCapabilities("video") lists them.
+  // "video/H265"), as RTCRtpReceiver.getCapabilities("video") lists them, each with its fmtp
+  // parameters when it has any: "video/VP9;profile-id=1" for VP9 in 4:4:4. A type without
+  // parameters stands for the codec's default profile.
   repeated string codecs = 1;
 }
 

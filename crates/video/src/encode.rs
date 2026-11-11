@@ -139,6 +139,23 @@ impl Codec {
         }
     }
 
+    /// Whether a client that announces `codec` (a media type, with its fmtp parameters after a
+    /// `;` when it has any) decodes this stream.
+    pub fn decoded_by(self, full_chroma: bool, codec: &str) -> bool {
+        let mut parts = codec.split(';').map(str::trim);
+        if !parts
+            .next()
+            .is_some_and(|mime| mime.eq_ignore_ascii_case(self.mime_type()))
+        {
+            return false;
+        }
+        match (self, full_chroma) {
+            // VP9 in 4:4:4 is profile 1, which the client must announce.
+            (Self::Vp9, true) => parts.any(|p| p.eq_ignore_ascii_case("profile-id=1")),
+            _ => true,
+        }
+    }
+
     /// The codec's media type in a browser (`RTCRtpReceiver.getCapabilities`).
     pub fn mime_type(self) -> &'static str {
         match self {
@@ -390,5 +407,20 @@ impl Encoder {
                 bus.timed_pop_filtered(gst::ClockTime::from_seconds(2), &[gst::MessageType::Eos]);
         }
         let _ = self.pipeline.set_state(gst::State::Null);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decoded_by() {
+        assert!(Codec::Av1.decoded_by(false, "video/AV1"));
+        assert!(Codec::Vp9.decoded_by(false, "video/vp9;profile-id=0"));
+        assert!(Codec::Vp9.decoded_by(true, "video/VP9;profile-id=1"));
+        assert!(!Codec::Vp9.decoded_by(true, "video/VP9;profile-id=0"));
+        assert!(!Codec::Vp9.decoded_by(true, "video/VP9"));
+        assert!(!Codec::Av1.decoded_by(false, "video/VP9"));
     }
 }

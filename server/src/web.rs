@@ -150,9 +150,16 @@ async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
     let Some(client_message::Message::Hello(Hello { codecs })) = receive(&mut socket).await? else {
         anyhow::bail!("no hello");
     };
-    let wanted = shared.codec.mime_type();
-    if !codecs.iter().any(|c| c.eq_ignore_ascii_case(wanted)) {
-        let message = format!("this client does not decode {wanted} in WebRTC");
+    if !codecs
+        .iter()
+        .any(|c| shared.codec.decoded_by(shared.full_chroma, c))
+    {
+        let wanted = shared.codec.mime_type();
+        let message = if shared.full_chroma {
+            format!("this client does not decode {wanted} in 4:4:4 in WebRTC")
+        } else {
+            format!("this client does not decode {wanted} in WebRTC")
+        };
         send(
             &mut socket,
             server_message::Message::Error(Error {

@@ -115,7 +115,9 @@ pc.onconnectionstatechange = () => {
 
 ws.onopen = () => {
   // Tell the server which video codecs this browser decodes.
-  const codecs = (RTCRtpReceiver.getCapabilities("video")?.codecs || []).map((c) => c.mimeType);
+  // Each with its parameters ("video/VP9;profile-id=1"): the server checks the profile too.
+  const codecs = (RTCRtpReceiver.getCapabilities("video")?.codecs || [])
+    .map((c) => c.mimeType + (c.sdpFmtpLine ? `;${c.sdpFmtpLine}` : ""));
   send(hello([...new Set(codecs)]));
 };
 ws.onclose = () => { if (pc.connectionState !== "failed") fail("disconnected"); };
