@@ -4,4 +4,7 @@ updates:
     directory: /
     schedule:
       interval: weekly
-  # Add the cargo ecosystem once the workspace has a Cargo.toml.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly

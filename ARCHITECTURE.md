@@ -20,6 +20,18 @@ libvirt, plain QEMU) starts and stops it.
 - **Signalling:** a WebSocket carrying the SDP offer and answer and ICE candidates, behind
   token authentication supplied by the deployment (a broker or the VM manager).
 
+## Clients
+
+Two clients, one protocol: the browser, and a native client built on libwebrtc, the WebRTC
+engine of Chromium and Safari. Both then share the same transport behaviour (feedback for
+congestion control, retransmission, jitter buffer, SCTP data channels), so a problem seen in one
+is seen in the other. Bitrate estimation runs on the sending side, in this server, whatever the
+client.
+
+What differs is decoding: the native client brings its own hardware decoders and can take what
+browsers cannot (HEVC 4:4:4, HEVC where the browser lacks it). The codec is negotiated in SDP,
+from the best the client offers down to H.264.
+
 ## Codecs
 
 HEVC (H.265) is the default video codec, H.264 the fallback for browsers that do not decode HEVC
