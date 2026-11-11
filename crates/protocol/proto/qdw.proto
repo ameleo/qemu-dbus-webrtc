@@ -254,3 +254,20 @@ message ClipboardFileData {
   // The file could not be read: no size, no data.
   bool failed = 5;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Data channel "control", client to server, reliable and ordered: one ControlMessage per
+// message. What the client wants of its session.
+
+message ControlMessage {
+  oneof message {
+    VideoPause video_pause = 1;
+  }
+}
+
+// Whether the client wants the video now: paused while its window is hidden or minimized, which
+// spares the server the encoding and the network the bits. The sound goes on. When the video
+// resumes, the server sends a keyframe at once.
+message VideoPause {
+  bool paused = 1;
+}

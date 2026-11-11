@@ -78,7 +78,6 @@ pub async fn start(vm: &zbus::Connection, viewers: AudioViewers) -> Result<Audio
                 }
             }
         }
-        encoder.finish();
     });
     let mic = Arc::new(Mic::new()?);
     let recorder = match audio::record(vm, mic.clone()).await {

@@ -22,6 +22,9 @@ libvirt, plain QEMU) starts and stops it.
 - **Transport, per viewer:** each viewer has its own `webrtcbin`, fed with the encoded frames
   of the console it watches: one encoder per console, whatever the number of viewers. A viewer
   that loses a frame asks for a keyframe (PLI), which goes back to the encoder.
+- **Pause:** a client whose window is hidden pauses its video (data channel `control`): it
+  leaves the viewers its console's encoder feeds, and a console nobody watches is not encoded
+  at all. The sound goes on. On resume, a keyframe brings the picture back at once.
 - **Signalling:** a WebSocket carrying the SDP offer and answer and ICE candidates, behind
   token authentication supplied by the deployment (a broker or the VM manager).
 - **Protocol:** the messages between the server and its clients are Protocol Buffers, defined

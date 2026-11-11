@@ -18,8 +18,8 @@ use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
 
 use qdw_protocol::v1::{
-    ClientMessage, Error, Hello, IceCandidate, Input, ServerMessage, SessionDescription,
-    client_message, server_message,
+    ClientMessage, ControlMessage, Error, Hello, IceCandidate, Input, ServerMessage,
+    SessionDescription, VideoPause, client_message, control_message, server_message,
 };
 use qdw_protocol::{Message, SIGNALLING_PATH};
 use qdw_video::encode::Codec;
@@ -185,6 +185,11 @@ async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
             pointer: shared.pointer.clone(),
             clip,
         },
+        || {
+            let _ = shared.requests.send(Request::Keyframe {
+                console: shared.console,
+            });
+        },
     )
     .await;
     // Whatever ended the session, leave no key or button pressed in the guest, and the
@@ -213,6 +218,7 @@ async fn run(
     input: &mut ViewerInput,
     clipboard: &mut ViewerClipboard,
     mut follow: Follow,
+    keyframe: impl Fn(),
 ) -> Result<()> {
     // Pointer updates wait for the pointer channel to open.
     let mut sent: Option<pointer::Sent> = None;
@@ -234,6 +240,15 @@ async fn run(
                     Ok(messages) => send_all(session, Channel::Clipboard, messages),
                     Err(e) => warn!(error = %format!("{e:#}"), "clipboard"),
                 },
+                Some(Signal::Message(Channel::Control, bytes)) => match ControlMessage::decode(bytes.as_slice()) {
+                    Ok(ControlMessage { message: Some(control_message::Message::VideoPause(VideoPause { paused })) }) => {
+                        if session.pause_video(paused) {
+                            keyframe();
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => warn!(error = %e, "undecodable control message"),
+                },
                 Some(Signal::Message(Channel::Pointer, _)) => {}
                 Some(Signal::Open(Channel::Pointer)) => {
                     let mut fresh = pointer::Sent::default();
@@ -244,7 +259,7 @@ async fn run(
                     let guest = follow.clip.guest.borrow_and_update().clone();
                     send_all(session, Channel::Clipboard, clipboard.opened(guest));
                 }
-                Some(Signal::Open(Channel::Input)) => {}
+                Some(Signal::Open(Channel::Input | Channel::Control)) => {}
                 Some(Signal::Closed) | None => return Ok(()),
             },
             Ok(()) = follow.pointer.changed() => {

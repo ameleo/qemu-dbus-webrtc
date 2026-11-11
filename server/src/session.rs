@@ -9,6 +9,7 @@
 //! The server makes the offer; the signalling (SDP and ICE candidates) goes through the
 //! caller, as `Signal`s out and `apply_answer`/`add_ice_candidate` in.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
@@ -21,7 +22,7 @@ use gstreamer_webrtc as gst_webrtc;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use qdw_protocol::{CLIPBOARD_CHANNEL, INPUT_CHANNEL, POINTER_CHANNEL};
+use qdw_protocol::{CLIPBOARD_CHANNEL, CONTROL_CHANNEL, INPUT_CHANNEL, POINTER_CHANNEL};
 use qdw_video::encode::Codec;
 
 use crate::audio::Mic;
@@ -57,16 +58,19 @@ pub enum Channel {
     Pointer,
     /// The clipboard, both ways.
     Clipboard,
+    /// What the client wants of its session, from the client.
+    Control,
 }
 
 impl Channel {
-    const ALL: [Self; 3] = [Self::Input, Self::Pointer, Self::Clipboard];
+    const ALL: [Self; 4] = [Self::Input, Self::Pointer, Self::Clipboard, Self::Control];
 
     fn label(self) -> &'static str {
         match self {
             Self::Input => INPUT_CHANNEL,
             Self::Pointer => POINTER_CHANNEL,
             Self::Clipboard => CLIPBOARD_CHANNEL,
+            Self::Control => CONTROL_CHANNEL,
         }
     }
 }
@@ -138,6 +142,8 @@ pub struct Session {
     channels: Vec<gst_webrtc::WebRTCDataChannel>,
     src: gst_app::AppSrc,
     viewers: Viewers,
+    /// The client paused the video: its appsrc is out of the viewers.
+    paused: Arc<AtomicBool>,
     audio_src: gst_app::AppSrc,
     audio_viewers: AudioViewers,
 }
@@ -193,14 +199,19 @@ rtcp-fb-nack-pli=(boolean)true \
         // A keyframe request from the browser (PLI) travels upstream to our appsrc.
         let keyframe = Arc::new(keyframe);
         let on_pli = keyframe.clone();
+        let paused = Arc::new(AtomicBool::new(false));
+        let pli_paused = paused.clone();
         src.static_pad("src").context("no appsrc pad")?.add_probe(
             gst::PadProbeType::EVENT_UPSTREAM,
             move |_, info| {
                 if let Some(event) = info.event()
                     && gst_video::UpstreamForceKeyUnitEvent::parse(event).is_ok()
                 {
-                    debug!("keyframe requested by the browser");
-                    on_pli();
+                    // A paused client gets no video: it may ask for keyframes all the same.
+                    if !pli_paused.load(Ordering::Relaxed) {
+                        debug!("keyframe requested by the browser");
+                        on_pli();
+                    }
                 }
                 gst::PadProbeReturn::Ok
             },
@@ -383,9 +394,27 @@ rtcp-fb-nack-pli=(boolean)true \
             channels,
             src,
             viewers,
+            paused,
             audio_src,
             audio_viewers,
         })
+    }
+
+    /// Pause or resume the video. Paused, the client's appsrc leaves the viewers its encoder
+    /// feeds: no frame goes to it, and a console nobody watches is not encoded. True when the
+    /// video resumes: the client then needs a keyframe.
+    pub fn pause_video(&self, paused: bool) -> bool {
+        if self.paused.swap(paused, Ordering::Relaxed) == paused {
+            return false;
+        }
+        let mut viewers = self.viewers.lock().unwrap();
+        if paused {
+            viewers.retain(|src| src != &self.src);
+        } else {
+            viewers.push(self.src.clone());
+        }
+        debug!(paused, "client video");
+        !paused
     }
 
     /// Decode the client's sound coming out of webrtcbin's `pad`, for the guest's microphone.

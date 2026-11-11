@@ -25,6 +25,9 @@ pub const POINTER_CHANNEL: &str = "pointer";
 /// The data channel of the clipboard, both ways: [`v1::ClipboardMessage`] messages.
 pub const CLIPBOARD_CHANNEL: &str = "clipboard";
 
+/// The data channel of what the client wants of its session: [`v1::ControlMessage`] messages.
+pub const CONTROL_CHANNEL: &str = "control";
+
 /// The largest data chunk of a [`v1::ClipboardData`] or [`v1::ClipboardFileData`]: 60 KiB.
 /// A data channel message is 64 KiB at most, whole, when the other side announces no larger
 /// limit in its SDP (RFC 8841, and the server announces none); libwebrtc does not send a

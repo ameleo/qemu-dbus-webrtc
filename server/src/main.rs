@@ -231,6 +231,16 @@ async fn main() -> Result<()> {
         }
     });
     let mut last_keyframe: HashMap<u32, Instant> = HashMap::new();
+    // A console is encoded when someone watches it (a paused viewer does not) or records it:
+    // otherwise its updates cost nothing. A viewer that comes or resumes asks for a keyframe,
+    // which encodes the screen as it is.
+    let recording = args.record.is_some();
+    let wanted = |console: u32| {
+        recording
+            || viewers
+                .get(&console)
+                .is_some_and(|v| !v.lock().unwrap().is_empty())
+    };
 
     let mut encoders: HashMap<u32, Encoder> = HashMap::new();
     // Consoles with a new framebuffer not encoded yet. A scanout comes with its full content,
@@ -364,7 +374,8 @@ async fn main() -> Result<()> {
                 debug!(console, x, y, size = %format!("{width}x{height}"), "update");
                 *updates.entry(console).or_default() += 1;
                 fresh.remove(&console);
-                if let Some(encoder) = encoders.get(&console)
+                if wanted(console)
+                    && let Some(encoder) = encoders.get(&console)
                     && let Err(e) = encoder.frame()
                 {
                     warn!(console, error = %e, "frame not encoded");
@@ -416,7 +427,8 @@ async fn main() -> Result<()> {
         }
         if events.is_empty() {
             for console in fresh.drain() {
-                if let Some(encoder) = encoders.get(&console)
+                if wanted(console)
+                    && let Some(encoder) = encoders.get(&console)
                     && let Err(e) = encoder.frame()
                 {
                     warn!(console, error = %e, "frame not encoded");

@@ -96,6 +96,10 @@ pc.ondatachannel = ({ channel }) => {
   channel.binaryType = "arraybuffer";
   if (channel.label === "input") input.channel = channel;
   if (channel.label === "pointer") channel.onmessage = (event) => pointerUpdate(new Uint8Array(event.data));
+  if (channel.label === "control") {
+    control.channel = channel;
+    channel.onopen = () => control.videoPause();
+  }
   if (channel.label === "clipboard") {
     clip.channel = channel;
     channel.onmessage = (event) => clipboardMessage(new Uint8Array(event.data));
@@ -423,6 +427,19 @@ micButton.addEventListener("click", async () => {
   micButton.classList.toggle("on", !!micTrack);
   micButton.blur();   // keys go to the guest, not to the button
 });
+
+// Video paused while the page is hidden (a tab in the background, a minimized window, or one
+// covered whole): the server stops encoding and sending it, and sends a keyframe when the page
+// shows again. The sound goes on. ControlMessage: video_pause = 1; VideoPause: paused = 1.
+const control = {
+  channel: null,
+  videoPause() {
+    if (this.channel?.readyState !== "open") return;
+    const paused = document.hidden;
+    this.channel.send(new Uint8Array(pb.message((o) => pb.bytes(o, 1, pb.message((v) => pb.uint(v, 1, paused ? 1 : 0))))));
+  },
+};
+document.addEventListener("visibilitychange", () => control.videoPause());
 
 // Once a second: what is decoded, and how well.
 let last = null;

@@ -186,8 +186,11 @@ impl AudioEncoder {
         self.volume.set_property("volume", level.powi(3));
         self.volume.set_property("mute", mute);
     }
+}
 
-    pub fn finish(self) {
+/// Stopped however it goes: at the end of its task, or with the task aborted on shutdown.
+impl Drop for AudioEncoder {
+    fn drop(&mut self) {
         let _ = self.pipeline.set_state(gst::State::Null);
     }
 }
