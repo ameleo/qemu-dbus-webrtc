@@ -1,0 +1,32 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# AI review of pull requests (CodeRabbit). Reviews are advisory: maintainers decide.
+language: en-US
+tone_instructions: "Be concise and specific. Point out correctness, safety and protocol issues first; skip style nits that rustfmt or clippy already catch."
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: true
+  auto_review:
+    enabled: true
+    drafts: false
+  path_filters:
+    - "!target/**"
+    - "!**/Cargo.lock"
+  path_instructions:
+    - path: "**/*.rs"
+      instructions: |
+        - New source files start with `// SPDX-License-Identifier: MPL-2.0`.
+        - Comments are in English and explain why, not what.
+        - Flag unsafe code without a SAFETY comment, panics on input from the network, the
+          guest or QEMU, and blocking calls on async or GStreamer streaming threads.
+        - Check that WebRTC, RTP and QEMU D-Bus usage matches the specifications and the
+          QEMU D-Bus display interfaces.
+    - path: ".github/workflows/**"
+      instructions: |
+        - Keep `permissions` minimal and avoid third-party actions where a few shell lines do.
+        - Never expose secrets to workflows triggered by pull requests from forks.
+chat:
+  auto_reply: true
