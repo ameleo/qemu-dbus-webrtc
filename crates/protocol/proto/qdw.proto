@@ -149,3 +149,45 @@ message PointerShape {
   // width * height pixels, 4 bytes each: red, green, blue, alpha (not premultiplied).
   bytes rgba = 5;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Data channel "clipboard", both ways, reliable and ordered: one ClipboardMessage per message.
+//
+// Modelled on the clipboard of RDP (MS-RDPECLIP): whoever copied last owns the clipboard and
+// announces what it holds; the other side asks for the data when it needs it. Data are typed
+// by media type: "text/plain;charset=utf-8", "image/png".
+
+message ClipboardMessage {
+  oneof message {
+    ClipboardGrab grab = 1;
+    ClipboardRelease release = 2;
+    ClipboardRequest request = 3;
+    ClipboardData data = 4;
+  }
+}
+
+// The sender copied: it owns the clipboard, which holds these types.
+message ClipboardGrab {
+  repeated string mimes = 1;
+}
+
+// The sender's clipboard holds nothing to share anymore.
+message ClipboardRelease {}
+
+// Ask the owner for its data, in the first of these types it can provide.
+message ClipboardRequest {
+  // Echoed in the answer.
+  uint32 id = 1;
+  repeated string mimes = 2;
+}
+
+// The answer to a request, in chunks: a data channel message has a size limit (MAX_CHUNK in
+// qdw-protocol).
+message ClipboardData {
+  uint32 id = 1;
+  // The type of the data; empty when the owner has nothing to give.
+  string mime = 2;
+  bytes data = 3;
+  // The last chunk of the answer.
+  bool last = 4;
+}

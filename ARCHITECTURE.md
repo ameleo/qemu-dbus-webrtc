@@ -93,7 +93,7 @@ Only channels with no patent listed in Microsoft's Open Specifications patent ma
 
 | Function | Format | Data channel | Browser | Native client (later) |
 |---|---|---|---|---|
-| Clipboard | MS-RDPECLIP | `cliprdr` | text, images | full, files included |
+| Clipboard | project format, modelled on MS-RDPECLIP | `clipboard` | text, images (HTTPS) | full, files later |
 | Drives | MS-RDPEFS | `rdpdr` | a chosen folder (Chromium) | full |
 | Printers | MS-RDPEPC, MS-RDPEXPS | `rdpdr` | no | yes |
 | Monitor layout, resize | MS-RDPEDISP | `disp` | yes | yes |
@@ -111,13 +111,20 @@ the video latency.
 
 Touch input does not use MS-RDPEI, which has a listed patent.
 
-Only the channel crates of IronRDP are used: `ironrdp-cliprdr`, `ironrdp-rdpdr`,
+The clipboard follows RDP's model: whoever copied last owns it and announces the types it holds,
+and the data move only when someone pastes. In the guest, the Ameleo guest agent holds the
+Windows clipboard. A browser page cannot watch the local clipboard: it reads it when it gets the
+focus, and offers it to the guest if it changed; and browsers give the clipboard only to pages
+served in HTTPS (`--tls`) or from localhost.
+
+Only the channel crates of IronRDP are used: `ironrdp-rdpdr`,
 `ironrdp-displaycontrol` (and `ironrdp-rdpeusb` later), with their base crates. They do no I/O:
 bytes received on a data channel go in, the messages to send come out. The RDP server, connection
 and graphics crates are not needed: WebRTC provides the transport, security and media.
 
 In the guest, the optional Ameleo guest agent (D-Bus over a QEMU character device) provides what
-QEMU alone cannot: automatic logon, printers, drives and cameras as native Windows devices.
+QEMU alone cannot: the clipboard, automatic logon, printers, drives and cameras as native Windows
+devices.
 
 ## Milestones
 

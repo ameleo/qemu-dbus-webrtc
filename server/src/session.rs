@@ -21,7 +21,7 @@ use gstreamer_webrtc as gst_webrtc;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use qdw_protocol::{INPUT_CHANNEL, POINTER_CHANNEL};
+use qdw_protocol::{CLIPBOARD_CHANNEL, INPUT_CHANNEL, POINTER_CHANNEL};
 use qdw_video::encode::Codec;
 
 /// The payload type of the video. Fixed: there is one video stream for now.
@@ -35,12 +35,35 @@ pub enum Signal {
         mline_index: u32,
         candidate: String,
     },
-    /// A message on the input data channel.
-    Input(Vec<u8>),
-    /// The pointer data channel is open: the pointer can be sent.
-    PointerOpen,
+    /// A data channel is open: messages can go on it.
+    Open(Channel),
+    /// A message came on a data channel.
+    Message(Channel, Vec<u8>),
     /// The connection failed or ended; the session is over.
     Closed,
+}
+
+/// The data channels of a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Channel {
+    /// Keyboard and pointer, from the client.
+    Input,
+    /// The guest pointer, to the client.
+    Pointer,
+    /// The clipboard, both ways.
+    Clipboard,
+}
+
+impl Channel {
+    const ALL: [Self; 3] = [Self::Input, Self::Pointer, Self::Clipboard];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Input => INPUT_CHANNEL,
+            Self::Pointer => POINTER_CHANNEL,
+            Self::Clipboard => CLIPBOARD_CHANNEL,
+        }
+    }
 }
 
 /// The appsrcs of a console's current viewers, which its encoder feeds.
@@ -49,8 +72,8 @@ pub type Viewers = Arc<Mutex<Vec<gst_app::AppSrc>>>;
 pub struct Session {
     pipeline: gst::Pipeline,
     webrtc: gst::Element,
-    /// The guest pointer goes to the client on this channel.
-    pointer: gst_webrtc::WebRTCDataChannel,
+    /// The data channels, in the order of [`Channel::ALL`].
+    channels: Vec<gst_webrtc::WebRTCDataChannel>,
     src: gst_app::AppSrc,
     viewers: Viewers,
 }
@@ -224,25 +247,29 @@ rtcp-fb-nack-pli=(boolean)true \
         // negotiates once caps arrive on the video, after PLAYING: one offer covers all three.
         rtp.link(&webrtc)?;
         pipeline.set_state(gst::State::Ready)?;
-        let input = Self::data_channel(&webrtc, INPUT_CHANNEL)?;
-        let messages = closed_on_input.clone();
-        input.connect_on_message_data(move |_, data| {
-            // Nothing else here: this runs on webrtcbin's thread, where calling into it deadlocks.
-            if let Some(data) = data {
-                let _ = messages.send(Signal::Input(data.to_vec()));
-            }
-        });
-        let pointer = Self::data_channel(&webrtc, POINTER_CHANNEL)?;
-        let opened = closed_on_input;
-        pointer.connect_on_open(move |_| {
-            let _ = opened.send(Signal::PointerOpen);
-        });
+        let mut channels = Vec::new();
+        for channel in Channel::ALL {
+            let data_channel = Self::data_channel(&webrtc, channel.label())?;
+            // Nothing else in these callbacks: they run on webrtcbin's thread, where calling
+            // into it deadlocks.
+            let messages = closed_on_input.clone();
+            data_channel.connect_on_message_data(move |_, data| {
+                if let Some(data) = data {
+                    let _ = messages.send(Signal::Message(channel, data.to_vec()));
+                }
+            });
+            let opened = closed_on_input.clone();
+            data_channel.connect_on_open(move |_| {
+                let _ = opened.send(Signal::Open(channel));
+            });
+            channels.push(data_channel);
+        }
         pipeline.set_state(gst::State::Playing)?;
         viewers.lock().unwrap().push(src.clone());
         Ok(Self {
             pipeline,
             webrtc,
-            pointer,
+            channels,
             src,
             viewers,
         })
@@ -258,13 +285,16 @@ rtcp-fb-nack-pli=(boolean)true \
             .with_context(|| format!("creating the {label} data channel"))
     }
 
-    /// Send a message on the pointer data channel.
-    pub fn send_pointer(&self, message: Vec<u8>) {
-        if let Err(e) = self
-            .pointer
-            .send_data_full(Some(&gst::glib::Bytes::from_owned(message)))
+    /// Send a message on a data channel.
+    pub fn send(&self, channel: Channel, message: Vec<u8>) {
+        let index = Channel::ALL
+            .iter()
+            .position(|c| *c == channel)
+            .unwrap_or_default();
+        if let Err(e) =
+            self.channels[index].send_data_full(Some(&gst::glib::Bytes::from_owned(message)))
         {
-            warn!(error = %e, "pointer update not sent");
+            warn!(?channel, error = %e, "data channel message not sent");
         }
     }
 

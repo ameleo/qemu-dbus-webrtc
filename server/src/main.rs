@@ -5,6 +5,7 @@
 //! For now (milestone 3), it attaches to a running VM, encodes each console with the host GPU,
 //! shows the first one in a browser over WebRTC, and can record the streams to files.
 
+mod clipboard;
 mod input;
 mod pointer;
 mod session;
@@ -28,7 +29,8 @@ use web::Request;
 
 const USAGE: &str = "usage: qemu-dbus-webrtc (--qmp <QMP socket> | --dbus <D-Bus address>) \
                      [--codec av1|vp9|hevc] [--chroma 420|444] [--bitrate <kbit/s>] \
-                     [--record <path prefix>] [--listen <address:port>]";
+                     [--record <path prefix>] [--listen <address:port>] \
+                     [--tls <certificate.pem> <key.pem>]";
 
 /// Where the viewer page is served by default: this host only, since there is no
 /// authentication yet.
@@ -53,6 +55,8 @@ struct Args {
     record: Option<String>,
     /// The address of the viewer page and its signalling.
     listen: SocketAddr,
+    /// Serve in HTTPS.
+    tls: Option<web::Tls>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -64,6 +68,7 @@ fn parse_args() -> Result<Args> {
     };
     let mut record = None;
     let mut listen: SocketAddr = DEFAULT_LISTEN.parse()?;
+    let mut tls = None;
     let mut args = std::env::args().skip(1);
     while let Some(option) = args.next() {
         let Some(value) = args.next() else {
@@ -87,6 +92,13 @@ fn parse_args() -> Result<Args> {
             "--bitrate" => settings.bitrate = value.parse().context(USAGE)?,
             "--record" => record = Some(value),
             "--listen" => listen = value.parse().context(USAGE)?,
+            "--tls" => {
+                let Some(key) = args.next() else { bail!(USAGE) };
+                tls = Some(web::Tls {
+                    certificate: value.into(),
+                    key: key.into(),
+                });
+            }
             _ => bail!(USAGE),
         }
     }
@@ -99,6 +111,7 @@ fn parse_args() -> Result<Args> {
         settings,
         record,
         listen,
+        tls,
     })
 }
 
@@ -206,6 +219,9 @@ async fn main() -> Result<()> {
     let viewers: HashMap<u32, Viewers> = HashMap::from([(shown, Viewers::default())]);
     let (requests_tx, mut requests) = mpsc::unbounded_channel();
     let (pointer_tx, pointer_rx) = tokio::sync::watch::channel(pointer::Pointer::default());
+    // The clipboard, through the guest agent, if the VM has one.
+    let clipboard = clipboard::Clipboard::new();
+    tokio::spawn(clipboard.clone().run_agent(vm_connection.clone()));
     let shared = web::Shared {
         codec: args.settings.codec,
         console: shown,
@@ -213,13 +229,14 @@ async fn main() -> Result<()> {
         requests: requests_tx,
         input: qdw_qemu::input::Input::new(&vm_connection, shown).await?,
         pointer: pointer_rx,
+        clipboard: clipboard.clone(),
     };
     if !args.listen.ip().is_loopback() {
         warn!(listen = %args.listen, "no authentication yet: anyone who reaches this address sees the VM");
     }
-    let listen = args.listen;
+    let (listen, tls) = (args.listen, args.tls.clone());
     tokio::spawn(async move {
-        if let Err(e) = web::serve(listen, shared).await {
+        if let Err(e) = web::serve(listen, tls, shared).await {
             warn!(error = %format!("{e:#}"), "the viewer page is down");
         }
     });

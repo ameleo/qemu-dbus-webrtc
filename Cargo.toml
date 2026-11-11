@@ -16,15 +16,19 @@ qdw-qemu = { path = "crates/qemu" }
 qdw-video = { path = "crates/video" }
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
+# TLS with ring: no C toolchain beyond what ring itself needs.
+axum-server = { version = "0.9", default-features = false, features = ["tls-rustls-no-provider"] }
 gstreamer = "0.24"
 gstreamer-allocators = "0.24"
 gstreamer-app = "0.24"
 gstreamer-sdp = "0.24"
 gstreamer-video = "0.24"
 gstreamer-webrtc = "0.24"
+futures-util = "0.3"
 prost = "0.14"
 prost-build = "0.14"
 protox = "0.10"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustix = "1"
 serde_json = "1"
 tokio = "1"

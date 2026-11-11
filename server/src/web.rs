@@ -7,7 +7,9 @@
 
 use std::net::SocketAddr;
 
-use anyhow::Result;
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
 use axum::response::{Html, IntoResponse};
@@ -22,9 +24,12 @@ use qdw_protocol::v1::{
 use qdw_protocol::{Message, SIGNALLING_PATH};
 use qdw_video::encode::Codec;
 
+use std::sync::Arc;
+
+use crate::clipboard::{Clipboard, Paste, ViewerClipboard};
 use crate::input::ViewerInput;
 use crate::pointer::{self, Pointer};
-use crate::session::{Session, Signal, Viewers};
+use crate::session::{Channel, Session, Signal, Viewers};
 
 const PAGE: &str = include_str!("../web/index.html");
 
@@ -46,21 +51,47 @@ pub struct Shared {
     pub input: qdw_qemu::input::Input,
     /// The guest pointer of the shown console.
     pub pointer: watch::Receiver<Pointer>,
+    pub clipboard: Arc<Clipboard>,
 }
 
-/// Serve the page and the signalling on `listen` until the program ends.
-pub async fn serve(listen: SocketAddr, shared: Shared) -> Result<()> {
+/// A certificate and its private key, PEM files.
+#[derive(Debug, Clone)]
+pub struct Tls {
+    pub certificate: PathBuf,
+    pub key: PathBuf,
+}
+
+/// Serve the page and the signalling on `listen` until the program ends, in HTTPS with `tls`.
+/// Browsers give the clipboard to pages served in HTTPS (or from localhost) only.
+pub async fn serve(listen: SocketAddr, tls: Option<Tls>, shared: Shared) -> Result<()> {
     let app = axum::Router::new()
         .route("/", get(|| async { Html(PAGE) }))
         .route(SIGNALLING_PATH, get(upgrade))
-        .with_state(shared);
-    let listener = tokio::net::TcpListener::bind(listen).await?;
-    info!(%listen, "serving the viewer page");
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await?;
+        .with_state(shared)
+        .into_make_service_with_connect_info::<SocketAddr>();
+    match tls {
+        Some(tls) => {
+            // One crypto provider for the process: ring.
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let config =
+                axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.certificate, &tls.key)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "loading {} and {}",
+                            tls.certificate.display(),
+                            tls.key.display()
+                        )
+                    })?;
+            info!(%listen, "serving the viewer page in HTTPS");
+            axum_server::bind_rustls(listen, config).serve(app).await?;
+        }
+        None => {
+            let listener = tokio::net::TcpListener::bind(listen).await?;
+            info!(%listen, "serving the viewer page");
+            axum::serve(listener, app).await?;
+        }
+    }
     Ok(())
 }
 
@@ -136,17 +167,38 @@ async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
         },
     )?;
     let mut input = ViewerInput::new(shared.input.clone());
+    let (mut clipboard, guest_clipboard, pastes) = shared.clipboard.viewer();
     let ended = run(
         &mut socket,
         &session,
         &mut signals,
         &mut input,
-        shared.pointer.clone(),
+        &mut clipboard,
+        Follow {
+            pointer: shared.pointer.clone(),
+            guest_clipboard,
+            pastes,
+        },
     )
     .await;
-    // Whatever ended the session, leave no key or button pressed in the guest.
+    // Whatever ended the session, leave no key or button pressed in the guest, and the
+    // clipboard to the guest.
     input.release_all().await?;
+    clipboard.release().await?;
     ended
+}
+
+/// What a viewer follows besides its connection.
+struct Follow {
+    pointer: watch::Receiver<Pointer>,
+    guest_clipboard: watch::Receiver<Vec<String>>,
+    pastes: mpsc::UnboundedReceiver<Paste>,
+}
+
+fn send_all(session: &Session, channel: Channel, messages: Vec<Vec<u8>>) {
+    for message in messages {
+        session.send(channel, message);
+    }
 }
 
 async fn run(
@@ -154,7 +206,8 @@ async fn run(
     session: &Session,
     signals: &mut mpsc::UnboundedReceiver<Signal>,
     input: &mut ViewerInput,
-    mut pointer: watch::Receiver<Pointer>,
+    clipboard: &mut ViewerClipboard,
+    mut follow: Follow,
 ) -> Result<()> {
     // Pointer updates wait for the pointer channel to open.
     let mut sent: Option<pointer::Sent> = None;
@@ -168,25 +221,38 @@ async fn run(
                     let ice = IceCandidate { candidate, sdp_mline_index: mline_index };
                     send(socket, server_message::Message::Ice(ice)).await?
                 }
-                Some(Signal::Input(bytes)) => match Input::decode(bytes.as_slice()) {
+                Some(Signal::Message(Channel::Input, bytes)) => match Input::decode(bytes.as_slice()) {
                     Ok(events) => input.apply(events).await?,
                     Err(e) => warn!(error = %e, "undecodable input"),
                 },
-                Some(Signal::PointerOpen) => {
+                Some(Signal::Message(Channel::Clipboard, bytes)) => match clipboard.message(&bytes).await {
+                    Ok(messages) => send_all(session, Channel::Clipboard, messages),
+                    Err(e) => warn!(error = %format!("{e:#}"), "clipboard"),
+                },
+                Some(Signal::Message(Channel::Pointer, _)) => {}
+                Some(Signal::Open(Channel::Pointer)) => {
                     let mut fresh = pointer::Sent::default();
-                    for message in fresh.update(&pointer.borrow_and_update()) {
-                        session.send_pointer(message);
-                    }
+                    send_all(session, Channel::Pointer, fresh.update(&follow.pointer.borrow_and_update()));
                     sent = Some(fresh);
                 }
+                Some(Signal::Open(Channel::Clipboard)) => {
+                    let guest = follow.guest_clipboard.borrow_and_update().clone();
+                    send_all(session, Channel::Clipboard, clipboard.opened(guest));
+                }
+                Some(Signal::Open(Channel::Input)) => {}
                 Some(Signal::Closed) | None => return Ok(()),
             },
-            Ok(()) = pointer.changed() => {
+            Ok(()) = follow.pointer.changed() => {
                 if let Some(sent) = &mut sent {
-                    for message in sent.update(&pointer.borrow_and_update()) {
-                        session.send_pointer(message);
-                    }
+                    send_all(session, Channel::Pointer, sent.update(&follow.pointer.borrow_and_update()));
                 }
+            }
+            Ok(()) = follow.guest_clipboard.changed() => {
+                let guest = follow.guest_clipboard.borrow_and_update().clone();
+                send_all(session, Channel::Clipboard, clipboard.guest_changed(guest));
+            }
+            Some(paste) = follow.pastes.recv() => {
+                send_all(session, Channel::Clipboard, clipboard.paste(paste));
             }
             message = receive(socket) => match message? {
                 Some(client_message::Message::Answer(SessionDescription { sdp })) => session.apply_answer(&sdp)?,

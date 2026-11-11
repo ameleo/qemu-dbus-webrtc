@@ -83,6 +83,11 @@ pc.ondatachannel = ({ channel }) => {
   channel.binaryType = "arraybuffer";
   if (channel.label === "input") input.channel = channel;
   if (channel.label === "pointer") channel.onmessage = (event) => pointerUpdate(new Uint8Array(event.data));
+  if (channel.label === "clipboard") {
+    clip.channel = channel;
+    channel.onmessage = (event) => clipboardMessage(new Uint8Array(event.data));
+    channel.onopen = () => clip.focused();
+  }
 };
 pc.onicecandidate = (event) => {
   if (event.candidate) send(ice(event.candidate.candidate, event.candidate.sdpMLineIndex || 0));
@@ -262,6 +267,112 @@ function pointerUpdate(bytes) {
   if (update.has(2)) pointer.visible = update.get(2)[0] !== 0;
   video.style.cursor = pointer.visible ? pointer.css : "none";
 }
+
+// ---------------------------------------------------------------------------------------------
+// Clipboard, modelled on RDP: whoever copied last owns it, and the data move when someone
+// pastes. A page cannot watch the local clipboard: it reads it when it gets the focus, and
+// offers it to the guest if it changed. What the guest copies is written to the local
+// clipboard at once, or when the page gets the focus back. Browsers give the clipboard to
+// pages in HTTPS (or from localhost) only.
+// ClipboardMessage: grab = 1, release = 2, request = 3, data = 4.
+
+const TEXT = "text/plain;charset=utf-8", PNG = "image/png", CHUNK = 64 * 1024;
+const clip = {
+  channel: null,
+  guest: [],             // the types the guest clipboard holds
+  guestPending: false,   // the guest copied while the page had no focus
+  local: {},             // what this client copied, offered to the guest: { text, png }
+  written: {},           // what the page last wrote to the local clipboard, or offered
+  answers: new Map(),    // request id -> chunks received
+  nextId: 1,
+  send(build) {
+    if (this.channel?.readyState === "open") this.channel.send(new Uint8Array(pb.message(build)));
+  },
+  // The page has the focus: offer what was copied locally, or take what the guest copied.
+  async focused() {
+    if (!window.isSecureContext || !document.hasFocus()) return;
+    if (!(await this.readLocal()) && this.guestPending) this.fetchGuest();
+  },
+  // Offer the local clipboard to the guest if it changed. True if it did.
+  async readLocal() {
+    let text, png;
+    try {
+      for (const item of await navigator.clipboard.read()) {
+        if (item.types.includes("text/plain")) text = await (await item.getType("text/plain")).text();
+        if (item.types.includes("image/png")) png = await item.getType("image/png");
+      }
+    } catch { return false; }   // no permission, or nothing readable
+    const same = text === this.written.text && png?.size === this.written.png?.size;
+    if (same || (text === undefined && png === undefined)) return false;
+    this.local = { text, png };
+    this.written = { text, png };
+    const mimes = [...(text !== undefined ? [TEXT] : []), ...(png ? [PNG] : [])];
+    this.send((o) => pb.bytes(o, 1, pb.message((g) => mimes.forEach((m) => pb.string(g, 1, m)))));
+    return true;
+  },
+  // Ask the guest for its clipboard, text first.
+  fetchGuest() {
+    this.guestPending = false;
+    const mime = this.guest.includes(TEXT) ? TEXT : this.guest.includes(PNG) ? PNG : null;
+    if (!mime) return;
+    const id = this.nextId++;
+    this.answers.set(id, []);
+    this.send((o) => pb.bytes(o, 3, pb.message((r) => { pb.uint(r, 1, id); pb.string(r, 2, mime); })));
+  },
+  // Answer the guest's paste of what this client copied, in chunks.
+  answer(id, mimes) {
+    const send = (mime, bytes) => {
+      let offset = 0;
+      do {
+        const chunk = bytes.subarray(offset, offset + CHUNK);
+        offset += CHUNK;
+        const last = offset >= bytes.length;
+        this.send((o) => pb.bytes(o, 4, pb.message((d) => {
+          pb.uint(d, 1, id); pb.string(d, 2, mime); pb.bytes(d, 3, chunk); pb.uint(d, 4, last ? 1 : 0);
+        })));
+      } while (offset < bytes.length);
+    };
+    if (mimes.includes(TEXT) && this.local.text !== undefined) return send(TEXT, pb.utf8.encode(this.local.text));
+    if (mimes.includes(PNG) && this.local.png) {
+      return this.local.png.arrayBuffer().then((b) => send(PNG, new Uint8Array(b)));
+    }
+    send("", new Uint8Array());
+  },
+};
+
+async function clipboardMessage(bytes) {
+  const message = pb.parse(bytes);
+  if (message.has(1)) {
+    clip.guest = (pb.parse(message.get(1)[0]).get(1) || []).map((m) => pb.text.decode(m));
+    if (document.hasFocus()) clip.fetchGuest(); else clip.guestPending = true;
+  } else if (message.has(2)) {
+    clip.guest = [];
+    clip.guestPending = false;
+  } else if (message.has(3)) {
+    const r = pb.parse(message.get(3)[0]);
+    clip.answer(uint(r, 1), (r.get(2) || []).map((m) => pb.text.decode(m)));
+  } else if (message.has(4)) {
+    const d = pb.parse(message.get(4)[0]);
+    const id = uint(d, 1), chunks = clip.answers.get(id);
+    if (!chunks) return;
+    chunks.push(d.get(3)?.[0] || new Uint8Array());
+    if (!uint(d, 4)) return;
+    clip.answers.delete(id);
+    const mime = str(d, 2), data = new Blob(chunks);
+    try {
+      if (mime === TEXT) {
+        const text = await data.text();
+        clip.written = { text };
+        await navigator.clipboard.writeText(text);
+      } else if (mime === PNG) {
+        const png = new Blob([data], { type: PNG });
+        clip.written = { png };
+        await navigator.clipboard.write([new ClipboardItem({ [PNG]: png })]);
+      }
+    } catch { clip.guestPending = true; }   // no focus or no permission: try again later
+  }
+}
+window.addEventListener("focus", () => clip.focused());
 
 // Once a second: what is decoded, and how well.
 let last = null;

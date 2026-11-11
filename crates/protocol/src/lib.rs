@@ -22,6 +22,16 @@ pub const INPUT_CHANNEL: &str = "input";
 /// The data channel of the guest pointer's shape: [`v1::PointerUpdate`] messages.
 pub const POINTER_CHANNEL: &str = "pointer";
 
+/// The data channel of the clipboard, both ways: [`v1::ClipboardMessage`] messages.
+pub const CLIPBOARD_CHANNEL: &str = "clipboard";
+
+/// The largest data chunk of a [`v1::ClipboardData`]: 64 KiB, well within what browsers accept
+/// in one data channel message (256 KiB for Chromium).
+pub const MAX_CHUNK: usize = 64 * 1024;
+
+/// The largest clipboard content either side sends: 32 MiB.
+pub const MAX_CLIPBOARD: usize = 32 * 1024 * 1024;
+
 #[cfg(test)]
 mod tests {
     use super::v1::{
