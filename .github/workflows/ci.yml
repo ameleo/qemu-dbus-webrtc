@@ -11,6 +11,8 @@ permissions:
 jobs:
   rust:
     runs-on: ubuntu-24.04
+    # A run takes about two minutes; a mirror or network failure must not hold it for long.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - name: GStreamer development files
