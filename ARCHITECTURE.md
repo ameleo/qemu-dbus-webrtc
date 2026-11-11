@@ -32,15 +32,15 @@ client.
 
 What differs is decoding: the native client brings its own decoders and can take what browsers
 may not (VP9 4:4:4). The codec is negotiated in SDP, from the best the client offers down to
-H.264.
+VP9 4:2:0, which every current browser decodes. H.264 is left out: the project targets current
+hardware, and the royalty-free codecs cover it.
 
 ## Codecs
 
 | Codec | Chroma | Royalties | Use |
 |---|---|---|---|
 | AV1 | 4:2:0 | royalty-free licence | default: the most efficient at low bitrates |
-| VP9 | 4:4:4 (profile 1) or 4:2:0 (profile 0) | royalty-free licence | 4:4:4 as the text quality mode, when the bandwidth allows |
-| H.264 | 4:2:0 | patent pool | fallback that every client decodes |
+| VP9 | 4:4:4 (profile 1) or 4:2:0 (profile 0) | royalty-free licence | 4:4:4 as the text quality mode, when the bandwidth allows; 4:2:0 as the fallback every browser decodes |
 | HEVC (H.265) | 4:4:4 or 4:2:0 | patent pools | optional, off by default |
 
 4:2:0 keeps the luma, and so black-on-white text, at full resolution, but halves the chroma
@@ -56,8 +56,8 @@ so the conversion from the guest's RGB uses BT.601.
 
 > **Patent royalties.** AV1 and VP9 come with royalty-free patent licences (from the Alliance
 > for Open Media and Google); third-party pools also claim patents on them, aimed mainly at
-> device makers. H.264 and HEVC are covered by patents licensed through patent pools, and HEVC
-> licensing in particular can apply to services that stream it. HEVC is therefore off by default,
+> device makers. HEVC is covered by patents licensed through patent pools, whose licensing can
+> apply to services that stream it. HEVC is therefore off by default,
 > and turning it on is the deployer's decision. This project ships no encoder or decoder of its
 > own: encoding uses the host GPU's hardware encoder through VA-API, and decoding happens in the
 > user's browser or operating system. Whether your deployment needs a patent license depends on
@@ -99,7 +99,7 @@ Each milestone is validated on real hardware before the next one starts.
 
 1. **Attach:** QMP and D-Bus connection to a running VM, scanouts received, resolution changes
    followed.
-2. **Encode:** VA-API AV1, VP9 (4:4:4 and 4:2:0), H.264 and HEVC; streams checked with a reference
+2. **Encode:** VA-API AV1, VP9 (4:4:4 and 4:2:0) and HEVC; streams checked with a reference
    decoder, frame rate measured.
 3. **Browser:** signalling and WebRTC video in Chrome and Firefox.
 4. **Input:** keyboard and mouse over the `input` data channel.

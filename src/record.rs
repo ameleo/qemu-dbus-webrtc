@@ -2,7 +2,7 @@
 
 //! Recording of an encoded stream to a file, to check it with a reference decoder.
 //!
-//! HEVC and H.264 come out of the encoder in Annex B, which is a file format in itself. VP9
+//! HEVC comes out of the encoder in Annex B, which is a file format in itself. VP9
 //! frames and AV1 temporal units carry no framing of their own, so they go in IVF: a 32-byte file header, then each
 //! frame behind its size and timestamp.
 
@@ -28,7 +28,7 @@ impl Recorder {
         let ivf_fourcc = match codec {
             Codec::Av1 => Some(b"AV01"),
             Codec::Vp9 => Some(b"VP90"),
-            Codec::Hevc | Codec::H264 => None,
+            Codec::Hevc => None,
         };
         let ivf_start = match ivf_fourcc {
             Some(fourcc) => {

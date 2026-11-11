@@ -33,8 +33,6 @@ pub enum Codec {
     Vp9,
     /// Subject to patent royalties, see ARCHITECTURE.md.
     Hevc,
-    /// The fallback every client decodes; no full chroma on the hardware encoders.
-    H264,
 }
 
 impl Codec {
@@ -43,7 +41,6 @@ impl Codec {
             "av1" => Some(Self::Av1),
             "vp9" => Some(Self::Vp9),
             "hevc" | "h265" => Some(Self::Hevc),
-            "h264" | "avc" => Some(Self::H264),
             _ => None,
         }
     }
@@ -53,7 +50,6 @@ impl Codec {
         match self {
             Self::Av1 | Self::Vp9 => "ivf",
             Self::Hevc => "h265",
-            Self::H264 => "h264",
         }
     }
 
@@ -79,11 +75,6 @@ impl Codec {
                 "vah265lpenc b-frames=0",
                 "video/x-h265,profile=(string)main-444",
             ),
-            (Self::H264, false) => (
-                "vah264lpenc b-frames=0",
-                "video/x-h264,profile=(string)high",
-            ),
-            (Self::H264, true) => bail!("no 4:4:4 H.264 on this encoder"),
         })
     }
 
@@ -93,7 +84,6 @@ impl Codec {
             Self::Av1 => "av1parse ! video/x-av1,stream-format=obu-stream,alignment=tu",
             Self::Vp9 => "vp9parse",
             Self::Hevc => "h265parse",
-            Self::H264 => "h264parse",
         }
     }
 }
@@ -145,7 +135,7 @@ pub struct Encoder {
 
 impl Encoder {
     /// Build and start an encoder. Its output goes to `sink`, called once per encoded frame
-    /// (an access unit in Annex B for HEVC and H.264, a VP9 frame, an AV1 temporal unit), on a GStreamer thread.
+    /// (an access unit in Annex B for HEVC, a VP9 frame, an AV1 temporal unit), on a GStreamer thread.
     pub fn new(settings: &Settings, sink: impl FnMut(&[u8]) + Send + 'static) -> Result<Self> {
         let (encoder, profile) = settings.codec.encoder(settings.full_chroma)?;
         // BT.601, limited range: the VA encoders do not write the colour space into the stream,

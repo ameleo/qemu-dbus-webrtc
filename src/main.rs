@@ -22,7 +22,7 @@ use display::{Attach, DisplayEvent, VmProxy};
 use encode::{Codec, Encoder, Settings};
 
 const USAGE: &str = "usage: qemu-dbus-webrtc (--qmp <QMP socket> | --dbus <D-Bus address>) \
-                     [--codec av1|vp9|hevc|h264] [--chroma 420|444] [--bitrate <kbit/s>] \
+                     [--codec av1|vp9|hevc] [--chroma 420|444] [--bitrate <kbit/s>] \
                      [--record <path prefix>]";
 
 /// How often the rates of each console are reported.
