@@ -9,10 +9,16 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+qdw-protocol.workspace = true
 qdw-qemu.workspace = true
 qdw-video.workspace = true
 anyhow.workspace = true
+axum.workspace = true
 gstreamer.workspace = true
+gstreamer-app.workspace = true
+gstreamer-sdp.workspace = true
+gstreamer-video.workspace = true
+gstreamer-webrtc.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true

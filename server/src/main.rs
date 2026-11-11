@@ -2,10 +2,14 @@
 
 //! qemu-dbus-webrtc: a WebRTC console for QEMU virtual machines.
 //!
-//! For now (milestone 2), it attaches to a running VM, encodes each console with the host GPU
-//! and can record the streams to files.
+//! For now (milestone 3), it attaches to a running VM, encodes each console with the host GPU,
+//! shows the first one in a browser over WebRTC, and can record the streams to files.
+
+mod session;
+mod web;
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -13,13 +17,29 @@ use anyhow::{Context, Result, bail};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use gstreamer as gst;
 use qdw_qemu::display::{self, Attach, DisplayEvent, VmProxy};
 use qdw_video::encode::{Codec, Encoder, Settings};
 use qdw_video::record;
+use session::Viewers;
+use web::Request;
 
 const USAGE: &str = "usage: qemu-dbus-webrtc (--qmp <QMP socket> | --dbus <D-Bus address>) \
                      [--codec av1|vp9|hevc] [--chroma 420|444] [--bitrate <kbit/s>] \
-                     [--record <path prefix>]";
+                     [--record <path prefix>] [--listen <address:port>]";
+
+/// Where the viewer page is served by default: this host only, since there is no
+/// authentication yet.
+const DEFAULT_LISTEN: &str = "127.0.0.1:8090";
+
+/// On a still screen, a console with viewers still gets a frame this often. Each one is nearly
+/// empty since nothing changed, but it shows the stream is alive: a WebRTC receiver that gets
+/// no frame for a few seconds takes the stream for frozen and asks for a keyframe (libwebrtc
+/// does, about every 3 seconds). Congestion control will feed on these frames too.
+const STILL_FRAME_INTERVAL: Duration = Duration::from_millis(250);
+
+/// At most one keyframe per console in this interval, whatever the viewers ask.
+const KEYFRAME_INTERVAL: Duration = Duration::from_millis(300);
 
 /// How often the rates of each console are reported.
 const RATE_INTERVAL: Duration = Duration::from_secs(5);
@@ -29,6 +49,8 @@ struct Args {
     settings: Settings,
     /// Record each console's stream to `<prefix>-<console>.<extension>`.
     record: Option<String>,
+    /// The address of the viewer page and its signalling.
+    listen: SocketAddr,
 }
 
 fn parse_args() -> Result<Args> {
@@ -39,6 +61,7 @@ fn parse_args() -> Result<Args> {
         bitrate: 10_000,
     };
     let mut record = None;
+    let mut listen: SocketAddr = DEFAULT_LISTEN.parse()?;
     let mut args = std::env::args().skip(1);
     while let Some(option) = args.next() {
         let Some(value) = args.next() else {
@@ -61,6 +84,7 @@ fn parse_args() -> Result<Args> {
             }
             "--bitrate" => settings.bitrate = value.parse().context(USAGE)?,
             "--record" => record = Some(value),
+            "--listen" => listen = value.parse().context(USAGE)?,
             _ => bail!(USAGE),
         }
     }
@@ -72,11 +96,17 @@ fn parse_args() -> Result<Args> {
         attach,
         settings,
         record,
+        listen,
     })
 }
 
-/// Where an encoder's output goes: a file when recording, nowhere otherwise.
-fn stream_sink(args: &Args, console: u32) -> Result<impl FnMut(&[u8]) + Send + 'static> {
+/// Where an encoder's output goes: to the console's viewers if it has any, and to a file when
+/// recording.
+fn stream_sink(
+    args: &Args,
+    console: u32,
+    viewers: Option<Viewers>,
+) -> Result<impl FnMut(&gst::Buffer) + Send + 'static> {
     let mut recorder = match &args.record {
         Some(prefix) => {
             let path = format!("{prefix}-{console}.{}", args.settings.codec.extension());
@@ -88,12 +118,35 @@ fn stream_sink(args: &Args, console: u32) -> Result<impl FnMut(&[u8]) + Send + '
         }
         None => None,
     };
-    Ok(move |frame: &[u8]| {
-        if let Some(r) = &mut recorder
-            && let Err(e) = r.write(frame)
-        {
-            warn!(console, error = %e, "recording stopped");
-            recorder = None;
+    Ok(move |frame: &gst::Buffer| {
+        if let Some(viewers) = &viewers {
+            let viewers = viewers.lock().unwrap();
+            if !viewers.is_empty() {
+                // Each viewer's pipeline has its own clock, started when the viewer came: drop
+                // the encoder's timestamps so that its appsrc stamps the frame on arrival.
+                // Kept, they would be ahead of the viewer's clock by the time between the two
+                // starts, and the frame held back for that long.
+                let mut unstamped = frame.copy();
+                {
+                    let unstamped = unstamped.get_mut().unwrap();
+                    unstamped.set_pts(gst::ClockTime::NONE);
+                    unstamped.set_dts(gst::ClockTime::NONE);
+                }
+                for viewer in viewers.iter() {
+                    // A viewer that is going away refuses it; it is removed with its session.
+                    let _ = viewer.push_buffer(unstamped.clone());
+                }
+            }
+        }
+        if let Some(r) = &mut recorder {
+            let written = frame
+                .map_readable()
+                .map_err(|e| std::io::Error::other(e.to_string()))
+                .and_then(|map| r.write(&map));
+            if let Err(e) = written {
+                warn!(console, error = %e, "recording stopped");
+                recorder = None;
+            }
         }
     })
 }
@@ -123,6 +176,7 @@ async fn main() -> Result<()> {
 
     let (events_tx, mut events) = mpsc::unbounded_channel();
     let mut listeners = Vec::new();
+    let mut shown = None;
     for id in ids {
         let console = display::ConsoleProxy::builder(&vm_connection)
             .path(format!("/org/qemu/Display1/Console_{id}"))?
@@ -140,9 +194,31 @@ async fn main() -> Result<()> {
         if kind == "Graphic" {
             listeners.push(display::listen(&vm_connection, id, events_tx.clone()).await?);
             info!(console = id, "listening");
+            shown.get_or_insert(id);
         }
     }
     drop(events_tx);
+
+    // Viewers see the first graphic console; several monitors come later.
+    let shown = shown.context("the VM has no graphic console")?;
+    let viewers: HashMap<u32, Viewers> = HashMap::from([(shown, Viewers::default())]);
+    let (requests_tx, mut requests) = mpsc::unbounded_channel();
+    let shared = web::Shared {
+        codec: args.settings.codec,
+        console: shown,
+        viewers: viewers[&shown].clone(),
+        requests: requests_tx,
+    };
+    if !args.listen.ip().is_loopback() {
+        warn!(listen = %args.listen, "no authentication yet: anyone who reaches this address sees the VM");
+    }
+    let listen = args.listen;
+    tokio::spawn(async move {
+        if let Err(e) = web::serve(listen, shared).await {
+            warn!(error = %format!("{e:#}"), "the viewer page is down");
+        }
+    });
+    let mut last_keyframe: HashMap<u32, Instant> = HashMap::new();
 
     let mut encoders: HashMap<u32, Encoder> = HashMap::new();
     // Consoles with a new framebuffer not encoded yet. A scanout comes with its full content,
@@ -154,12 +230,41 @@ async fn main() -> Result<()> {
     let mut updates: HashMap<u32, u32> = HashMap::new();
     let mut since = Instant::now();
     let mut report = tokio::time::interval(RATE_INTERVAL);
+    let mut still = tokio::time::interval(STILL_FRAME_INTERVAL);
+    still.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         let event = tokio::select! {
             event = events.recv() => event,
+            _ = still.tick() => {
+                // A frame pushed just after a tick is a bit less than one interval old at the
+                // next one: hence the margin, or every other tick would be skipped.
+                for (console, encoder) in &encoders {
+                    let watched = viewers.get(console).is_some_and(|v| !v.lock().unwrap().is_empty());
+                    if watched && encoder.since_last_frame() >= STILL_FRAME_INTERVAL.mul_f32(0.8)
+                        && let Err(e) = encoder.frame()
+                    {
+                        warn!(console, error = %e, "still frame not encoded");
+                    }
+                }
+                continue;
+            }
             _ = report.tick() => {
                 report_rates(&encoders, &mut updates, since.elapsed());
                 since = Instant::now();
+                continue;
+            }
+            Some(request) = requests.recv() => {
+                match request {
+                    Request::Keyframe { console } => {
+                        let due = last_keyframe.get(&console).is_none_or(|t| t.elapsed() >= KEYFRAME_INTERVAL);
+                        if due && let Some(encoder) = encoders.get(&console) {
+                            last_keyframe.insert(console, Instant::now());
+                            if let Err(e) = encoder.keyframe() {
+                                warn!(console, error = %e, "keyframe not encoded");
+                            }
+                        }
+                    }
+                }
                 continue;
             }
             _ = tokio::signal::ctrl_c() => break,
@@ -211,6 +316,7 @@ async fn main() -> Result<()> {
                 );
                 fresh.insert(console);
                 if let Err(e) = scanout(
+                    viewers.get(&console).cloned(),
                     &args,
                     &mut encoders,
                     console,
@@ -298,6 +404,7 @@ async fn main() -> Result<()> {
 /// if needed.
 #[allow(clippy::too_many_arguments)]
 fn scanout(
+    viewers: Option<Viewers>,
     args: &Args,
     encoders: &mut HashMap<u32, Encoder>,
     console: u32,
@@ -315,9 +422,10 @@ fn scanout(
     }
     let encoder = match encoders.entry(console) {
         std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-        std::collections::hash_map::Entry::Vacant(entry) => {
-            entry.insert(Encoder::new(&args.settings, stream_sink(args, console)?)?)
-        }
+        std::collections::hash_map::Entry::Vacant(entry) => entry.insert(Encoder::new(
+            &args.settings,
+            stream_sink(args, console, viewers)?,
+        )?),
     };
     encoder.set_framebuffer(&plane.fd, width, height, code, plane.offset, plane.stride)
 }

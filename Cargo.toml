@@ -15,10 +15,13 @@ qdw-protocol = { path = "crates/protocol" }
 qdw-qemu = { path = "crates/qemu" }
 qdw-video = { path = "crates/video" }
 anyhow = "1"
+axum = { version = "0.8", features = ["ws"] }
 gstreamer = "0.24"
 gstreamer-allocators = "0.24"
 gstreamer-app = "0.24"
+gstreamer-sdp = "0.24"
 gstreamer-video = "0.24"
+gstreamer-webrtc = "0.24"
 prost = "0.14"
 prost-build = "0.14"
 protox = "0.10"

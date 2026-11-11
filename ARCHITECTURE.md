@@ -19,6 +19,9 @@ libvirt, plain QEMU) starts and stops it.
   that VA-API cannot import as RGB, so `vapostproc` uploads it (one CPU copy) and converts it to
   YUV on the GPU, where the encoder reads it.
 - **Transport:** GStreamer `webrtcbin`, with congestion control (GCC) driving the encoder bitrate.
+- **Transport, per viewer:** each viewer has its own `webrtcbin`, fed with the encoded frames
+  of the console it watches: one encoder per console, whatever the number of viewers. A viewer
+  that loses a frame asks for a keyframe (PLI), which goes back to the encoder.
 - **Signalling:** a WebSocket carrying the SDP offer and answer and ICE candidates, behind
   token authentication supplied by the deployment (a broker or the VM manager).
 - **Protocol:** the messages between the server and its clients are Protocol Buffers, defined
@@ -33,7 +36,7 @@ libvirt, plain QEMU) starts and stops it.
 | `crates/protocol` | `qdw-protocol` | the `.proto` file and the Rust types generated from it |
 | `crates/qemu` | `qdw-qemu` | attachment to QEMU: QMP, the D-Bus display |
 | `crates/video` | `qdw-video` | hardware encoding of a framebuffer, recording |
-| `server` | `qemu-dbus-webrtc` | the server |
+| `server` | `qemu-dbus-webrtc` | the server: viewer sessions, signalling, the browser page |
 
 A native client will sit next to them and share `qdw-protocol`.
 

@@ -1,0 +1,131 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: MPL-2.0 -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>qemu-dbus-webrtc</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #eee; font: 13px/1.4 system-ui, sans-serif; }
+  video { width: 100%; height: 100%; object-fit: contain; display: block; }
+  #stats { position: fixed; top: 8px; left: 8px; padding: 6px 10px; background: rgba(0, 0, 0, .65);
+           border-radius: 4px; white-space: pre; font-family: ui-monospace, monospace; pointer-events: none; }
+  #stats.error { background: #8b1a1a; }
+</style>
+</head>
+<body>
+<video id="video" autoplay muted playsinline></video>
+<div id="stats">connecting…</div>
+<script>
+"use strict";
+const video = document.getElementById("video");
+const stats = document.getElementById("stats");
+
+function fail(message) {
+  stats.textContent = message;
+  stats.className = "error";
+}
+
+// Protocol Buffers, just what the messages of crates/protocol/proto/qdw.proto need:
+// varints and length-delimited fields (strings, nested messages).
+const pb = {
+  utf8: new TextEncoder(),
+  text: new TextDecoder(),
+  varint(out, n) {
+    while (n > 0x7f) { out.push((n & 0x7f) | 0x80); n = Math.floor(n / 128); }
+    out.push(n);
+  },
+  bytes(out, field, bytes) { pb.varint(out, (field << 3) | 2); pb.varint(out, bytes.length); for (const b of bytes) out.push(b); },
+  string(out, field, s) { pb.bytes(out, field, pb.utf8.encode(s)); },
+  uint(out, field, n) { pb.varint(out, field << 3); pb.varint(out, n); },
+  message(build) { const out = []; build(out); return out; },
+  // The fields of a message: field number -> list of values (numbers, or byte arrays).
+  parse(bytes) {
+    const fields = new Map();
+    let i = 0;
+    const varint = () => { let n = 0, shift = 1, b; do { b = bytes[i++]; n += (b & 0x7f) * shift; shift *= 128; } while (b & 0x80); return n; };
+    while (i < bytes.length) {
+      const key = varint(), field = Math.floor(key / 8), wire = key & 7;
+      let value;
+      if (wire === 0) value = varint();
+      else if (wire === 2) { const n = varint(); value = bytes.subarray(i, i + n); i += n; }
+      else if (wire === 1) { i += 8; continue; }
+      else if (wire === 5) { i += 4; continue; }
+      else throw new Error(`wire type ${wire}`);
+      if (!fields.has(field)) fields.set(field, []);
+      fields.get(field).push(value);
+    }
+    return fields;
+  },
+};
+const str = (fields, n) => pb.text.decode(fields.get(n)?.[0] || new Uint8Array());
+const uint = (fields, n) => fields.get(n)?.[0] || 0;
+
+// ClientMessage: hello = 1, answer = 2, ice = 3.
+const hello = (codecs) => pb.message((o) => pb.bytes(o, 1, pb.message((h) => codecs.forEach((c) => pb.string(h, 1, c)))));
+const answer = (sdp) => pb.message((o) => pb.bytes(o, 2, pb.message((d) => pb.string(d, 1, sdp))));
+const ice = (candidate, mline) => pb.message((o) => pb.bytes(o, 3, pb.message((c) => { pb.string(c, 1, candidate); pb.uint(c, 2, mline); })));
+
+const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
+ws.binaryType = "arraybuffer";
+const pc = new RTCPeerConnection();
+const send = (bytes) => ws.send(new Uint8Array(bytes));
+
+pc.ontrack = (event) => { video.srcObject = event.streams[0] || new MediaStream([event.track]); };
+pc.onicecandidate = (event) => {
+  if (event.candidate) send(ice(event.candidate.candidate, event.candidate.sdpMLineIndex || 0));
+};
+pc.onconnectionstatechange = () => {
+  if (pc.connectionState === "failed") fail("connection failed");
+};
+
+ws.onopen = () => {
+  // Tell the server which video codecs this browser decodes.
+  const codecs = (RTCRtpReceiver.getCapabilities("video")?.codecs || []).map((c) => c.mimeType);
+  send(hello([...new Set(codecs)]));
+};
+ws.onclose = () => { if (pc.connectionState !== "failed") fail("disconnected"); };
+// ServerMessage: offer = 1, ice = 2, error = 3.
+ws.onmessage = async (event) => {
+  const message = pb.parse(new Uint8Array(event.data));
+  if (message.has(1)) {
+    await pc.setRemoteDescription({ type: "offer", sdp: str(pb.parse(message.get(1)[0]), 1) });
+    await pc.setLocalDescription(await pc.createAnswer());
+    send(answer(pc.localDescription.sdp));
+  } else if (message.has(2)) {
+    const c = pb.parse(message.get(2)[0]);
+    await pc.addIceCandidate({ candidate: str(c, 1), sdpMLineIndex: uint(c, 2) });
+  } else if (message.has(3)) {
+    fail(str(pb.parse(message.get(3)[0]), 1));
+  }
+};
+
+// Once a second: what is decoded, and how well.
+let last = null;
+setInterval(async () => {
+  if (stats.className === "error") return;
+  const report = await pc.getStats();
+  let inbound = null;
+  const codecs = new Map();
+  report.forEach((s) => {
+    if (s.type === "inbound-rtp" && s.kind === "video") inbound = s;
+    if (s.type === "codec") codecs.set(s.id, s);
+  });
+  if (!inbound) { stats.textContent = `connection: ${pc.connectionState}`; return; }
+  const codec = codecs.get(inbound.codecId);
+  let kbps = 0;
+  if (last) kbps = (8 * (inbound.bytesReceived - last.bytesReceived)) / (inbound.timestamp - last.timestamp);
+  last = inbound;
+  stats.textContent = [
+    `codec    ${codec ? codec.mimeType + (codec.sdpFmtpLine ? " " + codec.sdpFmtpLine : "") : "?"}`,
+    `decoder  ${inbound.decoderImplementation || "?"}${inbound.powerEfficientDecoder ? " (hardware)" : ""}`,
+    `size     ${inbound.frameWidth || 0}x${inbound.frameHeight || 0}`,
+    `fps      ${(inbound.framesPerSecond || 0).toFixed(0)}`,
+    `bitrate  ${kbps.toFixed(0)} kbit/s`,
+    `lost     ${inbound.packetsLost || 0} packets, ${inbound.pliCount || 0} PLI, ${inbound.freezeCount || 0} freezes`,
+    `jitter   ${((inbound.jitter || 0) * 1000).toFixed(1)} ms`,
+  ].join("\n");
+}, 1000);
+</script>
+</body>
+</html>

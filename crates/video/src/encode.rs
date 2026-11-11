@@ -63,27 +63,79 @@ impl Codec {
     fn encoder(self, full_chroma: bool) -> Result<(&'static str, &'static str)> {
         Ok(match (self, full_chroma) {
             // Low-power encoders: the only kind Intel Arc GPUs have.
-            (Self::Av1, false) => ("vaav1lpenc", "video/x-av1"),
+            //
+            // No reference to future frames (no B-frames, hierarchical-level=1): by default AV1
+            // and VP9 code groups of up to 32 frames ahead, and hold the frames back until the
+            // group is complete, seconds at a low frame rate. This also means no hidden frames:
+            // one frame per picture.
+            //
+            // Keyframes as rarely as the encoders allow: a client asks for one when it needs it.
+            (Self::Av1, false) => (
+                "vaav1lpenc hierarchical-level=1 key-int-max=1024",
+                "video/x-av1",
+            ),
             (Self::Av1, true) => bail!("no 4:4:4 AV1 on this encoder"),
-            (Self::Vp9, false) => ("vavp9lpenc", "video/x-vp9,profile=(string)0"),
-            (Self::Vp9, true) => ("vavp9lpenc", "video/x-vp9,profile=(string)1"),
+            (Self::Vp9, false) => (
+                "vavp9lpenc hierarchical-level=1 key-int-max=1024",
+                "video/x-vp9,profile=(string)0",
+            ),
+            (Self::Vp9, true) => (
+                "vavp9lpenc hierarchical-level=1 key-int-max=1024",
+                "video/x-vp9,profile=(string)1",
+            ),
             (Self::Hevc, false) => (
-                "vah265lpenc b-frames=0",
+                "vah265lpenc b-frames=0 key-int-max=1024",
                 "video/x-h265,profile=(string)main",
             ),
             (Self::Hevc, true) => (
-                "vah265lpenc b-frames=0",
+                "vah265lpenc b-frames=0 key-int-max=1024",
                 "video/x-h265,profile=(string)main-444",
             ),
         })
     }
 
-    fn parser(self) -> &'static str {
+    /// The parser, and the caps of the encoded stream as it leaves the encoder.
+    fn parser(self) -> (&'static str, &'static str) {
         match self {
             // Whole temporal units, OBUs with their size: what RTP and IVF carry.
-            Self::Av1 => "av1parse ! video/x-av1,stream-format=obu-stream,alignment=tu",
-            Self::Vp9 => "vp9parse",
-            Self::Hevc => "h265parse",
+            Self::Av1 => (
+                "av1parse",
+                "video/x-av1,stream-format=obu-stream,alignment=tu,parsed=true",
+            ),
+            // One picture per buffer: the encoder makes no hidden frames, and if it did, a
+            // superframe would keep the hidden frame with the one that shows it.
+            Self::Vp9 => ("vp9parse", "video/x-vp9,alignment=super-frame,parsed=true"),
+            Self::Hevc => (
+                "h265parse",
+                "video/x-h265,stream-format=byte-stream,alignment=au,parsed=true",
+            ),
+        }
+    }
+
+    /// The caps of the encoded stream, to feed it to another pipeline.
+    pub fn stream_caps(self) -> &'static str {
+        self.parser().1
+    }
+
+    /// The RTP payloader and the codec's RTP encoding name.
+    pub fn rtp(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Av1 => ("rtpav1pay", "AV1"),
+            // The Rust payloader: the C one cannot parse the frames of the VA encoder.
+            Self::Vp9 => ("rtpvp9pay2", "VP9"),
+            Self::Hevc => (
+                "rtph265pay config-interval=-1 aggregate-mode=zero-latency",
+                "H265",
+            ),
+        }
+    }
+
+    /// The codec's media type in a browser (`RTCRtpReceiver.getCapabilities`).
+    pub fn mime_type(self) -> &'static str {
+        match self {
+            Self::Av1 => "video/AV1",
+            Self::Vp9 => "video/VP9",
+            Self::Hevc => "video/H265",
         }
     }
 }
@@ -131,12 +183,18 @@ pub struct Encoder {
     encoded: Arc<AtomicU64>,
     /// Bytes out of the encoder.
     bytes: Arc<AtomicU64>,
+    /// When the last frame went into the encoder.
+    last_frame: std::cell::Cell<std::time::Instant>,
 }
 
 impl Encoder {
     /// Build and start an encoder. Its output goes to `sink`, called once per encoded frame
-    /// (an access unit in Annex B for HEVC, a VP9 frame, an AV1 temporal unit), on a GStreamer thread.
-    pub fn new(settings: &Settings, sink: impl FnMut(&[u8]) + Send + 'static) -> Result<Self> {
+    /// (an access unit in Annex B for HEVC, a VP9 frame, an AV1 temporal unit), on a GStreamer
+    /// thread.
+    pub fn new(
+        settings: &Settings,
+        sink: impl FnMut(&gst::Buffer) + Send + 'static,
+    ) -> Result<Self> {
         let (encoder, profile) = settings.codec.encoder(settings.full_chroma)?;
         // BT.601, limited range: the VA encoders do not write the colour space into the stream,
         // and decoders then assume BT.601. Converting with BT.709 shifts the colours.
@@ -148,10 +206,11 @@ impl Encoder {
              ! video/x-raw(memory:VAMemory),format={raw},colorimetry=bt601 \
              ! {encoder} name=encoder rate-control=cbr bitrate={bitrate} \
              ! {profile} \
-             ! {parser} \
+             ! {parser} ! {stream_caps} \
              ! appsink name=sink sync=false",
             bitrate = settings.bitrate,
-            parser = settings.codec.parser(),
+            parser = settings.codec.parser().0,
+            stream_caps = settings.codec.stream_caps(),
         );
         let pipeline = gst::parse::launch(&description)?
             .downcast::<gst::Pipeline>()
@@ -173,11 +232,10 @@ impl Encoder {
             gst_app::AppSinkCallbacks::builder()
                 .new_sample(move |appsink| {
                     let sample = appsink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
-                    let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
-                    let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
+                    let buffer = sample.buffer_owned().ok_or(gst::FlowError::Error)?;
                     counted.fetch_add(1, Ordering::Relaxed);
-                    sized.fetch_add(map.len() as u64, Ordering::Relaxed);
-                    (sink.lock().unwrap())(&map);
+                    sized.fetch_add(buffer.size() as u64, Ordering::Relaxed);
+                    (sink.lock().unwrap())(&buffer);
                     Ok(gst::FlowSuccess::Ok)
                 })
                 .build(),
@@ -204,6 +262,7 @@ impl Encoder {
             framebuffer: None,
             encoded,
             bytes,
+            last_frame: std::cell::Cell::new(std::time::Instant::now()),
         })
     }
 
@@ -271,7 +330,24 @@ impl Encoder {
         self.src
             .push_buffer(buffer)
             .map_err(|e| anyhow!("pushing a frame: {e:?}"))?;
+        self.last_frame.set(std::time::Instant::now());
         Ok(())
+    }
+
+    /// How long ago the last frame went into the encoder.
+    pub fn since_last_frame(&self) -> std::time::Duration {
+        self.last_frame.get().elapsed()
+    }
+
+    /// Make the next frame a keyframe, and encode the framebuffer now: a new viewer, or one
+    /// that lost a frame, needs it even if the guest does not draw.
+    pub fn keyframe(&self) -> Result<()> {
+        self.src.send_event(
+            gst_video::DownstreamForceKeyUnitEvent::builder()
+                .all_headers(true)
+                .build(),
+        );
+        self.frame()
     }
 
     /// The head is off: nothing to encode until the next framebuffer.
