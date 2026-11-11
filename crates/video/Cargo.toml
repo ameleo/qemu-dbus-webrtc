@@ -1,0 +1,18 @@
+[package]
+name = "qdw-video"
+description = "Hardware video encoding of a guest framebuffer, and recording of the streams"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+gstreamer.workspace = true
+gstreamer-allocators.workspace = true
+gstreamer-app.workspace = true
+gstreamer-video.workspace = true
+rustix = { workspace = true, features = ["fs"] }
+tracing.workspace = true

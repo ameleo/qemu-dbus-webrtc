@@ -22,6 +22,16 @@ libvirt, plain QEMU) starts and stops it.
 - **Signalling:** a WebSocket carrying the SDP offer and answer and ICE candidates, behind
   token authentication supplied by the deployment (a broker or the VM manager).
 
+## Source layout
+
+| Directory | Crate | Role |
+|---|---|---|
+| `crates/qemu` | `qdw-qemu` | attachment to QEMU: QMP, the D-Bus display |
+| `crates/video` | `qdw-video` | hardware encoding of a framebuffer, recording |
+| `server` | `qemu-dbus-webrtc` | the server |
+
+A native client will sit next to them.
+
 ## Clients
 
 Two clients, one protocol: the browser, and a native client built on libwebrtc, the WebRTC

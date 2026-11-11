@@ -5,11 +5,6 @@
 //! For now (milestone 2), it attaches to a running VM, encodes each console with the host GPU
 //! and can record the streams to files.
 
-mod display;
-mod encode;
-mod qmp;
-mod record;
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -18,8 +13,9 @@ use anyhow::{Context, Result, bail};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use display::{Attach, DisplayEvent, VmProxy};
-use encode::{Codec, Encoder, Settings};
+use qdw_qemu::display::{self, Attach, DisplayEvent, VmProxy};
+use qdw_video::encode::{Codec, Encoder, Settings};
+use qdw_video::record;
 
 const USAGE: &str = "usage: qemu-dbus-webrtc (--qmp <QMP socket> | --dbus <D-Bus address>) \
                      [--codec av1|vp9|hevc] [--chroma 420|444] [--bitrate <kbit/s>] \

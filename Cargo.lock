@@ -713,7 +713,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "qemu-dbus-webrtc"
+name = "qdw-qemu"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rustix",
+ "serde_json",
+ "tokio",
+ "zbus",
+]
+
+[[package]]
+name = "qdw-video"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -722,11 +733,20 @@ dependencies = [
  "gstreamer-app",
  "gstreamer-video",
  "rustix",
- "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "qemu-dbus-webrtc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gstreamer",
+ "qdw-qemu",
+ "qdw-video",
  "tokio",
  "tracing",
  "tracing-subscriber",
- "zbus",
 ]
 
 [[package]]
