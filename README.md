@@ -14,7 +14,12 @@ welcome, see [CONTRIBUTING.md](CONTRIBUTING.md).
 - Standard WebRTC in any modern browser: no plugin, no client to install.
 - Independent of the VM manager: it attaches to a running VM (QMP and D-Bus) and does not manage
   its lifecycle, so it can serve Proxmox VE, libvirt or plain QEMU alike.
-- Royalty-free codecs by default where the hardware allows it.
+
+## Design
+
+See [ARCHITECTURE.md](ARCHITECTURE.md): WebRTC through GStreamer `webrtcbin`, HEVC by default
+(see the note on patent royalties there), and the device redirection formats of the Remote
+Desktop Protocol carried over WebRTC data channels.
 
 ## License
 
