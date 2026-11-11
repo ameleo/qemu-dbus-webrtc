@@ -21,6 +21,7 @@ use gstreamer_webrtc as gst_webrtc;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use qdw_protocol::{INPUT_CHANNEL, POINTER_CHANNEL};
 use qdw_video::encode::Codec;
 
 /// The payload type of the video. Fixed: there is one video stream for now.
@@ -34,6 +35,10 @@ pub enum Signal {
         mline_index: u32,
         candidate: String,
     },
+    /// A message on the input data channel.
+    Input(Vec<u8>),
+    /// The pointer data channel is open: the pointer can be sent.
+    PointerOpen,
     /// The connection failed or ended; the session is over.
     Closed,
 }
@@ -44,6 +49,8 @@ pub type Viewers = Arc<Mutex<Vec<gst_app::AppSrc>>>;
 pub struct Session {
     pipeline: gst::Pipeline,
     webrtc: gst::Element,
+    /// The guest pointer goes to the client on this channel.
+    pointer: gst_webrtc::WebRTCDataChannel,
     src: gst_app::AppSrc,
     viewers: Viewers,
 }
@@ -98,8 +105,8 @@ rtcp-fb-nack-pli=(boolean)true \
         );
 
         let offers = signals.clone();
-        // One offer per session: webrtcbin may ask more than once, and nothing needs
-        // renegotiating yet.
+        // One offer per session: webrtcbin may ask more than once (the data channels, then the
+        // video), and nothing needs renegotiating yet.
         let offered = Arc::new(std::sync::atomic::AtomicBool::new(false));
         webrtc.connect("on-negotiation-needed", false, move |values| {
             // A panic cannot leave a GLib callback: no unwrap in here.
@@ -160,6 +167,7 @@ rtcp-fb-nack-pli=(boolean)true \
         });
 
         let closed_on_error = signals.clone();
+        let closed_on_input = signals.clone();
         let closed = signals;
         let on_connected = keyframe.clone();
         webrtc.connect_notify(Some("connection-state"), move |webrtc, _| {
@@ -212,16 +220,52 @@ rtcp-fb-nack-pli=(boolean)true \
         });
 
         pipeline.add(&webrtc)?;
-        // webrtcbin negotiates once caps arrive on the video, after PLAYING.
+        // The video first, then the data channels, which webrtcbin makes from READY on. It
+        // negotiates once caps arrive on the video, after PLAYING: one offer covers all three.
         rtp.link(&webrtc)?;
+        pipeline.set_state(gst::State::Ready)?;
+        let input = Self::data_channel(&webrtc, INPUT_CHANNEL)?;
+        let messages = closed_on_input.clone();
+        input.connect_on_message_data(move |_, data| {
+            // Nothing else here: this runs on webrtcbin's thread, where calling into it deadlocks.
+            if let Some(data) = data {
+                let _ = messages.send(Signal::Input(data.to_vec()));
+            }
+        });
+        let pointer = Self::data_channel(&webrtc, POINTER_CHANNEL)?;
+        let opened = closed_on_input;
+        pointer.connect_on_open(move |_| {
+            let _ = opened.send(Signal::PointerOpen);
+        });
         pipeline.set_state(gst::State::Playing)?;
         viewers.lock().unwrap().push(src.clone());
         Ok(Self {
             pipeline,
             webrtc,
+            pointer,
             src,
             viewers,
         })
+    }
+
+    /// A reliable, ordered data channel.
+    fn data_channel(webrtc: &gst::Element, label: &str) -> Result<gst_webrtc::WebRTCDataChannel> {
+        webrtc
+            .emit_by_name::<Option<gst_webrtc::WebRTCDataChannel>>(
+                "create-data-channel",
+                &[&label, &None::<gst::Structure>],
+            )
+            .with_context(|| format!("creating the {label} data channel"))
+    }
+
+    /// Send a message on the pointer data channel.
+    pub fn send_pointer(&self, message: Vec<u8>) {
+        if let Err(e) = self
+            .pointer
+            .send_data_full(Some(&gst::glib::Bytes::from_owned(message)))
+        {
+            warn!(error = %e, "pointer update not sent");
+        }
     }
 
     pub fn apply_answer(&self, sdp: &str) -> Result<()> {

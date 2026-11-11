@@ -1,0 +1,149 @@
+// SPDX-License-Identifier: MPL-2.0
+
+//! A viewer's keyboard and pointer, applied to the guest.
+//!
+//! What is pressed is tracked, so that a viewer that goes away leaves no key or button stuck.
+
+use std::collections::HashSet;
+
+use anyhow::Result;
+use qdw_protocol::v1::{Button, Input, InputEvent, Key, LockKeys, input_event::Event};
+use qdw_qemu::input::{self as qemu, CAPS_LOCK, NUM_LOCK, SCROLL_LOCK};
+use tracing::debug;
+
+/// A wheel notch, in the units of `Wheel` messages.
+const NOTCH: i32 = 120;
+
+/// The scancodes of the lock keys.
+const CAPS_LOCK_KEY: u32 = 0x3A;
+const NUM_LOCK_KEY: u32 = 0x45;
+const SCROLL_LOCK_KEY: u32 = 0x46;
+
+/// QEMU's number for Pause, which PC keyboards send as E1 1D 45.
+const PAUSE: u32 = 0xC6;
+
+/// The input of one viewer.
+pub struct ViewerInput {
+    qemu: qemu::Input,
+    keys: HashSet<u32>,
+    buttons: HashSet<qemu::Button>,
+    /// Wheel rotation not yet sent, less than a notch.
+    wheel: (i32, i32),
+}
+
+impl ViewerInput {
+    pub fn new(qemu: qemu::Input) -> Self {
+        Self {
+            qemu,
+            keys: HashSet::new(),
+            buttons: HashSet::new(),
+            wheel: (0, 0),
+        }
+    }
+
+    pub async fn apply(&mut self, input: Input) -> Result<()> {
+        for InputEvent { event } in input.events {
+            match event {
+                Some(Event::Key(key)) => self.key(&key).await?,
+                Some(Event::PointerMove(m)) => {
+                    // One screen for now: the console this viewer is shown.
+                    if m.screen == 0 {
+                        self.qemu.move_to(m.x, m.y).await?;
+                    }
+                }
+                Some(Event::PointerButton(b)) => {
+                    let button = match b.button() {
+                        Button::Left => qemu::Button::Left,
+                        Button::Middle => qemu::Button::Middle,
+                        Button::Right => qemu::Button::Right,
+                        Button::Back => qemu::Button::Side,
+                        Button::Forward => qemu::Button::Extra,
+                        Button::Unspecified => continue,
+                    };
+                    debug!(?button, down = b.down, "button");
+                    self.qemu.button(button, b.down).await?;
+                    if b.down {
+                        self.buttons.insert(button);
+                    } else {
+                        self.buttons.remove(&button);
+                    }
+                }
+                Some(Event::Wheel(w)) => self.wheel(w.dx, w.dy).await?,
+                Some(Event::LockKeys(locks)) => self.lock_keys(&locks).await?,
+                // An event of a newer client.
+                None => {}
+            }
+        }
+        Ok(())
+    }
+
+    async fn key(&mut self, key: &Key) -> Result<()> {
+        let keycode = match (key.scancode, key.extended, key.extended1) {
+            (0x1D, false, true) => PAUSE,
+            (code @ 1..=0x7F, extended, false) => code | if extended { 0x80 } else { 0 },
+            _ => {
+                debug!(?key, "unknown key");
+                return Ok(());
+            }
+        };
+        debug!(keycode = %format!("{keycode:#x}"), down = key.down, "key");
+        self.qemu.key(keycode, key.down).await?;
+        if key.down {
+            self.keys.insert(keycode);
+        } else {
+            self.keys.remove(&keycode);
+        }
+        Ok(())
+    }
+
+    /// Whole notches go to the guest, the rest waits for more.
+    async fn wheel(&mut self, dx: i32, dy: i32) -> Result<()> {
+        self.wheel.0 += dx;
+        self.wheel.1 += dy;
+        while self.wheel.1 >= NOTCH {
+            self.qemu.click(qemu::Button::WheelUp).await?;
+            self.wheel.1 -= NOTCH;
+        }
+        while self.wheel.1 <= -NOTCH {
+            self.qemu.click(qemu::Button::WheelDown).await?;
+            self.wheel.1 += NOTCH;
+        }
+        while self.wheel.0 >= NOTCH {
+            self.qemu.click(qemu::Button::WheelRight).await?;
+            self.wheel.0 -= NOTCH;
+        }
+        while self.wheel.0 <= -NOTCH {
+            self.qemu.click(qemu::Button::WheelLeft).await?;
+            self.wheel.0 += NOTCH;
+        }
+        Ok(())
+    }
+
+    /// Toggle the guest's lock keys that differ from the client's.
+    async fn lock_keys(&mut self, locks: &LockKeys) -> Result<()> {
+        let guest = self.qemu.keyboard.modifiers().await?;
+        debug!(?locks, guest, "lock keys");
+        for (wanted, bit, key) in [
+            (locks.caps_lock, CAPS_LOCK, CAPS_LOCK_KEY),
+            (locks.num_lock, NUM_LOCK, NUM_LOCK_KEY),
+            (locks.scroll_lock, SCROLL_LOCK, SCROLL_LOCK_KEY),
+        ] {
+            if wanted != (guest & bit != 0) {
+                self.qemu.key(key, true).await?;
+                self.qemu.key(key, false).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Release whatever the viewer left pressed.
+    pub async fn release_all(&mut self) -> Result<()> {
+        for keycode in self.keys.drain() {
+            self.qemu.key(keycode, false).await?;
+        }
+        for button in self.buttons.drain() {
+            self.qemu.button(button, false).await?;
+        }
+        Ok(())
+    }
+}

@@ -38,6 +38,13 @@ const pb = {
   bytes(out, field, bytes) { pb.varint(out, (field << 3) | 2); pb.varint(out, bytes.length); for (const b of bytes) out.push(b); },
   string(out, field, s) { pb.bytes(out, field, pb.utf8.encode(s)); },
   uint(out, field, n) { pb.varint(out, field << 3); pb.varint(out, n); },
+  // int32: a negative value is sent as its 64-bit two's complement.
+  int(out, field, n) {
+    pb.varint(out, field << 3);
+    let v = BigInt.asUintN(64, BigInt(n));
+    while (v > 0x7fn) { out.push(Number(v & 0x7fn) | 0x80); v >>= 7n; }
+    out.push(Number(v));
+  },
   message(build) { const out = []; build(out); return out; },
   // The fields of a message: field number -> list of values (numbers, or byte arrays).
   parse(bytes) {
@@ -72,6 +79,11 @@ const pc = new RTCPeerConnection();
 const send = (bytes) => ws.send(new Uint8Array(bytes));
 
 pc.ontrack = (event) => { video.srcObject = event.streams[0] || new MediaStream([event.track]); };
+pc.ondatachannel = ({ channel }) => {
+  channel.binaryType = "arraybuffer";
+  if (channel.label === "input") input.channel = channel;
+  if (channel.label === "pointer") channel.onmessage = (event) => pointerUpdate(new Uint8Array(event.data));
+};
 pc.onicecandidate = (event) => {
   if (event.candidate) send(ice(event.candidate.candidate, event.candidate.sdpMLineIndex || 0));
 };
@@ -99,6 +111,157 @@ ws.onmessage = async (event) => {
     fail(str(pb.parse(message.get(3)[0]), 1));
   }
 };
+
+// ---------------------------------------------------------------------------------------------
+// Keyboard and pointer, modelled on RDP: keys by position (the guest applies its own layout),
+// lock keys synchronised on focus, everything released when the focus goes.
+
+// KeyboardEvent.code -> PC scancode, set 1. 0xE000 marks the E0 prefix; Pause is apart.
+const SCANCODES = {
+  Escape: 0x01, Digit1: 0x02, Digit2: 0x03, Digit3: 0x04, Digit4: 0x05, Digit5: 0x06, Digit6: 0x07,
+  Digit7: 0x08, Digit8: 0x09, Digit9: 0x0a, Digit0: 0x0b, Minus: 0x0c, Equal: 0x0d, Backspace: 0x0e,
+  Tab: 0x0f, KeyQ: 0x10, KeyW: 0x11, KeyE: 0x12, KeyR: 0x13, KeyT: 0x14, KeyY: 0x15, KeyU: 0x16,
+  KeyI: 0x17, KeyO: 0x18, KeyP: 0x19, BracketLeft: 0x1a, BracketRight: 0x1b, Enter: 0x1c,
+  ControlLeft: 0x1d, KeyA: 0x1e, KeyS: 0x1f, KeyD: 0x20, KeyF: 0x21, KeyG: 0x22, KeyH: 0x23,
+  KeyJ: 0x24, KeyK: 0x25, KeyL: 0x26, Semicolon: 0x27, Quote: 0x28, Backquote: 0x29,
+  ShiftLeft: 0x2a, Backslash: 0x2b, KeyZ: 0x2c, KeyX: 0x2d, KeyC: 0x2e, KeyV: 0x2f, KeyB: 0x30,
+  KeyN: 0x31, KeyM: 0x32, Comma: 0x33, Period: 0x34, Slash: 0x35, ShiftRight: 0x36,
+  NumpadMultiply: 0x37, AltLeft: 0x38, Space: 0x39, CapsLock: 0x3a, F1: 0x3b, F2: 0x3c, F3: 0x3d,
+  F4: 0x3e, F5: 0x3f, F6: 0x40, F7: 0x41, F8: 0x42, F9: 0x43, F10: 0x44, NumLock: 0x45,
+  ScrollLock: 0x46, Numpad7: 0x47, Numpad8: 0x48, Numpad9: 0x49, NumpadSubtract: 0x4a,
+  Numpad4: 0x4b, Numpad5: 0x4c, Numpad6: 0x4d, NumpadAdd: 0x4e, Numpad1: 0x4f, Numpad2: 0x50,
+  Numpad3: 0x51, Numpad0: 0x52, NumpadDecimal: 0x53, IntlBackslash: 0x56, F11: 0x57, F12: 0x58,
+  NumpadEqual: 0x59, KanaMode: 0x70, IntlRo: 0x73, Convert: 0x79, NonConvert: 0x7b, IntlYen: 0x7d,
+  NumpadComma: 0x7e,
+  NumpadEnter: 0xe01c, ControlRight: 0xe01d, AudioVolumeMute: 0xe020, MediaPlayPause: 0xe022,
+  MediaStop: 0xe024, AudioVolumeDown: 0xe02e, AudioVolumeUp: 0xe030, NumpadDivide: 0xe035,
+  PrintScreen: 0xe037, AltRight: 0xe038, Home: 0xe047, ArrowUp: 0xe048, PageUp: 0xe049,
+  ArrowLeft: 0xe04b, ArrowRight: 0xe04d, End: 0xe04f, ArrowDown: 0xe050, PageDown: 0xe051,
+  Insert: 0xe052, Delete: 0xe053, MetaLeft: 0xe05b, MetaRight: 0xe05c, ContextMenu: 0xe05d,
+  MediaTrackPrevious: 0xe010, MediaTrackNext: 0xe019,
+};
+
+// Input = 1 repeated InputEvent; InputEvent: key = 1, pointer_move = 2, pointer_button = 3,
+// wheel = 4, lock_keys = 5.
+const ev = {
+  key: (scancode, down) => pb.message((e) => pb.bytes(e, 1, pb.message((k) => {
+    if (scancode === "Pause") { pb.uint(k, 1, 0x1d); pb.uint(k, 3, 1); }
+    else { pb.uint(k, 1, scancode & 0x7f); pb.uint(k, 2, scancode > 0xff ? 1 : 0); }
+    pb.uint(k, 4, down ? 1 : 0);
+  }))),
+  move: (x, y) => pb.message((e) => pb.bytes(e, 2, pb.message((m) => { pb.uint(m, 1, 0); pb.uint(m, 2, x); pb.uint(m, 3, y); }))),
+  button: (button, down) => pb.message((e) => pb.bytes(e, 3, pb.message((b) => { pb.uint(b, 1, button); pb.uint(b, 2, down ? 1 : 0); }))),
+  wheel: (dx, dy) => pb.message((e) => pb.bytes(e, 4, pb.message((w) => { pb.int(w, 1, dx); pb.int(w, 2, dy); }))),
+  locks: (e) => pb.message((o) => pb.bytes(o, 5, pb.message((l) => {
+    pb.uint(l, 1, e.getModifierState("CapsLock") ? 1 : 0);
+    pb.uint(l, 2, e.getModifierState("NumLock") ? 1 : 0);
+    pb.uint(l, 3, e.getModifierState("ScrollLock") ? 1 : 0);
+  }))),
+};
+
+const input = {
+  channel: null,
+  keys: new Set(),        // scancodes held down
+  buttons: new Set(),     // buttons held down
+  syncLocks: true,        // send the lock keys with the next event
+  move: null,             // the latest pointer position, sent once per frame
+  send(events) {
+    if (this.channel?.readyState !== "open" || events.length === 0) return;
+    this.channel.send(new Uint8Array(pb.message((o) => events.forEach((e) => pb.bytes(o, 1, e)))));
+  },
+  // The lock keys first, when the focus came back.
+  withLocks(e, events) {
+    if (this.syncLocks && e.getModifierState) { this.syncLocks = false; events.unshift(ev.locks(e)); }
+    return events;
+  },
+  releaseAll() {
+    const events = [];
+    this.keys.forEach((k) => events.push(ev.key(k, false)));
+    this.buttons.forEach((b) => events.push(ev.button(b, false)));
+    this.keys.clear(); this.buttons.clear();
+    this.send(events);
+    this.syncLocks = true;
+  },
+};
+
+window.addEventListener("keydown", (e) => {
+  const scancode = e.code === "Pause" ? "Pause" : SCANCODES[e.code];
+  if (scancode === undefined) return;
+  e.preventDefault();
+  input.keys.add(scancode);
+  input.send(input.withLocks(e, [ev.key(scancode, true)]));
+});
+window.addEventListener("keyup", (e) => {
+  const scancode = e.code === "Pause" ? "Pause" : SCANCODES[e.code];
+  if (scancode === undefined) return;
+  e.preventDefault();
+  input.keys.delete(scancode);
+  input.send([ev.key(scancode, false)]);
+});
+window.addEventListener("blur", () => input.releaseAll());
+document.addEventListener("visibilitychange", () => { if (document.hidden) input.releaseAll(); });
+
+// The pixel of the guest screen under the pointer, the video being scaled to fit the window
+// (object-fit: contain) with bars around it.
+function guestPixel(e) {
+  const w = video.videoWidth, h = video.videoHeight;
+  if (!w || !h) return null;
+  const r = video.getBoundingClientRect();
+  const scale = Math.min(r.width / w, r.height / h);
+  const x = (e.clientX - r.left - (r.width - w * scale) / 2) / scale;
+  const y = (e.clientY - r.top - (r.height - h * scale) / 2) / scale;
+  return [Math.min(w - 1, Math.max(0, Math.floor(x))), Math.min(h - 1, Math.max(0, Math.floor(y)))];
+}
+
+// Button: left = 1, middle = 2, right = 3, back = 4, forward = 5; DOM numbers them from 0.
+const BUTTONS = [1, 2, 3, 4, 5];
+video.addEventListener("pointermove", (e) => {
+  const p = guestPixel(e);
+  if (!p) return;
+  if (input.syncLocks) input.send(input.withLocks(e, []));
+  if (!input.move) requestAnimationFrame(() => { const [x, y] = input.move; input.move = null; input.send([ev.move(x, y)]); });
+  input.move = p;
+});
+video.addEventListener("pointerdown", (e) => {
+  const button = BUTTONS[e.button], p = guestPixel(e);
+  if (!button || !p) return;
+  e.preventDefault();
+  video.setPointerCapture(e.pointerId);
+  input.buttons.add(button);
+  input.send(input.withLocks(e, [ev.move(p[0], p[1]), ev.button(button, true)]));
+});
+video.addEventListener("pointerup", (e) => {
+  const button = BUTTONS[e.button];
+  if (!button) return;
+  e.preventDefault();
+  input.buttons.delete(button);
+  input.send([ev.button(button, false)]);
+});
+video.addEventListener("contextmenu", (e) => e.preventDefault());
+// Wheel in 1/120 of a notch, positive up and right. Browsers count a notch as about 100 pixels
+// or 3 lines.
+video.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const unit = e.deltaMode === 0 ? 1.2 : e.deltaMode === 1 ? 40 : 120;
+  input.send([ev.wheel(Math.round(e.deltaX * unit), Math.round(-e.deltaY * unit))]);
+}, { passive: false });
+
+// The guest pointer, drawn by the browser as its own cursor over the video.
+// PointerUpdate: shape = 1, visible = 2; PointerShape: width, height, hot_x, hot_y, rgba.
+const pointer = { css: "default", visible: true };
+function pointerUpdate(bytes) {
+  const update = pb.parse(bytes);
+  if (update.has(1)) {
+    const s = pb.parse(update.get(1)[0]);
+    const [w, h] = [uint(s, 1), uint(s, 2)];
+    const canvas = document.createElement("canvas");
+    canvas.width = w; canvas.height = h;
+    if (w && h) canvas.getContext("2d").putImageData(new ImageData(new Uint8ClampedArray(s.get(5)[0]), w, h), 0, 0);
+    pointer.css = `url(${canvas.toDataURL()}) ${uint(s, 3)} ${uint(s, 4)}, default`;
+  }
+  if (update.has(2)) pointer.visible = update.get(2)[0] !== 0;
+  video.style.cursor = pointer.visible ? pointer.css : "none";
+}
 
 // Once a second: what is decoded, and how well.
 let last = null;

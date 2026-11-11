@@ -99,7 +99,15 @@ Only channels with no patent listed in Microsoft's Open Specifications patent ma
 | Monitor layout, resize | MS-RDPEDISP | `disp` | yes | yes |
 | Smart cards | MS-RDPESC | `rdpdr` | no | yes |
 | USB | MS-RDPEUSB | `urbdrc` | no | yes |
-| Keyboard, mouse | project format | `input` | yes | yes |
+| Keyboard, mouse | project format, modelled on RDP | `input` | yes | yes |
+| Guest pointer shape | project format | `pointer` | yes | yes |
+
+Keyboard and mouse follow what RDP does: keys travel as scancodes, by their position, and the
+guest applies its own layout; the lock keys are synchronised when the client gets the focus;
+everything pressed is released when it loses it, and by the server when a viewer goes; the
+wheel counts in 1/120 of a notch. The guest pointer is not in the video (virtio-gpu draws it
+on a plane of its own): its shape goes to the client, which draws it as its own cursor, free of
+the video latency.
 
 Touch input does not use MS-RDPEI, which has a listed patent.
 

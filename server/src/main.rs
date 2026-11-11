@@ -5,6 +5,8 @@
 //! For now (milestone 3), it attaches to a running VM, encodes each console with the host GPU,
 //! shows the first one in a browser over WebRTC, and can record the streams to files.
 
+mod input;
+mod pointer;
 mod session;
 mod web;
 
@@ -203,11 +205,14 @@ async fn main() -> Result<()> {
     let shown = shown.context("the VM has no graphic console")?;
     let viewers: HashMap<u32, Viewers> = HashMap::from([(shown, Viewers::default())]);
     let (requests_tx, mut requests) = mpsc::unbounded_channel();
+    let (pointer_tx, pointer_rx) = tokio::sync::watch::channel(pointer::Pointer::default());
     let shared = web::Shared {
         codec: args.settings.codec,
         console: shown,
         viewers: viewers[&shown].clone(),
         requests: requests_tx,
+        input: qdw_qemu::input::Input::new(&vm_connection, shown).await?,
+        pointer: pointer_rx,
     };
     if !args.listen.ip().is_loopback() {
         warn!(listen = %args.listen, "no authentication yet: anyone who reaches this address sees the VM");
@@ -371,7 +376,14 @@ async fn main() -> Result<()> {
                 x,
                 y,
                 visible,
-            } => debug!(console, x, y, visible, "pointer"),
+            } => {
+                debug!(console, x, y, visible, "pointer");
+                if console == shown {
+                    pointer_tx.send_if_modified(|p| {
+                        std::mem::replace(&mut p.visible, visible) != visible
+                    });
+                }
+            }
             DisplayEvent::CursorDefine {
                 console,
                 width,
@@ -380,7 +392,19 @@ async fn main() -> Result<()> {
                 hot_y,
                 data,
             } => {
-                info!(console, size = %format!("{width}x{height}"), hot_x, hot_y, bytes = data.len(), "cursor shape");
+                debug!(console, size = %format!("{width}x{height}"), hot_x, hot_y, "pointer shape");
+                if console == shown {
+                    match pointer::shape(width, height, hot_x, hot_y, &data) {
+                        Some(shape) => {
+                            pointer_tx.send_modify(|p| p.shape = Some(std::sync::Arc::new(shape)))
+                        }
+                        None => warn!(
+                            console,
+                            bytes = data.len(),
+                            "pointer shape of an unexpected size"
+                        ),
+                    }
+                }
             }
         }
         if events.is_empty() {
