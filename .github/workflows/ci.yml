@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Format
+        if: hashFiles('Cargo.toml') != ''
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        if: hashFiles('Cargo.toml') != ''
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Tests
+        if: hashFiles('Cargo.toml') != ''
+        run: cargo test --workspace
