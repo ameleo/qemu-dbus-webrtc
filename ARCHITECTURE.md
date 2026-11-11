@@ -53,6 +53,11 @@ Only channels with no patent listed in Microsoft's Open Specifications patent ma
 
 Touch input does not use MS-RDPEI, which has a listed patent.
 
+Only the channel crates of IronRDP are used: `ironrdp-cliprdr`, `ironrdp-rdpdr`,
+`ironrdp-displaycontrol` (and `ironrdp-rdpeusb` later), with their base crates. They do no I/O:
+bytes received on a data channel go in, the messages to send come out. The RDP server, connection
+and graphics crates are not needed: WebRTC provides the transport, security and media.
+
 In the guest, the optional Ameleo guest agent (D-Bus over a QEMU character device) provides what
 QEMU alone cannot: automatic logon, printers, drives and cameras as native Windows devices.
 
