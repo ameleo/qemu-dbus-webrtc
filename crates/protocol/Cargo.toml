@@ -1,0 +1,16 @@
+[package]
+name = "qdw-protocol"
+description = "Messages between qemu-dbus-webrtc and its clients"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+prost.workspace = true
+
+[build-dependencies]
+prost-build.workspace = true
+protox.workspace = true

@@ -11,6 +11,7 @@ repository = "https://github.com/ameleo/qemu-dbus-webrtc"
 publish = false
 
 [workspace.dependencies]
+qdw-protocol = { path = "crates/protocol" }
 qdw-qemu = { path = "crates/qemu" }
 qdw-video = { path = "crates/video" }
 anyhow = "1"
@@ -18,6 +19,9 @@ gstreamer = "0.24"
 gstreamer-allocators = "0.24"
 gstreamer-app = "0.24"
 gstreamer-video = "0.24"
+prost = "0.14"
+prost-build = "0.14"
+protox = "0.10"
 rustix = "1"
 serde_json = "1"
 tokio = "1"

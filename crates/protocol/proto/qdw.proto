@@ -1,0 +1,151 @@
+// SPDX-License-Identifier: MPL-2.0
+//
+// Messages between qemu-dbus-webrtc and its clients (a browser page, a native client).
+//
+// Signalling runs over a WebSocket at /ws, one ClientMessage or ServerMessage per binary
+// WebSocket message:
+//
+// 1. the client says which video codecs it decodes: ClientMessage.hello;
+// 2. the server makes the WebRTC offer (ServerMessage.offer), or refuses (ServerMessage.error);
+// 3. the client answers: ClientMessage.answer;
+// 4. both sides trickle their ICE candidates: ClientMessage.ice, ServerMessage.ice.
+//
+// Compatibility: fields are only ever added, with new numbers; a number is never reused nor
+// its type changed.
+
+syntax = "proto3";
+
+package qdw.v1;
+
+message ClientMessage {
+  oneof message {
+    Hello hello = 1;
+    SessionDescription answer = 2;
+    IceCandidate ice = 3;
+  }
+}
+
+message ServerMessage {
+  oneof message {
+    SessionDescription offer = 1;
+    IceCandidate ice = 2;
+    Error error = 3;
+  }
+}
+
+// The first message of a client.
+message Hello {
+  // The video codecs the client decodes, as media types ("video/AV1", "video/VP9",
+  // "video/H265"), as RTCRtpReceiver.getCapabilities("video") lists them.
+  repeated string codecs = 1;
+}
+
+message SessionDescription {
+  string sdp = 1;
+}
+
+message IceCandidate {
+  // An empty candidate marks the end of the sender's candidates.
+  string candidate = 1;
+  uint32 sdp_mline_index = 2;
+}
+
+// The session cannot go on; the server closes the WebSocket after it.
+message Error {
+  string message = 1;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Data channel "input", client to server, reliable and ordered: one Input per message.
+//
+// Modelled on the input events of RDP, which solve the same problems.
+
+// A batch of events, applied in order.
+message Input {
+  repeated InputEvent events = 1;
+}
+
+message InputEvent {
+  oneof event {
+    Key key = 1;
+    PointerMove pointer_move = 2;
+    PointerButton pointer_button = 3;
+    Wheel wheel = 4;
+    LockKeys lock_keys = 5;
+  }
+}
+
+// A key, by its position on the keyboard rather than the character it types: the guest applies
+// its own keyboard layout. Key repeats are sent as further presses, as the client's system
+// generates them.
+message Key {
+  // PC scancode, set 1, make code (1 to 127).
+  uint32 scancode = 1;
+  // The scancode comes with the E0 prefix (right Ctrl, arrows, Insert, the Windows keys...).
+  bool extended = 2;
+  // The scancode comes with the E1 prefix: only Pause, sent with scancode 0x1D.
+  bool extended1 = 3;
+  bool down = 4;
+}
+
+// The pointer moved to a pixel of a screen.
+message PointerMove {
+  // The screen, in the order of the video tracks of the offer: 0 for the first.
+  uint32 screen = 1;
+  uint32 x = 2;
+  uint32 y = 3;
+}
+
+enum Button {
+  BUTTON_UNSPECIFIED = 0;
+  BUTTON_LEFT = 1;
+  BUTTON_MIDDLE = 2;
+  BUTTON_RIGHT = 3;
+  BUTTON_BACK = 4;
+  BUTTON_FORWARD = 5;
+}
+
+message PointerButton {
+  Button button = 1;
+  bool down = 2;
+}
+
+// Wheel rotation in 1/120 of a notch, as Windows and RDP count it: high-resolution wheels and
+// touchpads send fractions. Positive dy scrolls up (wheel pushed away from the user), positive
+// dx scrolls right.
+message Wheel {
+  int32 dx = 1;
+  int32 dy = 2;
+}
+
+// The client's lock keys, sent when it gets the focus (and when they may have changed while it
+// did not have it): the server toggles the guest's to match.
+message LockKeys {
+  bool caps_lock = 1;
+  bool num_lock = 2;
+  bool scroll_lock = 3;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Data channel "pointer", server to client, reliable and ordered: one PointerUpdate per message.
+//
+// The guest pointer is not in the video (virtio-gpu draws it on a plane of its own): the client
+// draws it, which also keeps it free of the video latency.
+
+message PointerUpdate {
+  oneof update {
+    PointerShape shape = 1;
+    // Whether the guest shows its pointer.
+    bool visible = 2;
+  }
+}
+
+message PointerShape {
+  uint32 width = 1;
+  uint32 height = 2;
+  // The pixel that points.
+  uint32 hot_x = 3;
+  uint32 hot_y = 4;
+  // width * height pixels, 4 bytes each: red, green, blue, alpha (not premultiplied).
+  bytes rgba = 5;
+}

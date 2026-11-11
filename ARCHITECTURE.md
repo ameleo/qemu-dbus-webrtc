@@ -21,16 +21,21 @@ libvirt, plain QEMU) starts and stops it.
 - **Transport:** GStreamer `webrtcbin`, with congestion control (GCC) driving the encoder bitrate.
 - **Signalling:** a WebSocket carrying the SDP offer and answer and ICE candidates, behind
   token authentication supplied by the deployment (a broker or the VM manager).
+- **Protocol:** the messages between the server and its clients are Protocol Buffers, defined
+  in `crates/protocol/proto/qdw.proto`. Clients in any language generate their code from it;
+  the browser page carries a small hand-written codec for the few messages it needs. Device
+  channels keep their RDP formats (see below).
 
 ## Source layout
 
 | Directory | Crate | Role |
 |---|---|---|
+| `crates/protocol` | `qdw-protocol` | the `.proto` file and the Rust types generated from it |
 | `crates/qemu` | `qdw-qemu` | attachment to QEMU: QMP, the D-Bus display |
 | `crates/video` | `qdw-video` | hardware encoding of a framebuffer, recording |
 | `server` | `qemu-dbus-webrtc` | the server |
 
-A native client will sit next to them.
+A native client will sit next to them and share `qdw-protocol`.
 
 ## Clients
 
