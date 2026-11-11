@@ -20,6 +20,9 @@ jobs:
         run: |
           missing=0
           for c in $(git rev-list --no-merges "$BASE..$HEAD"); do
+            name="$(git log -1 --format='%an' "$c")"
+            # GitHub's own bots (Dependabot) sign off with another address.
+            case "$name" in *'[bot]') continue ;; esac
             author="$(git log -1 --format='%an <%ae>' "$c")"
             if ! git log -1 --format='%B' "$c" | grep -qF "Signed-off-by: $author"; then
               echo "::error::commit $c has no 'Signed-off-by: $author' line (use git commit -s)"
