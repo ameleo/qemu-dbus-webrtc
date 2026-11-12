@@ -168,7 +168,8 @@ ws.onclose = (event) => {
   fail(event.wasClean ? "The session ended." : "Disconnected.");
 };
 // ServerMessage: offer = 1, ice = 2, error = 3, ended = 4; Ended: reason = 1 (1 another client
-// took the session over). The server ends a session by closing the WebSocket cleanly.
+// took the session over, 2 the server stops). The server ends a session by closing the WebSocket
+// cleanly.
 let ended = false;
 ws.onmessage = async (event) => {
   const message = pb.parse(new Uint8Array(event.data));
@@ -191,7 +192,8 @@ ws.onmessage = async (event) => {
     const reason = uint(pb.parse(message.get(4)[0]), 1);
     ended = true;
     pc.close();
-    fail(reason === 1 ? "Another client took the session over." : "The session ended.");
+    fail(reason === 1 ? "Another client took the session over."
+      : reason === 2 ? "The server stopped." : "The session ended.");
   }
 };
 

@@ -228,10 +228,11 @@ async fn upgrade(
         }
     };
     let span = client.span().clone();
+    let stopping = vms.stopping();
     ws.on_upgrade(move |socket| {
         async move {
             info!(%peer, "viewer connected");
-            if let Err(e) = viewer(socket, &client).await {
+            if let Err(e) = viewer(socket, &client, stopping).await {
                 warn!(%peer, error = %format!("{e:#}"), "viewer session ended");
             } else {
                 info!(%peer, "viewer left");
@@ -270,7 +271,11 @@ async fn receive(socket: &mut WebSocket) -> Result<Option<client_message::Messag
     }
 }
 
-async fn viewer(mut socket: WebSocket, client: &Client) -> Result<()> {
+async fn viewer(
+    mut socket: WebSocket,
+    client: &Client,
+    server_stopping: watch::Receiver<bool>,
+) -> Result<()> {
     let shared = client.shared().clone();
     // The client first says which codecs it decodes.
     let Some(client_message::Message::Hello(Hello { codecs, shadow })) =
@@ -349,6 +354,7 @@ async fn viewer(mut socket: WebSocket, client: &Client) -> Result<()> {
             printers: printers_follow,
             cameras: cameras_follow,
             taken_over,
+            server_stopping,
         },
         &shared,
     )
@@ -406,6 +412,8 @@ struct Follow {
     cameras: CamerasFollow,
     /// For the user: another client took the session over. `None` for a shadow client.
     taken_over: Option<oneshot::Receiver<()>>,
+    /// Turns true when the server stops.
+    server_stopping: watch::Receiver<bool>,
 }
 
 fn send_all(session: &Session, channel: Channel, messages: Vec<Vec<u8>>) {
@@ -434,6 +442,7 @@ async fn run(
     // A shadow client only watches: what it sends to the guest is ignored, and it gets nothing
     // of the guest's clipboard.
     let mut vm_stopped = shared.vm_stopped.clone();
+    let mut server_stopping = follow.server_stopping.clone();
     let taken_over = follow.taken_over.take();
     let user = taken_over.is_some();
     let taken_over = async move {
@@ -474,6 +483,10 @@ async fn run(
             }
             true = async { vm_stopped.wait_for(|stopped| *stopped).await.is_ok() } => {
                 info!("the VM stopped: the session ends");
+                return Ok(());
+            }
+            true = async { server_stopping.wait_for(|stopping| *stopping).await.is_ok() } => {
+                send(socket, server_message::Message::Ended(Ended { reason: ended::Reason::ServerStopping.into() })).await?;
                 return Ok(());
             }
             signal = signals.recv() => match signal {

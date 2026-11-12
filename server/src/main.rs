@@ -30,6 +30,9 @@ use tracing::{info, warn};
 use qdw_video::encode::Codec;
 use qdw_video::gpus;
 
+/// How long the sessions have to end when the server stops.
+const STOP_TIME: std::time::Duration = std::time::Duration::from_secs(1);
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -62,11 +65,21 @@ async fn main() -> Result<()> {
     if !config.listen.ip().is_loopback() {
         warn!(listen = %config.listen, "no authentication yet: anyone who reaches this address sees the VMs");
     }
+    let served = vms.clone();
     tokio::spawn(async move {
-        if let Err(e) = web::serve(config.listen, config.tls, vms).await {
+        if let Err(e) = web::serve(config.listen, config.tls, served).await {
             warn!(error = %format!("{e:#}"), "the viewer pages are down");
         }
     });
-    tokio::signal::ctrl_c().await?;
+    // Stopped (Ctrl+C, or systemd): the sessions end cleanly, each telling its client the server
+    // stops, before the process goes. Only a crash leaves the clients without a word.
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => result?,
+        _ = terminate.recv() => {}
+    }
+    info!("stopping: the sessions end");
+    vms.stop();
+    tokio::time::sleep(STOP_TIME).await;
     Ok(())
 }

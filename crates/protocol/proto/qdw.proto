@@ -48,6 +48,9 @@ message Ended {
     REASON_UNSPECIFIED = 0;
     // Another client took the session over (one user at a time).
     TAKEN_OVER = 1;
+    // The server stops (it is stopped or restarted): the client may connect again later. A
+    // crash of the server says nothing: the connection is lost.
+    SERVER_STOPPING = 2;
   }
   Reason reason = 1;
 }

@@ -63,6 +63,8 @@ pub struct Vms {
     /// By UUID, in lower case. One attachment at a time: two clients of the same VM coming
     /// together attach once.
     attached: tokio::sync::Mutex<HashMap<String, Arc<Attached>>>,
+    /// Turns true when the server stops: every session ends.
+    stopping: tokio::sync::watch::Sender<bool>,
 }
 
 impl Vms {
@@ -71,9 +73,20 @@ impl Vms {
             providers,
             config,
             attached: Default::default(),
+            stopping: tokio::sync::watch::Sender::new(false),
         });
         tokio::spawn(reap(Arc::downgrade(&vms)));
         vms
+    }
+
+    /// The server stops: every session ends, telling its client why.
+    pub fn stop(&self) {
+        self.stopping.send_replace(true);
+    }
+
+    /// Turns true when the server stops.
+    pub fn stopping(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.stopping.subscribe()
     }
 
     /// The names of the VM managers asked.
