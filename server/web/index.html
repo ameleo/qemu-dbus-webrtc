@@ -85,7 +85,8 @@ const hello = (codecs) => pb.message((o) => pb.bytes(o, 1, pb.message((h) => {
 const answer = (sdp) => pb.message((o) => pb.bytes(o, 2, pb.message((d) => pb.string(d, 1, sdp))));
 const ice = (candidate, mline) => pb.message((o) => pb.bytes(o, 3, pb.message((c) => { pb.string(c, 1, candidate); pb.uint(c, 2, mline); })));
 
-const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
+// The VM's signalling, next to its page (/vm/<uuid>/signal).
+const ws = new WebSocket(`wss://${location.host}${location.pathname.replace(/\/?$/, "/")}signal`);
 ws.binaryType = "arraybuffer";
 const pc = new RTCPeerConnection();
 const send = (bytes) => ws.send(new Uint8Array(bytes));

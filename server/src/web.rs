@@ -12,18 +12,19 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, State};
-use axum::response::{Html, IntoResponse};
+use axum::extract::{ConnectInfo, Path, State};
+use axum::http::StatusCode;
+use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use tokio::sync::{mpsc, oneshot, watch};
-use tracing::{info, warn};
+use tracing::{Instrument, info, warn};
 
+use qdw_protocol::Message;
 use qdw_protocol::v1::{
     BandwidthEstimate, ClientMessage, ControlMessage, Error, Hello, IceCandidate, Input,
     Microphone, MonitorLayout, ServerMessage, SessionDescription, VideoPause, client_message,
     control_message, server_message,
 };
-use qdw_protocol::{Message, SIGNALLING_PATH};
 use qdw_video::encode::Codec;
 
 use std::sync::Arc;
@@ -37,6 +38,7 @@ use crate::layout::{Layout, Size};
 use crate::pointer::{self, Pointer};
 use crate::printers::{Printers, PrintersFollow, ViewerPrinters};
 use crate::session::{AudioViewers, Bitrates, Channel, Session, Signal, Viewers};
+use crate::vms::{Client, Vms};
 
 const PAGE: &str = include_str!("../web/index.html");
 
@@ -159,15 +161,23 @@ pub struct Tls {
     pub key: PathBuf,
 }
 
-/// Serve the page and the signalling on `listen` until the program ends, in HTTPS with `tls`:
-/// never in plain HTTP, which would carry the session in clear (and browsers give the
-/// clipboard, the microphone and the camera to pages served in HTTPS only).
-pub async fn serve(listen: SocketAddr, tls: Tls, shared: Shared) -> Result<()> {
-    let app = axum::Router::new()
-        .route("/", get(|| async { Html(PAGE) }))
-        .route(SIGNALLING_PATH, get(upgrade))
-        .with_state(shared)
-        .into_make_service_with_connect_info::<SocketAddr>();
+/// Serve the VMs' pages and their signalling on `listen` until the program ends, in HTTPS
+/// with `tls`: never in plain HTTP, which would carry the session in clear (and browsers give
+/// the clipboard, the microphone and the camera to pages served in HTTPS only). A VM's page is
+/// `/vm/<uuid>/`, its signalling `/vm/<uuid>/signal` (`qdw_protocol::signalling_path`).
+pub async fn serve(listen: SocketAddr, tls: Tls, vms: Arc<Vms>) -> Result<()> {
+    let app =
+        axum::Router::new()
+            .route(
+                "/vm/{uuid}",
+                get(|Path(uuid): Path<String>| async move {
+                    Redirect::permanent(&format!("/vm/{uuid}/"))
+                }),
+            )
+            .route("/vm/{uuid}/", get(page))
+            .route("/vm/{uuid}/signal", get(upgrade))
+            .with_state(vms)
+            .into_make_service_with_connect_info::<SocketAddr>();
     // One crypto provider for the process: ring.
     let _ = rustls::crypto::ring::default_provider().install_default();
     let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.certificate, &tls.key)
@@ -184,19 +194,54 @@ pub async fn serve(listen: SocketAddr, tls: Tls, shared: Shared) -> Result<()> {
     Ok(())
 }
 
+/// A VM's page; by a VM's name, a redirection to the page by its UUID, the address that stays.
+async fn page(Path(id): Path<String>, State(vms): State<Arc<Vms>>) -> Response {
+    if crate::vms::normalize(&id).is_some() {
+        return Html(PAGE).into_response();
+    }
+    match vms.uuid_of(&id).await {
+        Ok(Some(uuid)) => Redirect::temporary(&format!("/vm/{uuid}/")).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "no such VM on this host").into_response(),
+        Err(e) => (StatusCode::CONFLICT, format!("{e:#}")).into_response(),
+    }
+}
+
 async fn upgrade(
     ws: WebSocketUpgrade,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    State(shared): State<Shared>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| async move {
-        info!(%peer, "viewer connected");
-        if let Err(e) = viewer(socket, shared).await {
-            warn!(%peer, error = %format!("{e:#}"), "viewer session ended");
-        } else {
-            info!(%peer, "viewer left");
+    Path(uuid): Path<String>,
+    State(vms): State<Arc<Vms>>,
+) -> Response {
+    // The VM attached before the WebSocket opens: a client asking for a VM the host does not
+    // run hears it at once.
+    let client = match vms.client(&uuid).await {
+        Ok(Some(client)) => client,
+        Ok(None) => {
+            info!(%peer, uuid, "no such VM");
+            return (StatusCode::NOT_FOUND, "no such VM on this host").into_response();
         }
+        Err(e) => {
+            warn!(%peer, uuid, error = %format!("{e:#}"), "VM not attached");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the VM could not be attached",
+            )
+                .into_response();
+        }
+    };
+    let span = client.span().clone();
+    ws.on_upgrade(move |socket| {
+        async move {
+            info!(%peer, "viewer connected");
+            if let Err(e) = viewer(socket, &client).await {
+                warn!(%peer, error = %format!("{e:#}"), "viewer session ended");
+            } else {
+                info!(%peer, "viewer left");
+            }
+        }
+        .instrument(span)
     })
+    .into_response()
 }
 
 /// One message to the client, as a binary WebSocket message.
@@ -227,7 +272,8 @@ async fn receive(socket: &mut WebSocket) -> Result<Option<client_message::Messag
     }
 }
 
-async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
+async fn viewer(mut socket: WebSocket, client: &Client) -> Result<()> {
+    let shared = client.shared().clone();
     // The client first says which codecs it decodes.
     let Some(client_message::Message::Hello(Hello { codecs, shadow })) =
         receive(&mut socket).await?
