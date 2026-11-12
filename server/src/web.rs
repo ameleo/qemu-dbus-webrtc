@@ -17,7 +17,7 @@ use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use tokio::sync::{mpsc, oneshot, watch};
-use tracing::{Instrument, info, warn};
+use tracing::{Instrument, debug, info, warn};
 
 use qdw_protocol::Message;
 use qdw_protocol::v1::{
@@ -353,10 +353,29 @@ async fn viewer(mut socket: WebSocket, client: &Client) -> Result<()> {
         &shared,
     )
     .await;
+    // A call to the VM fails when it stops, usually before the display loop sees it: the client
+    // then hears that the VM stopped, rather than of a broken connection.
+    let ended = match ended {
+        Err(e) if vm_stopping(&shared).await => {
+            info!(error = %format!("{e:#}"), "the VM stopped: the session ends");
+            let reason = ended::Reason::VmStopped.into();
+            let _ = send(
+                &mut socket,
+                server_message::Message::Ended(Ended { reason }),
+            )
+            .await;
+            Ok(())
+        }
+        ended => ended,
+    };
     // Whatever ended the session, leave no key or button pressed in the guest, and the
-    // clipboard to the guest.
-    state.input.release_all().await?;
-    state.clipboard.release().await?;
+    // clipboard to the guest; of a VM that stopped, there is nothing left to release.
+    if let Err(e) = state.input.release_all().await {
+        debug!(error = %format!("{e:#}"), "keys not released");
+    }
+    if let Err(e) = state.clipboard.release().await {
+        debug!(error = %format!("{e:#}"), "clipboard not released");
+    }
     state.drives.release().await;
     state.printers.release().await;
     state.cameras.release().await;
@@ -368,6 +387,18 @@ async fn viewer(mut socket: WebSocket, client: &Client) -> Result<()> {
         .send(Request::TenBits(shared.depths.leave(depth_id)));
     ended
 }
+
+/// Whether the VM is stopping: its display loop says so within `VM_STOP_TIME`.
+async fn vm_stopping(shared: &Shared) -> bool {
+    let mut stopped = shared.vm_stopped.clone();
+    matches!(
+        tokio::time::timeout(VM_STOP_TIME, stopped.wait_for(|s| *s)).await,
+        Ok(Ok(_)) | Ok(Err(_))
+    )
+}
+
+/// How long the display loop may take to see that the VM stopped: one ping, and its answer.
+const VM_STOP_TIME: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// The client hears of the bandwidth estimate at most this often.
 const ESTIMATE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
