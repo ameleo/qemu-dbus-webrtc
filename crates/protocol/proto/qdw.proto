@@ -38,16 +38,16 @@ message ServerMessage {
   }
 }
 
-// The session is over, and why: the server closes the WebSocket and the peer connection
-// right after. The client closes too (a native client its windows), rather than wait on a
-// frozen picture.
+// Why the session is over, when there is more to say than its end: the server closes the
+// WebSocket right after. The server always ends a session by closing the WebSocket cleanly
+// (a Close frame), whatever ended it, the VM stopping included: a clean close is an end the
+// client can take as such (a native client closes its windows), where a connection lost
+// without one is a failure of the network.
 message Ended {
   enum Reason {
     REASON_UNSPECIFIED = 0;
     // Another client took the session over (one user at a time).
     TAKEN_OVER = 1;
-    // The VM stopped: shut down, or QEMU ended.
-    VM_STOPPED = 2;
   }
   Reason reason = 1;
 }
