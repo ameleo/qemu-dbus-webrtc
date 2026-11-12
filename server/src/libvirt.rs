@@ -95,11 +95,7 @@ impl Libvirt {
             .await
             .context("listing the domains")?;
         for path in paths {
-            let domain = DomainProxy::builder(system)
-                .path(path)?
-                .cache_properties(zbus::proxy::CacheProperties::No)
-                .build()
-                .await?;
+            let domain = domain(system, path).await?;
             // The live definition of a running domain: its display's bus is in it.
             let xml = domain
                 .get_xml_desc(0)
@@ -183,7 +179,7 @@ impl Provider for Libvirt {
                 .await?
                 .domain_lookup_by_uuid(uuid)
                 .await?;
-            let domain = DomainProxy::builder(system).path(path)?.build().await?;
+            let domain = domain(system, path).await?;
             let name = domain.name().await?;
             info!(uuid, %name, "starting the domain");
             domain.create(0).await.context("starting the domain")?;
@@ -191,6 +187,16 @@ impl Provider for Libvirt {
         }
         .boxed()
     }
+}
+
+/// The domain at `path`. Its properties are read when asked, not cached: zbus's cache fails
+/// on some of libvirt's domain properties ("incorrect type").
+async fn domain(system: &zbus::Connection, path: OwnedObjectPath) -> Result<DomainProxy<'static>> {
+    Ok(DomainProxy::builder(system)
+        .path(path)?
+        .cache_properties(zbus::proxy::CacheProperties::No)
+        .build()
+        .await?)
 }
 
 /// The D-Bus `<graphics>` element of a domain definition, up to its first `>`.
