@@ -167,6 +167,13 @@ ws.onclose = (event) => {
   pc.close();
   fail(event.wasClean ? "The session ended." : "Disconnected.");
 };
+// Leaving the page (closed, reloaded, or another address) ends the session with a clean close,
+// as the native client does: the server takes it as the client leaving, not as a network failure.
+window.addEventListener("pagehide", () => {
+  ended = true;
+  pc.close();
+  ws.close(1000, "the client leaves");
+});
 // ServerMessage: offer = 1, ice = 2, error = 3, ended = 4; Ended: reason = 1 (1 another client
 // took the session over, 2 the server stops). The server ends a session by closing the WebSocket
 // cleanly.
