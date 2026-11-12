@@ -11,13 +11,16 @@ use anyhow::Result;
 use qdw_audio::mic::Microphone;
 use qdw_audio::{AudioEncoder, Pcm};
 use qdw_qemu::audio::{self, AudioEvent, Format, Recorder};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
 use crate::session::{self, AudioViewers};
 
 /// How long a viewer keeps the microphone after it stopped sending sound.
 const SPEAKER_HOLD: Duration = Duration::from_secs(1);
+/// How long the guest must have stopped recording before the client is told to close its
+/// microphone: applications close and open it again within a few tens of milliseconds.
+const RECORDING_HOLD: Duration = Duration::from_secs(2);
 
 /// The guest's sound, while it lasts.
 pub struct Audio {
@@ -26,11 +29,13 @@ pub struct Audio {
     _recorder: Option<zbus::Connection>,
     pub mic: Arc<Mic>,
     task: tokio::task::JoinHandle<()>,
+    wanted_task: tokio::task::JoinHandle<()>,
 }
 
 impl Drop for Audio {
     fn drop(&mut self) {
         self.task.abort();
+        self.wanted_task.abort();
     }
 }
 
@@ -79,7 +84,10 @@ pub async fn start(vm: &zbus::Connection, viewers: AudioViewers) -> Result<Audio
             }
         }
     });
-    let mic = Arc::new(Mic::new()?);
+    let (recording_tx, recording) = watch::channel(false);
+    let (wanted_tx, wanted) = watch::channel(false);
+    let wanted_task = tokio::spawn(hold_recording(recording, wanted_tx));
+    let mic = Arc::new(Mic::new(recording_tx, wanted)?);
     let recorder = match audio::record(vm, mic.clone()).await {
         Ok(connection) => Some(connection),
         Err(e) => {
@@ -92,7 +100,37 @@ pub async fn start(vm: &zbus::Connection, viewers: AudioViewers) -> Result<Audio
         _recorder: recorder,
         mic,
         task,
+        wanted_task,
     })
+}
+
+/// Follow `recording` into `wanted`: at once when the guest starts recording, and only once it
+/// has stopped for `RECORDING_HOLD`, so that the client does not close its microphone and open
+/// it again when an application only reopens it.
+async fn hold_recording(mut recording: watch::Receiver<bool>, wanted: watch::Sender<bool>) {
+    loop {
+        if *recording.borrow_and_update() {
+            if wanted.send_if_modified(|w| !std::mem::replace(w, true)) {
+                info!("guest records");
+            }
+            if recording.wait_for(|r| !*r).await.is_err() {
+                return;
+            }
+            continue;
+        }
+        match tokio::time::timeout(RECORDING_HOLD, recording.wait_for(|r| *r)).await {
+            Ok(Ok(_)) => continue,
+            Ok(Err(_)) => return,
+            Err(_) => {
+                if wanted.send_if_modified(|w| std::mem::replace(w, false)) {
+                    info!("guest stopped recording");
+                }
+            }
+        }
+        if recording.changed().await.is_err() {
+            return;
+        }
+    }
 }
 
 fn pcm(format: Format) -> Pcm {
@@ -114,16 +152,27 @@ pub struct Mic {
     recording: Mutex<Option<u64>>,
     speaker: Mutex<Option<(u64, Instant)>>,
     viewers: AtomicU64,
+    /// Whether the guest records on its stream now (an application has the microphone open).
+    recording_now: watch::Sender<bool>,
+    /// The same, held for a while when the guest stops: what the user's client follows.
+    wanted: watch::Receiver<bool>,
 }
 
 impl Mic {
-    fn new() -> Result<Self> {
+    fn new(recording_now: watch::Sender<bool>, wanted: watch::Receiver<bool>) -> Result<Self> {
         Ok(Self {
             microphone: Microphone::new()?,
             recording: Mutex::new(None),
             speaker: Mutex::new(None),
             viewers: AtomicU64::new(0),
+            recording_now,
+            wanted,
         })
+    }
+
+    /// Whether the guest wants the microphone: the user's client opens its own while it does.
+    pub fn wanted(&self) -> watch::Receiver<bool> {
+        self.wanted.clone()
     }
 
     /// An id for a viewer that may speak.
@@ -161,6 +210,14 @@ impl Recorder for Mic {
         let mut recording = self.recording.lock().unwrap();
         if *recording == Some(id) {
             *recording = None;
+            self.recording_now.send_replace(false);
+        }
+    }
+
+    fn enabled(&self, id: u64, enabled: bool) {
+        if *self.recording.lock().unwrap() == Some(id) {
+            debug!(id, enabled, "guest microphone");
+            self.recording_now.send_replace(enabled);
         }
     }
 

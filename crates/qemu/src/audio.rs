@@ -149,6 +149,9 @@ pub trait Recorder: Send + Sync + 'static {
     fn init(&self, id: u64, format: Format);
     /// The stream ends.
     fn fini(&self, id: u64);
+    /// The guest starts (`true`) or stops recording on the stream: an application opened or
+    /// closed the microphone.
+    fn enabled(&self, id: u64, enabled: bool);
     /// Up to `size` bytes of samples, in the stream's format; fewer if there are not as many.
     /// Called from QEMU's main loop, which waits: return at once.
     fn read(&self, id: u64, size: u64) -> Vec<u8>;
@@ -190,7 +193,9 @@ impl InListener {
         self.recorder.fini(id);
     }
 
-    async fn set_enabled(&self, _id: u64, _enabled: bool) {}
+    async fn set_enabled(&self, id: u64, enabled: bool) {
+        self.recorder.enabled(id, enabled);
+    }
 
     async fn set_volume(&self, _id: u64, _mute: bool, _volume: Vec<u8>) {}
 

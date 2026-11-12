@@ -36,7 +36,8 @@ Without anything in the guest:
 - **Keyboard and mouse,** as RDP handles them: keys by position (scancodes), the guest applying
   its own layout; lock keys synchronised; nothing left pressed when a client goes. The guest's
   pointer shape is drawn by the client, free of the video's latency.
-- **Sound** (Opus) and the client's **microphone**.
+- **Sound** (Opus) and the client's **microphone**, open only while an application in the guest
+  records.
 - **Pause:** a hidden window gets no video, and costs no encoding; the sound goes on.
 - **HTTPS** (`--tls`): browsers give the clipboard to pages served in HTTPS only.
 

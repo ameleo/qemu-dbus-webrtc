@@ -21,7 +21,7 @@
 <body>
 <video id="video" autoplay muted playsinline></video>
 <div id="stats">connecting…</div>
-<button id="mic" type="button" title="Send this computer's microphone to the guest">Mic off</button>
+<button id="mic" type="button" title="Let the guest use this computer's microphone: it opens while an application in the guest records">Mic off</button>
 <button id="cam" type="button" title="Show this computer's camera in the guest">Cam off</button>
 <script>
 "use strict";
@@ -119,10 +119,15 @@ pc.ondatachannel = ({ channel }) => {
   if (channel.label === "control") {
     control.channel = channel;
     channel.onopen = () => { control.videoPause(); control.layout(); };
-    // ControlMessage: bandwidth_estimate = 3; BandwidthEstimate: kbps = 1.
+    // ControlMessage: bandwidth_estimate = 3, microphone = 4; BandwidthEstimate: kbps = 1;
+    // Microphone: wanted = 1.
     channel.onmessage = (event) => {
       const message = pb.parse(new Uint8Array(event.data));
       if (message.has(3)) control.estimate = uint(pb.parse(message.get(3)[0]), 1);
+      if (message.has(4)) {
+        mic.wanted = uint(pb.parse(message.get(4)[0]), 1) === 1;
+        mic.apply();
+      }
     };
   }
   if (channel.label === "clipboard") {
@@ -438,39 +443,75 @@ async function clipboardMessage(bytes) {
 }
 window.addEventListener("focus", () => clip.focused());
 
-// The microphone, on demand: the button asks for it (browsers want a click and a permission)
-// and sends it on the sound's track; a second click stops it.
+// The microphone, as the guest wants it: the button allows it (browsers want a click and a
+// permission), and the microphone then opens only while an application in the guest records
+// (the server says so on the control channel), sent on the sound's track; the browser shows it
+// in use only then. A second click disallows it.
 const micButton = document.getElementById("mic");
 if (shadow) micButton.hidden = true;
-let micTrack = null;
-micButton.addEventListener("click", async () => {
-  const sender = pc.getTransceivers().find((t) => t.receiver.track.kind === "audio")?.sender;
-  if (!sender || !navigator.mediaDevices) {
-    micButton.textContent = !sender ? "Mic: not connected yet" : "Mic: needs HTTPS";
+const mic = {
+  allowed: false,
+  // Whether the guest records.
+  wanted: false,
+  track: null,
+  // Why it cannot open, shown on the button until the next click.
+  error: null,
+  // Opening and closing, one after the other.
+  queue: Promise.resolve(),
+  apply() {
+    this.queue = this.queue.then(() => this.update());
+  },
+  async update() {
+    const sender = pc.getTransceivers().find((t) => t.receiver.track.kind === "audio")?.sender;
+    if (this.allowed && this.wanted && !this.track && sender) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        });
+        this.track = stream.getAudioTracks()[0];
+        await sender.replaceTrack(this.track);
+      } catch (e) {
+        console.error("microphone", e);
+        this.refused(e);
+      }
+    } else if (!(this.allowed && this.wanted) && this.track) {
+      this.track.stop();
+      this.track = null;
+      if (sender) await sender.replaceTrack(null);
+    }
+    this.label();
+  },
+  refused(e) {
+    // NotAllowedError: refused, or blocked for this site (the address bar shows it).
+    this.allowed = false;
+    this.error = e.name === "NotAllowedError" ? "Mic: blocked by the browser" : `Mic: ${e.message}`;
+  },
+  label(text) {
+    micButton.textContent = text ?? this.error ?? (!this.allowed ? "Mic off" : this.track ? "Mic on" : "Mic ready");
+    micButton.classList.toggle("on", !!this.track);
+  },
+};
+micButton.addEventListener("click", () => {
+  micButton.blur();   // keys go to the guest, not to the button
+  if (!navigator.mediaDevices) {
+    mic.label("Mic: needs HTTPS");
     return;
   }
-  if (micTrack) {
-    micTrack.stop();
-    micTrack = null;
-    await sender.replaceTrack(null);
-  } else {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      });
-      micTrack = stream.getAudioTracks()[0];
-      await sender.replaceTrack(micTrack);
-    } catch (e) {
-      // NotAllowedError: refused, or blocked for this site (the address bar shows it).
-      micButton.textContent = e.name === "NotAllowedError" ? "Mic: blocked by the browser" : `Mic: ${e.message}`;
-      console.error("microphone", e);
-      micButton.blur();
-      return;
-    }
+  mic.error = null;
+  mic.allowed = !mic.allowed;
+  if (mic.allowed && !mic.wanted) {
+    // Ask the permission now, on the click, rather than when the guest starts recording.
+    mic.queue = mic.queue.then(async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        for (const track of stream.getTracks()) track.stop();
+      } catch (e) {
+        console.error("microphone", e);
+        mic.refused(e);
+      }
+    });
   }
-  micButton.textContent = micTrack ? "Mic on" : "Mic off";
-  micButton.classList.toggle("on", !!micTrack);
-  micButton.blur();   // keys go to the guest, not to the button
+  mic.apply();
 });
 
 // Video paused while the page is hidden (a tab in the background, a minimized window, or one

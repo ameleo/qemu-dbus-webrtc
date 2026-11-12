@@ -20,7 +20,7 @@ use tracing::{info, warn};
 
 use qdw_protocol::v1::{
     BandwidthEstimate, ClientMessage, ControlMessage, Error, Hello, IceCandidate, Input,
-    MonitorLayout, ServerMessage, SessionDescription, VideoPause, client_message, control_message,
+    Microphone, MonitorLayout, ServerMessage, SessionDescription, VideoPause, client_message, control_message,
     server_message,
 };
 use qdw_protocol::{Message, SIGNALLING_PATH};
@@ -411,6 +411,15 @@ async fn run(
     } = state;
     // Pointer updates wait for the pointer channel to open.
     let mut sent: Option<pointer::Sent> = None;
+    // Whether the guest records, for the user's client once its control channel is open.
+    let mut mic_wanted = shared.mic.wanted();
+    let mut control_open = false;
+    let send_microphone = |wanted: bool| {
+        let message = ControlMessage {
+            message: Some(control_message::Message::Microphone(Microphone { wanted })),
+        };
+        session.send(Channel::Control, message.encode_to_vec());
+    };
     let mut reception = tokio::time::interval(std::time::Duration::from_secs(5));
     loop {
         tokio::select! {
@@ -490,7 +499,13 @@ async fn run(
                     let guest = follow.clip.guest.borrow_and_update().clone();
                     send_all(session, Channel::Clipboard, clipboard.opened(guest));
                 }
-                Some(Signal::Open(Channel::Input | Channel::Control | Channel::Drive | Channel::Printer | Channel::Camera)) => {}
+                Some(Signal::Open(Channel::Control)) => {
+                    control_open = true;
+                    if user {
+                        send_microphone(*mic_wanted.borrow_and_update());
+                    }
+                }
+                Some(Signal::Open(Channel::Input | Channel::Drive | Channel::Printer | Channel::Camera)) => {}
                 Some(Signal::Estimate(estimate)) => {
                     // The user's bandwidth sets the bitrate of the video, which all viewers
                     // share: a shadow client on a slower connection gets what it can.
@@ -518,6 +533,9 @@ async fn run(
                 if let Some(sent) = &mut sent {
                     send_all(session, Channel::Pointer, sent.update(&follow.pointer.borrow_and_update()));
                 }
+            }
+            Ok(()) = mic_wanted.changed(), if user && control_open => {
+                send_microphone(*mic_wanted.borrow_and_update());
             }
             Ok(()) = follow.clip.guest.changed(), if user => {
                 let guest = follow.clip.guest.borrow_and_update().clone();

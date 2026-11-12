@@ -130,8 +130,14 @@ The client's microphone comes back on the sound's track, which is two-way: the s
 and feeds the guest's microphone through QEMU (`AudioInListener`). QEMU reads the samples from
 its main loop and waits for the answer, so the server keeps them ready in the guest's format,
 100 ms at most so that the delay cannot grow. One viewer speaks at a time: the one sending
-sound, until it has been silent for a second. In the browser page, a button turns the
-microphone on and off: browsers want a click and a permission.
+sound, until it has been silent for a second.
+
+The client opens its microphone only while the guest records, as for the camera: QEMU says when
+an application in the guest opens or closes it (`SetEnabled`), and the server tells the user's
+client (`Microphone` on the control channel), waiting two seconds before it says the guest
+stopped, since applications close and open the microphone again within moments. The audio
+track stays negotiated. In the browser page, a button allows the microphone (browsers want a
+click and a permission); it then opens only while the guest records.
 
 ## Devices: RDP channel formats over data channels
 

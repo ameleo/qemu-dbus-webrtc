@@ -283,7 +283,18 @@ message ControlMessage {
     MonitorLayout monitor_layout = 2;
     // Server to client.
     BandwidthEstimate bandwidth_estimate = 3;
+    Microphone microphone = 4;
   }
+}
+
+// Whether the guest records: an application in the guest has the microphone open. Sent to the
+// user's client (not to shadow clients) when the control channel opens, then whenever it
+// changes. The client opens its microphone only while `wanted` is true, and closes it
+// otherwise; the audio track stays negotiated, without a new offer. The server waits two
+// seconds after the guest stops recording before it sends `false`, since applications close
+// and open the microphone again within moments.
+message Microphone {
+  bool wanted = 1;
 }
 
 // The server's estimate of the bandwidth to the client (Google Congestion Control, from the
