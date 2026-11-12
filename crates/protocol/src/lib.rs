@@ -83,7 +83,7 @@ mod tests {
         let hello = ClientMessage {
             message: Some(client_message::Message::Hello(Hello {
                 codecs: vec!["video/AV1".into()],
-                shadow: false,
+                ..Default::default()
             })),
         };
         assert_eq!(hello.encode_to_vec(), b"\x0a\x0b\x0a\x09video/AV1");

@@ -16,6 +16,7 @@ use tokio::sync::OnceCell;
 use tracing::{info, warn};
 use zbus::zvariant::OwnedObjectPath;
 
+use crate::access::{Account, Accounts};
 use crate::providers::{Candidate, Provider};
 
 #[zbus::proxy(
@@ -32,6 +33,14 @@ trait Connect {
 #[zbus::proxy(interface = "org.libvirt.Domain", default_service = "org.libvirt")]
 trait Domain {
     fn create(&self, flags: u32) -> zbus::Result<()>;
+    fn set_metadata(
+        &self,
+        kind: i32,
+        metadata: &str,
+        key: &str,
+        uri: &str,
+        flags: u32,
+    ) -> zbus::Result<()>;
     #[zbus(name = "GetXMLDesc")]
     fn get_xml_desc(&self, flags: u32) -> zbus::Result<String>;
     #[zbus(property)]
@@ -187,6 +196,152 @@ impl Provider for Libvirt {
         }
         .boxed()
     }
+
+    fn accounts<'a>(&'a self, uuid: &'a str) -> BoxFuture<'a, Result<Option<Accounts>>> {
+        async move {
+            let Some(system) = self.libvirt().await else {
+                return Ok(None);
+            };
+            let domain = self.lookup(system, uuid).await?;
+            // From the definition rather than GetMetadata, whose error for no metadata cannot
+            // be told from another (it is translated): a failure stays one, and is not taken
+            // for no account.
+            let xml = domain
+                .get_xml_desc(0)
+                .await
+                .context("reading the domain's definition")?;
+            Ok(Some(accounts_of(&xml, uuid)))
+        }
+        .boxed()
+    }
+
+    fn set_accounts<'a>(
+        &'a self,
+        uuid: &'a str,
+        accounts: &'a Accounts,
+    ) -> BoxFuture<'a, Result<()>> {
+        async move {
+            let system = self
+                .libvirt()
+                .await
+                .context("keeping accounts with a domain takes libvirt-dbus")?;
+            let domain = self.lookup(system, uuid).await?;
+            // In its definition, and in the running domain too when it runs.
+            let flags = if domain.active().await? {
+                AFFECT_LIVE | AFFECT_CONFIG
+            } else {
+                AFFECT_CONFIG
+            };
+            let xml = accounts_xml(accounts, uuid);
+            domain
+                .set_metadata(METADATA_ELEMENT, &xml, METADATA_PREFIX, METADATA_URI, flags)
+                .await
+                .context("writing the domain's accounts")?;
+            Ok(())
+        }
+        .boxed()
+    }
+}
+
+impl Libvirt {
+    async fn lookup(&self, system: &zbus::Connection, uuid: &str) -> Result<DomainProxy<'static>> {
+        let path = ConnectProxy::new(system)
+            .await?
+            .domain_lookup_by_uuid(uuid)
+            .await?;
+        domain(system, path).await
+    }
+}
+
+/// The namespace of our metadata in a domain's definition, and its prefix there.
+const METADATA_URI: &str = "https://github.com/ameleo/qemu-dbus-webrtc";
+const METADATA_PREFIX: &str = "qdw";
+/// virDomainMetadataType: an element of ours.
+const METADATA_ELEMENT: i32 = 2;
+/// virDomainModificationImpact.
+const AFFECT_LIVE: u32 = 1;
+const AFFECT_CONFIG: u32 = 2;
+
+/// The accounts in a domain's definition: our metadata element,
+/// `<qdw:accounts xmlns:qdw="..."><qdw:account user="..." password="..." shadow-only="yes"/>`.
+/// None when it has none.
+fn accounts_of(xml: &str, uuid: &str) -> Accounts {
+    let mut accounts = Accounts::default();
+    let Some(start) = xml
+        .find(&format!("=\"{METADATA_URI}\""))
+        .or_else(|| xml.find(&format!("='{METADATA_URI}'")))
+    else {
+        return accounts;
+    };
+    // The element our namespace is declared on, and what follows it until its end.
+    let Some(open) = xml[..start].rfind('<') else {
+        return accounts;
+    };
+    let element = &xml[open..];
+    let Some(prefix) = element[1..]
+        .split(|c: char| c.is_whitespace() || c == '>')
+        .next()
+        .and_then(|name| name.split_once(':'))
+        .map(|(prefix, _)| prefix)
+    else {
+        return accounts;
+    };
+    let end = element
+        .find(&format!("</{prefix}:accounts>"))
+        .unwrap_or(element.len());
+    let tag = format!("<{prefix}:account ");
+    let mut rest = &element[..end];
+    while let Some(at) = rest.find(&tag) {
+        let account = &rest[at..];
+        let close = account.find('>').unwrap_or(account.len());
+        let attrs = &account[..close];
+        if let (Some(user), Some(password)) =
+            (attribute(attrs, "user"), attribute(attrs, "password"))
+        {
+            accounts.accounts.push(Account {
+                vm: uuid.to_ascii_lowercase(),
+                user: unescape(user),
+                password: unescape(password),
+                shadow_only: attribute(attrs, "shadow-only") == Some("yes"),
+            });
+        }
+        rest = &account[close..];
+    }
+    accounts
+}
+
+/// Our metadata element with `accounts` of the VM `uuid`, as SetMetadata takes it.
+fn accounts_xml(accounts: &Accounts, uuid: &str) -> String {
+    let mut xml = String::from("<accounts>");
+    for account in accounts.of(uuid) {
+        xml += &format!(
+            "<account user=\"{}\" password=\"{}\"{}/>",
+            escape(&account.user),
+            escape(&account.password),
+            if account.shadow_only {
+                " shadow-only=\"yes\""
+            } else {
+                ""
+            }
+        );
+    }
+    xml + "</accounts>"
+}
+
+fn escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn unescape(text: &str) -> String {
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
 }
 
 /// The domain at `path`. Its properties are read when asked, not cached: zbus's cache fails
@@ -257,6 +412,44 @@ mod tests {
         assert_eq!(
             dbus_graphics("<domain><graphics type='vnc'/></domain>"),
             None
+        );
+    }
+
+    #[test]
+    fn accounts_in_a_definition() {
+        const VM: &str = "b8ff54ee-77f5-43dd-aa19-de8eaed5eb75";
+        let mut accounts = Accounts::default();
+        accounts.accounts.push(Account {
+            vm: VM.into(),
+            user: "o'brien & co".into(),
+            password: "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA".into(),
+            shadow_only: false,
+        });
+        accounts.accounts.push(Account {
+            vm: VM.into(),
+            user: "support".into(),
+            password: "$argon2id$x".into(),
+            shadow_only: true,
+        });
+        // As libvirt gives it back: the element in our namespace, with its prefix.
+        let inner = accounts_xml(&accounts, VM)
+            .replace("<account ", "<qdw:account ")
+            .replace(
+                "<accounts>",
+                &format!("<qdw:accounts xmlns:qdw=\"{METADATA_URI}\">"),
+            )
+            .replace("</accounts>", "</qdw:accounts>");
+        let xml = format!("<domain>\n  <metadata>\n    {inner}\n  </metadata>\n</domain>");
+        let read = accounts_of(&xml, VM);
+        assert_eq!(read.accounts.len(), 2);
+        assert_eq!(read.accounts[0].user, "o'brien & co");
+        assert_eq!(read.accounts[0].password, accounts.accounts[0].password);
+        assert!(!read.accounts[0].shadow_only);
+        assert!(read.accounts[1].shadow_only);
+        assert!(
+            accounts_of("<domain><metadata/></domain>", VM)
+                .accounts
+                .is_empty()
         );
     }
 

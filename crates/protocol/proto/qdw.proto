@@ -73,6 +73,12 @@ message Hello {
   // (Ended TAKEN_OVER). Shadow clients watch the user: they stay when another user takes the
   // session over, and their sessions end (a clean close) when the user leaves.
   bool shadow = 2;
+  // An account of the VM's, when the server asks for one (its default): checked before the
+  // server starts the VM or attaches to it. A wrong one is answered with an Error, after a
+  // delay, and the WebSocket closes. An account may be watch only: its sessions are shadow
+  // sessions, whatever `shadow` says.
+  string user = 3;
+  string password = 4;
 }
 
 message SessionDescription {

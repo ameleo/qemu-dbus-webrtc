@@ -33,6 +33,9 @@ const MIN_BITRATE: u32 = 4_000;
 const START_BITRATE: u32 = 10_000;
 const MAX_BITRATE: u32 = 30_000;
 
+/// The accounts file, by default.
+pub const DEFAULT_ACCOUNTS: &str = "/etc/qemu-dbus-webrtc/accounts.toml";
+
 /// Where libvirt puts the D-Bus bus of a domain's display.
 const LIBVIRT_DBUS_DIR: &str = "/run/libvirt/qemu/dbus";
 /// Where Proxmox VE puts the VMs' QMP sockets and their configurations.
@@ -44,12 +47,23 @@ const PROXMOX_CONF_DIR: &str = "/etc/pve/qemu-server";
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct File {
+    auth: AuthFile,
     listen: Listen,
     video: Video,
     bitrate: Bitrate,
     libvirt: Libvirt,
     proxmox: ProxmoxFile,
     vm: Vec<Vm>,
+}
+
+/// Who may open a VM's console.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct AuthFile {
+    /// "accounts" (the default): an account of the VM's; "none": anyone who reaches the server.
+    method: Option<String>,
+    /// The accounts file.
+    accounts: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -117,12 +131,34 @@ pub struct VmConfig {
     pub record: Option<String>,
 }
 
+/// Who may open a VM's console.
+#[derive(Debug, Clone)]
+pub enum Auth {
+    /// An account of the VM's, in this file (see `access.rs`).
+    Accounts(PathBuf),
+    /// Anyone who reaches the server: for a test, on a trusted network.
+    None,
+}
+
+impl Config {
+    /// The certificate to serve with.
+    pub fn tls(&self) -> Result<web::Tls> {
+        // Plain HTTP would carry the session in clear.
+        self.tls.clone().context(
+            "a certificate and its key are required, the pages being served in HTTPS only: \
+             certificate and key in [listen], or --tls <certificate.pem> <key.pem>",
+        )
+    }
+}
+
 pub struct Config {
+    pub auth: Auth,
     pub vm: VmConfig,
     /// The address of the viewer pages and their signalling.
     pub listen: SocketAddr,
-    /// Their certificate, always in HTTPS.
-    pub tls: web::Tls,
+    /// Their certificate, always in HTTPS: required to serve (see `Config::tls`), not by the
+    /// tools.
+    tls: Option<web::Tls>,
     /// Where the VMs are found.
     pub providers: Providers,
 }
@@ -133,7 +169,7 @@ pub fn parse_args() -> Result<Config> {
     parse(std::env::args().skip(1).collect())
 }
 
-fn parse(args: Vec<String>) -> Result<Config> {
+pub fn parse(args: Vec<String>) -> Result<Config> {
     // The file first, wherever --config is on the line: the options then override it.
     let mut file = File::default();
     if let Some(i) = args.iter().position(|a| a == "--config") {
@@ -244,19 +280,27 @@ fn parse(args: Vec<String>) -> Result<Config> {
     let bitrates = session::Bitrates { min, start, max };
 
     let tls = match (listen.certificate, listen.key) {
-        (Some(certificate), Some(key)) => web::Tls { certificate, key },
-        // Plain HTTP would carry the session in clear.
-        _ => bail!(
-            "a certificate and its key are required, the pages being served in HTTPS only: \
-             certificate and key in [listen], or --tls <certificate.pem> <key.pem>"
-        ),
+        (Some(certificate), Some(key)) => Some(web::Tls { certificate, key }),
+        (None, None) => None,
+        _ => bail!("HTTPS takes a certificate and its key"),
     };
     let listen = match listen.address {
         Some(address) => address,
         None => DEFAULT_LISTEN.parse()?,
     };
 
+    let accounts = file
+        .auth
+        .accounts
+        .unwrap_or_else(|| DEFAULT_ACCOUNTS.into());
+    let auth = match file.auth.method.as_deref() {
+        None | Some("accounts") => Auth::Accounts(accounts),
+        Some("none") => Auth::None,
+        Some(other) => bail!("[auth] method {other}: accounts or none"),
+    };
+
     Ok(Config {
+        auth,
         vm: VmConfig {
             settings: Settings {
                 codec,
@@ -331,7 +375,7 @@ mod tests {
 
     #[test]
     fn https_only() {
-        let error = parse(args("--qmp /q")).err().unwrap();
+        let error = parse(args("--qmp /q")).unwrap().tls().err().unwrap();
         assert!(error.to_string().contains("HTTPS only"), "{error}");
     }
 

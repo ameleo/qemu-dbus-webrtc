@@ -14,6 +14,13 @@
   #mic { position: fixed; top: 8px; right: 8px; padding: 6px 10px; border: 0; border-radius: 4px;
          background: rgba(0, 0, 0, .65); color: #eee; font: inherit; cursor: pointer; }
   #mic.on, #cam.on { background: #1a6b2e; }
+  #login { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 260px;
+           padding: 18px; background: #1c1c1e; border-radius: 8px; display: flex; flex-direction: column; gap: 10px; }
+  #login[hidden] { display: none; }
+  #login input, #login button { font: inherit; padding: 7px 9px; border-radius: 4px; border: 1px solid #444;
+                                background: #111; color: #eee; }
+  #login button { background: #2a5db0; border: 0; cursor: pointer; }
+  #login-message { color: #f08a8a; min-height: 1.4em; }
   #cam { position: fixed; top: 8px; right: 84px; padding: 6px 10px; border: 0; border-radius: 4px;
          background: rgba(0, 0, 0, .65); color: #eee; font: inherit; cursor: pointer; }
 </style>
@@ -23,6 +30,13 @@
 <div id="stats">connecting…</div>
 <button id="mic" type="button" title="Let the guest use this computer's microphone: it opens while an application in the guest records">Mic off</button>
 <button id="cam" type="button" title="Show this computer's camera in the guest">Cam off</button>
+<form id="login" hidden>
+  <div>Sign in to this VM</div>
+  <input id="login-user" autocomplete="username" placeholder="User" required>
+  <input id="login-password" type="password" autocomplete="current-password" placeholder="Password" required>
+  <button type="submit">Sign in</button>
+  <div id="login-message"></div>
+</form>
 <script>
 "use strict";
 const video = document.getElementById("video");
@@ -76,18 +90,21 @@ const str = (fields, n) => pb.text.decode(fields.get(n)?.[0] || new Uint8Array()
 const uint = (fields, n) => fields.get(n)?.[0] || 0;
 
 // ClientMessage: hello = 1, answer = 2, ice = 3.
-// Hello: codecs = 1, shadow = 2. With ?shadow in the address, the page only watches.
+// Hello: codecs = 1, shadow = 2, user = 3, password = 4. With ?shadow in the address, the page
+// only watches.
 const shadow = new URLSearchParams(location.search).has("shadow");
-const hello = (codecs) => pb.message((o) => pb.bytes(o, 1, pb.message((h) => {
+const hello = (codecs, account) => pb.message((o) => pb.bytes(o, 1, pb.message((h) => {
   codecs.forEach((c) => pb.string(h, 1, c));
   if (shadow) pb.uint(h, 2, 1);
+  if (account.user) { pb.string(h, 3, account.user); pb.string(h, 4, account.password); }
 })));
 const answer = (sdp) => pb.message((o) => pb.bytes(o, 2, pb.message((d) => pb.string(d, 1, sdp))));
 const ice = (candidate, mline) => pb.message((o) => pb.bytes(o, 3, pb.message((c) => { pb.string(c, 1, candidate); pb.uint(c, 2, mline); })));
 
-// The VM's signalling, next to its page (/vm/<uuid>/signal).
-const ws = new WebSocket(`wss://${location.host}${location.pathname.replace(/\/?$/, "/")}signal`);
-ws.binaryType = "arraybuffer";
+// The VM's signalling, next to its page (/vm/<uuid>/signal), opened by connect(): first with no
+// account, then, if the server asks for one, with what the login form gets.
+let ws = null;
+let account = { user: "", password: "" };
 const pc = new RTCPeerConnection();
 const send = (bytes) => ws.send(new Uint8Array(bytes));
 
@@ -144,12 +161,12 @@ pc.onconnectionstatechange = () => {
   if (pc.connectionState === "failed") fail("connection failed");
 };
 
-ws.onopen = () => {
-  // Tell the server which video codecs this browser decodes.
+const onOpen = () => {
+  // Tell the server which video codecs this browser decodes, and the account, if any.
   // Each with its parameters ("video/VP9;profile-id=1"): the server checks the profile too.
   const codecs = (RTCRtpReceiver.getCapabilities("video")?.codecs || [])
     .map((c) => c.mimeType + (c.sdpFmtpLine ? `;${c.sdpFmtpLine}` : ""));
-  send(hello([...new Set(codecs)]));
+  send(hello([...new Set(codecs)], account));
 };
 // The mids of the video tracks an offer only receives: the cameras' tracks.
 function cameraTracks(sdp) {
@@ -162,7 +179,7 @@ function cameraTracks(sdp) {
   }
   return mids;
 }
-ws.onclose = (event) => {
+const onClose = (event) => {
   if (ended) return;
   pc.close();
   fail(event.wasClean ? "The session ended." : "Disconnected.");
@@ -172,13 +189,13 @@ ws.onclose = (event) => {
 window.addEventListener("pagehide", () => {
   ended = true;
   pc.close();
-  ws.close(1000, "the client leaves");
+  ws?.close(1000, "the client leaves");
 });
 // ServerMessage: offer = 1, ice = 2, error = 3, ended = 4; Ended: reason = 1 (1 another client
 // took the session over, 2 the server stops). The server ends a session by closing the WebSocket
 // cleanly.
 let ended = false;
-ws.onmessage = async (event) => {
+const onMessage = async (event) => {
   const message = pb.parse(new Uint8Array(event.data));
   if (message.has(1)) {
     await pc.setRemoteDescription({ type: "offer", sdp: str(pb.parse(message.get(1)[0]), 1) });
@@ -194,7 +211,14 @@ ws.onmessage = async (event) => {
     const c = pb.parse(message.get(2)[0]);
     await pc.addIceCandidate({ candidate: str(c, 1), sdpMLineIndex: uint(c, 2) });
   } else if (message.has(3)) {
-    fail(str(pb.parse(message.get(3)[0]), 1));
+    const error = str(pb.parse(message.get(3)[0]), 1);
+    if (error === "an account is required" || error === "wrong user or password") {
+      // The server closes next: not an end, the login form instead.
+      ended = true;
+      login.ask(error === "an account is required" ? "" : "Wrong user or password.");
+    } else {
+      fail(error);
+    }
   } else if (message.has(4)) {
     const reason = uint(pb.parse(message.get(4)[0]), 1);
     ended = true;
@@ -203,6 +227,40 @@ ws.onmessage = async (event) => {
       : reason === 2 ? "The server stopped." : "The session ended.");
   }
 };
+
+// Open the signalling, with the account in `account`.
+function connect() {
+  stats.textContent = "connecting…";
+  stats.className = "";
+  ended = false;
+  ws = new WebSocket(`wss://${location.host}${location.pathname.replace(/\/?$/, "/")}signal`);
+  ws.binaryType = "arraybuffer";
+  ws.onopen = onOpen;
+  ws.onclose = onClose;
+  ws.onmessage = onMessage;
+}
+
+// The login form, shown when the server asks for an account of the VM's.
+const login = {
+  form: document.getElementById("login"),
+  ask(message) {
+    stats.textContent = "sign in";
+    document.getElementById("login-message").textContent = message;
+    this.form.hidden = false;
+    document.getElementById(account.user ? "login-password" : "login-user").focus();
+  },
+};
+login.form.addEventListener("submit", (e) => {
+  e.preventDefault();
+  account = {
+    user: document.getElementById("login-user").value,
+    password: document.getElementById("login-password").value,
+  };
+  document.getElementById("login-password").value = "";
+  login.form.hidden = true;
+  connect();
+});
+connect();
 
 // ---------------------------------------------------------------------------------------------
 // Keyboard and pointer, modelled on RDP: keys by position (the guest applies its own layout),
@@ -277,6 +335,7 @@ const input = {
 };
 
 window.addEventListener("keydown", (e) => {
+  if (!login.form.hidden) return;   // typing in the login form
   const scancode = e.code === "Pause" ? "Pause" : SCANCODES[e.code];
   if (scancode === undefined) return;
   e.preventDefault();
@@ -284,6 +343,7 @@ window.addEventListener("keydown", (e) => {
   input.send(input.withLocks(e, [ev.key(scancode, true)]));
 });
 window.addEventListener("keyup", (e) => {
+  if (!login.form.hidden) return;
   const scancode = e.code === "Pause" ? "Pause" : SCANCODES[e.code];
   if (scancode === undefined) return;
   e.preventDefault();

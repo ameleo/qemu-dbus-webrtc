@@ -21,7 +21,7 @@ use tracing::{Instrument, debug, info, warn};
 
 use qdw_protocol::Message;
 use qdw_protocol::v1::{
-    BandwidthEstimate, ClientMessage, ControlMessage, Ended, Error, Hello, IceCandidate, Input,
+    BandwidthEstimate, ClientMessage, ControlMessage, Ended, Error, IceCandidate, Input,
     Microphone, MonitorLayout, ServerMessage, SessionDescription, VideoPause, client_message,
     control_message, ended, server_message,
 };
@@ -32,6 +32,7 @@ use std::sync::Arc;
 use crate::audio::Mic;
 use crate::cameras::{Cameras, CamerasFollow, ViewerCameras};
 use crate::clipboard::{Clipboard, ViewerClipboard, ViewerFollow};
+use crate::config::Auth;
 use crate::drives::{Drives, DrivesFollow, ViewerDrives};
 use crate::input::{AgentMouse, ViewerInput};
 use crate::layout::{Layout, Size};
@@ -176,7 +177,8 @@ pub struct Tls {
 /// with `tls`: never in plain HTTP, which would carry the session in clear (and browsers give
 /// the clipboard, the microphone and the camera to pages served in HTTPS only). A VM's page is
 /// `/vm/<uuid>/`, its signalling `/vm/<uuid>/signal` (`qdw_protocol::signalling_path`).
-pub async fn serve(listen: SocketAddr, tls: Tls, vms: Arc<Vms>) -> Result<()> {
+pub async fn serve(listen: SocketAddr, tls: Tls, vms: Arc<Vms>, auth: Auth) -> Result<()> {
+    let state = AppState { vms, auth };
     let app =
         axum::Router::new()
             .route(
@@ -187,7 +189,7 @@ pub async fn serve(listen: SocketAddr, tls: Tls, vms: Arc<Vms>) -> Result<()> {
             )
             .route("/vm/{uuid}/", get(page))
             .route("/vm/{uuid}/signal", get(upgrade))
-            .with_state(vms)
+            .with_state(state)
             .into_make_service_with_connect_info::<SocketAddr>();
     // One crypto provider for the process: ring.
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -206,7 +208,7 @@ pub async fn serve(listen: SocketAddr, tls: Tls, vms: Arc<Vms>) -> Result<()> {
 }
 
 /// A VM's page; by a VM's name, a redirection to the page by its UUID, the address that stays.
-async fn page(Path(id): Path<String>, State(vms): State<Arc<Vms>>) -> Response {
+async fn page(Path(id): Path<String>, State(AppState { vms, .. }): State<AppState>) -> Response {
     if crate::vms::normalize(&id).is_some() {
         return Html(PAGE).into_response();
     }
@@ -217,41 +219,136 @@ async fn page(Path(id): Path<String>, State(vms): State<Arc<Vms>>) -> Response {
     }
 }
 
+/// What the pages and the signalling share.
+#[derive(Clone)]
+struct AppState {
+    vms: Arc<Vms>,
+    auth: Auth,
+}
+
+/// The error that asks a client for an account: the page shows its login form on it.
+const ACCOUNT_REQUIRED: &str = "an account is required";
+
+/// How long a client has to say hello, its account in it.
+const HELLO_TIME: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long a wrong account waits for its answer: guessing passwords takes that long each.
+const REFUSAL_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
 async fn upgrade(
     ws: WebSocketUpgrade,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    Path(uuid): Path<String>,
-    State(vms): State<Arc<Vms>>,
+    Path(id): Path<String>,
+    State(AppState { vms, auth }): State<AppState>,
 ) -> Response {
-    // The VM attached before the WebSocket opens: a client asking for a VM the host does not
-    // run hears it at once.
-    let client = match vms.client(&uuid).await {
-        Ok(Some(client)) => client,
+    // Which VM, without starting it nor attaching to it: that waits for the client's account.
+    let uuid = match vms.uuid_of(&id).await {
+        Ok(Some(uuid)) => uuid,
         Ok(None) => {
-            info!(%peer, uuid, "no such VM");
+            info!(%peer, id, "no such VM");
             return (StatusCode::NOT_FOUND, "no such VM on this host").into_response();
         }
-        Err(e) => {
-            warn!(%peer, uuid, error = %format!("{e:#}"), "VM not attached");
-            return (StatusCode::SERVICE_UNAVAILABLE, format!("{e:#}")).into_response();
+        Err(e) => return (StatusCode::CONFLICT, format!("{e:#}")).into_response(),
+    };
+    let stopping = vms.stopping();
+    ws.on_upgrade(move |socket| async move {
+        info!(%peer, uuid, "viewer connected");
+        if let Err(e) = open(socket, &vms, &auth, &uuid, stopping).await {
+            warn!(%peer, uuid, error = %format!("{e:#}"), "viewer session ended");
+        }
+    })
+    .into_response()
+}
+
+/// A client came for the VM `uuid`: its hello, its account checked, then the VM, started or
+/// attached to if need be, and the session.
+async fn open(
+    mut socket: WebSocket,
+    vms: &Vms,
+    auth: &Auth,
+    uuid: &str,
+    stopping: watch::Receiver<bool>,
+) -> Result<()> {
+    let hello = match tokio::time::timeout(HELLO_TIME, receive(&mut socket)).await {
+        Ok(Ok(Some(client_message::Message::Hello(hello)))) => hello,
+        Ok(Ok(None)) => return Ok(()),
+        Ok(Err(e)) => return Err(e),
+        Ok(Ok(Some(_))) | Err(_) => anyhow::bail!("no hello"),
+    };
+    let mut shadow = hello.shadow;
+    match auth {
+        Auth::None => {}
+        Auth::Accounts(path) => {
+            // No account given: the client asks for one, with no delay (nothing is guessed).
+            if hello.user.is_empty() {
+                let message = ACCOUNT_REQUIRED.to_string();
+                send(
+                    &mut socket,
+                    server_message::Message::Error(Error { message }),
+                )
+                .await?;
+                let _ = socket.send(WsMessage::Close(None)).await;
+                return Ok(());
+            }
+            let accounts = vms.accounts(uuid, path).await?;
+            let (vm, user, password) =
+                (uuid.to_owned(), hello.user.clone(), hello.password.clone());
+            // Argon2 takes its time: off the async threads.
+            let granted =
+                tokio::task::spawn_blocking(move || accounts.check(&vm, &user, &password)).await?;
+            let Some(granted) = granted else {
+                info!(uuid, user = hello.user, "wrong user or password");
+                tokio::time::sleep(REFUSAL_DELAY).await;
+                let message = "wrong user or password".to_string();
+                send(
+                    &mut socket,
+                    server_message::Message::Error(Error { message }),
+                )
+                .await?;
+                let _ = socket.send(WsMessage::Close(None)).await;
+                return Ok(());
+            };
+            info!(
+                uuid,
+                user = granted.user,
+                shadow_only = granted.shadow_only,
+                "logged in"
+            );
+            shadow |= granted.shadow_only;
+        }
+    }
+    // The VM now: started if it is off and its manager may, attached if need be.
+    let attached = match vms.client(uuid).await {
+        Ok(Some(client)) => Ok(client),
+        Ok(None) => Err("no such VM on this host".to_string()),
+        Err(e) => Err(format!("{e:#}")),
+    };
+    let mut client = match attached {
+        Ok(client) => client,
+        Err(message) => {
+            warn!(uuid, error = message, "VM not attached");
+            send(
+                &mut socket,
+                server_message::Message::Error(Error { message }),
+            )
+            .await?;
+            let _ = socket.send(WsMessage::Close(None)).await;
+            return Ok(());
         }
     };
     let span = client.span().clone();
-    let stopping = vms.stopping();
-    ws.on_upgrade(move |socket| {
-        async move {
-            info!(%peer, "viewer connected");
-            let mut client = client;
-            if let Err(e) = viewer(socket, &client, stopping).await {
-                warn!(%peer, error = %format!("{e:#}"), "viewer session ended");
-            } else {
-                info!(%peer, "viewer left");
-                client.leaves();
-            }
+    let codecs = hello.codecs;
+    let ended = viewer(socket, &client, codecs, shadow, stopping)
+        .instrument(span.clone())
+        .await;
+    let _entered = span.enter();
+    match &ended {
+        Ok(()) => {
+            info!("viewer left");
+            client.leaves();
         }
-        .instrument(span)
-    })
-    .into_response()
+        Err(e) => warn!(error = %format!("{e:#}"), "viewer session ended"),
+    }
+    Ok(())
 }
 
 /// One message to the client, as a binary WebSocket message.
@@ -282,18 +379,16 @@ async fn receive(socket: &mut WebSocket) -> Result<Option<client_message::Messag
     }
 }
 
+/// The session of a client of the VM: `codecs` it decodes, from its hello, and whether it
+/// only watches.
 async fn viewer(
     mut socket: WebSocket,
     client: &Client,
+    codecs: Vec<String>,
+    shadow: bool,
     server_stopping: watch::Receiver<bool>,
 ) -> Result<()> {
     let shared = client.shared().clone();
-    // The client first says which codecs it decodes.
-    let Some(client_message::Message::Hello(Hello { codecs, shadow })) =
-        receive(&mut socket).await?
-    else {
-        anyhow::bail!("no hello");
-    };
     if !codecs
         .iter()
         .any(|c| shared.codec.decoded_by(shared.full_chroma, c))

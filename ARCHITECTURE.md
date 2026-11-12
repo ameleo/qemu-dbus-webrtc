@@ -41,8 +41,13 @@ libvirt, plain QEMU) starts and stops it.
 - **Pause:** a client whose window is hidden pauses its video (data channel `control`): it
   leaves the viewers its console's encoder feeds, and a console nobody watches is not encoded
   at all. The sound goes on. On resume, a keyframe brings the picture back at once.
-- **Signalling:** a WebSocket carrying the SDP offer and answer and ICE candidates, behind
-  token authentication supplied by the deployment (a broker or the VM manager).
+- **Signalling:** a WebSocket carrying the SDP offer and answer and ICE candidates. The client's
+  hello carries an account of the VM's (`[auth] method = "accounts"`, the default), checked
+  before the server starts the VM or attaches to it: a libvirt domain keeps its accounts in its
+  definition (`<metadata>`, Argon2id hashes), the other VMs in the server's accounts file. A
+  wrong account waits a second for its answer; an account may be watch only. Single sign-on
+  (OIDC), a broker's token, and the check of the account by Windows itself (with the automatic
+  logon) are to come.
 - **Protocol:** the messages between the server and its clients are Protocol Buffers, defined
   in `crates/protocol/proto/qdw.proto`. Clients in any language generate their code from it;
   the browser page carries a small hand-written codec for the few messages it needs. Device

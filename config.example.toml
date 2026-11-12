@@ -6,6 +6,14 @@
 # server attaches to the VM when its first client comes, and detaches when the last one left (a
 # minute after a client cut off, which may come back).
 
+[auth]
+# Who may open a VM's console: "accounts" (the default), an account of the VM's, set with
+# `qemu-dbus-webrtc password <vm> <user>`; "none", anyone who reaches the server (a test).
+method = "accounts"
+# Where the accounts of the VMs that are not libvirt domains are (a libvirt domain keeps its
+# own in its definition). Readable by root only.
+# accounts = "/etc/qemu-dbus-webrtc/accounts.toml"
+
 [listen]
 # The pages and their signalling. Default: 127.0.0.1:8090, this host only.
 address = "0.0.0.0:8090"

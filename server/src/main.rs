@@ -6,6 +6,7 @@
 //! Proxmox VE, or by hand), attaches to one when a client asks for it, encodes its screens with
 //! the host GPU, and serves them over WebRTC.
 
+mod access;
 mod agent;
 mod audio;
 mod cameras;
@@ -20,6 +21,7 @@ mod pointer;
 mod printers;
 mod providers;
 mod session;
+mod tools;
 mod vm;
 mod vms;
 mod web;
@@ -47,6 +49,10 @@ async fn main() -> Result<()> {
         print!("{}", gpus::report(&gpus::gpus(), gpus::software()));
         return Ok(());
     }
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if tools::run(&args).await? {
+        return Ok(());
+    }
     let mut config = config::parse_args()?;
     gstreamer::init()?;
     let found = gpus::gpus();
@@ -62,14 +68,15 @@ async fn main() -> Result<()> {
     // Fail now, saying why, rather than at the first frame.
     gpus::check(&found, &vm.settings)?;
 
+    let tls = config.tls()?;
     let vms = vms::Vms::new(config.providers, config.vm);
     info!(providers = ?vms.providers(), "finding the VMs");
-    if !config.listen.ip().is_loopback() {
-        warn!(listen = %config.listen, "no authentication yet: anyone who reaches this address sees the VMs");
+    if matches!(config.auth, config::Auth::None) && !config.listen.ip().is_loopback() {
+        warn!(listen = %config.listen, "[auth] method is none: anyone who reaches this address sees the VMs");
     }
     let served = vms.clone();
     tokio::spawn(async move {
-        if let Err(e) = web::serve(config.listen, config.tls, served).await {
+        if let Err(e) = web::serve(config.listen, tls, served, config.auth).await {
             warn!(error = %format!("{e:#}"), "the viewer pages are down");
         }
     });
