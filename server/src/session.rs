@@ -435,12 +435,25 @@ rtcp-fb-transport-cc=(boolean)true,extmap-1=(string){TWCC_URI} \
             .context("no bus")?
             .set_sync_handler(move |_, message| {
                 if let gst::MessageView::Error(error) = message.view() {
-                    warn!(
-                        source = ?error.src().map(|s| s.path_string()),
-                        error = %error.error(),
-                        debug = ?error.debug(),
-                        "viewer pipeline error"
-                    );
+                    // The client closing its peer connection aborts the SCTP association of the
+                    // data channels (libwebrtc does not shut it down gracefully): sctpenc takes
+                    // that for an error. It is the client leaving, not a failure.
+                    let left = error
+                        .src()
+                        .is_some_and(|s| s.type_().name() == "GstSctpEnc")
+                        && error
+                            .debug()
+                            .is_some_and(|d| d.contains("association went into error state"));
+                    if left {
+                        info!("the client closed its peer connection");
+                    } else {
+                        warn!(
+                            source = ?error.src().map(|s| s.path_string()),
+                            error = %error.error(),
+                            debug = ?error.debug(),
+                            "viewer pipeline error"
+                        );
+                    }
                     let _ = errors.send(Signal::Closed);
                 }
                 gst::BusSyncReply::Drop
