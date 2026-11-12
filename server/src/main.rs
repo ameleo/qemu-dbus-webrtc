@@ -30,8 +30,10 @@ use tracing::{info, warn};
 use qdw_video::encode::Codec;
 use qdw_video::gpus;
 
-/// How long the sessions have to end when the server stops.
+/// How long the sessions have to end when the server stops, and the VMs to be detached then
+/// (an encoder takes up to two seconds to finish).
 const STOP_TIME: std::time::Duration = std::time::Duration::from_secs(1);
+const DETACH_TIME: std::time::Duration = std::time::Duration::from_secs(4);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -81,5 +83,13 @@ async fn main() -> Result<()> {
     info!("stopping: the sessions end");
     vms.stop();
     tokio::time::sleep(STOP_TIME).await;
+    // Then the VMs, their encoders finished: nothing is left playing.
+    if tokio::time::timeout(DETACH_TIME, vms.detach_all())
+        .await
+        .is_err()
+    {
+        warn!("the VMs were not all detached in time");
+    }
+    info!("stopped");
     Ok(())
 }

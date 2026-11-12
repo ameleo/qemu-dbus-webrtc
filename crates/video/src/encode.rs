@@ -621,6 +621,13 @@ impl Encoder {
             let _ =
                 bus.timed_pop_filtered(gst::ClockTime::from_seconds(2), &[gst::MessageType::Eos]);
         }
+        // Dropped next: the pipeline stops.
+    }
+}
+
+impl Drop for Encoder {
+    /// Stopped, finished or not: GStreamer wants a pipeline stopped before it goes.
+    fn drop(&mut self) {
         let _ = self.pipeline.set_state(gst::State::Null);
     }
 }

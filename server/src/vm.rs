@@ -113,8 +113,10 @@ pub struct Vm {
     /// What is logged of the VM, its viewers' sessions included, is in it.
     pub span: tracing::Span,
     /// Ends the display loop.
-    stop: Option<oneshot::Sender<()>>,
+    stop: std::sync::Mutex<Option<oneshot::Sender<()>>>,
     display: tokio::task::JoinHandle<()>,
+    /// Turns true once the display loop is over, its encoders finished.
+    finished: tokio::sync::watch::Receiver<bool>,
     agent: tokio::task::JoinHandle<()>,
 }
 
@@ -123,14 +125,27 @@ impl Vm {
     pub fn ended(&self) -> bool {
         *self.shared.vm_stopped.borrow() || self.display.is_finished()
     }
+
+    /// End the display loop.
+    fn stop(&self) {
+        if let Some(stop) = self.stop.lock().unwrap().take() {
+            let _ = stop.send(());
+        }
+        self.agent.abort();
+    }
+
+    /// Detach from the VM now, and wait until its encoders are finished: when the server
+    /// stops, so that nothing is left playing.
+    pub async fn shut_down(&self) {
+        self.stop();
+        let mut finished = self.finished.clone();
+        let _ = finished.wait_for(|finished| *finished).await;
+    }
 }
 
 impl Drop for Vm {
     fn drop(&mut self) {
-        if let Some(stop) = self.stop.take() {
-            let _ = stop.send(());
-        }
-        self.agent.abort();
+        self.stop();
     }
 }
 
@@ -270,6 +285,7 @@ async fn start_in(
         depths: Default::default(),
     };
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
+    let (finished_tx, finished_rx) = tokio::sync::watch::channel(false);
     // Whether the VM still answers: its listeners do not say when QEMU goes.
     let peer = zbus::fdo::PeerProxy::builder(&vm_connection)
         .destination("org.qemu")?
@@ -702,6 +718,7 @@ async fn start_in(
     for finished in finished {
         let _ = finished.await;
     }
+    finished_tx.send_replace(true);
 
         }
         .instrument(span.clone()),
@@ -710,7 +727,8 @@ async fn start_in(
         shared,
         name,
         span,
-        stop: Some(stop_tx),
+        stop: std::sync::Mutex::new(Some(stop_tx)),
+        finished: finished_rx,
         display: display_task,
         agent: agent_task,
     })

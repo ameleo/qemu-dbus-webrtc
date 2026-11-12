@@ -115,6 +115,13 @@ impl Vms {
         self.stopping.send_replace(true);
     }
 
+    /// Detach from every VM, and wait until their encoders are finished: the server stops.
+    pub async fn detach_all(&self) {
+        let attached: Vec<_> = self.attached.lock().await.drain().collect();
+        let shut_down = attached.iter().map(|(_, entry)| entry.vm.shut_down());
+        futures_util::future::join_all(shut_down).await;
+    }
+
     /// Turns true when the server stops.
     pub fn stopping(&self) -> tokio::sync::watch::Receiver<bool> {
         self.stopping.subscribe()
