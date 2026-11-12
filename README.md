@@ -14,9 +14,19 @@ are welcome, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Without anything in the guest:
 
-- **Video:** the guest's screen, encoded on the host GPU with VA-API, from the DMA-BUF QEMU
-  shares (no copy through the CPU), in the codecs below. One encoder per screen, shared by every
-  viewer; nothing is encoded when nobody watches.
+- **Video:** the guest's screen, encoded on the host GPU with VA-API, in the codecs below; from
+  the DMA-BUF QEMU shares when the VM has GL (no copy through the CPU), from memory otherwise
+  (`gl=off`, virtio-vga 2D). One encoder per screen, shared by every viewer, at most 30 frames
+  a second; nothing is encoded when nobody watches. In 10 bits (AV1, HEVC) for clients that
+  say they decode it: no banding in gradients.
+- **Without a GPU:** VP9 encoded on the CPU (`--software`, taken by itself when the host has no
+  GPU encoder), in 4:2:0 or 4:4:4. `--codecs` lists what each GPU, and the CPU, encodes.
+- **The network:** the bitrate follows the user's bandwidth, estimated with Google Congestion
+  Control from the client's reports (between 4 and 30 Mbit/s, `--bitrate` for the ceiling);
+  each client is told its estimate.
+- **One user, watchers:** the guest's screen takes the size of the user's window. One client
+  uses the session at a time, as with RDP: a new one takes it over. Shadow clients (`?shadow` in
+  the page's address) only watch and listen.
 - **Browsers:** Chrome and Firefox, with lost packets sent again (NACK/RTX). A client is told why
   when it cannot decode the stream (Firefox does not take VP9 in 4:4:4).
 - **Keyboard and mouse,** as RDP handles them: keys by position (scancodes), the guest applying
@@ -51,16 +61,17 @@ Clients: the page served by the program itself; a native client built on libwebr
 works. All messages are Protocol Buffers ([qdw.proto](crates/protocol/proto/qdw.proto)), so
 other clients can be written from it.
 
-Coming next: the guest's screen at the size of the client's window, one user at a time with
-watch-only (shadow) clients, congestion control (the bitrate following the network), several
-monitors, the camera, automatic logon, and authentication.
+Coming next: several monitors, the camera, automatic logon, and authentication.
 
 ## Running it
 
-It needs a host with a VA-API GPU, GStreamer 1.26 (with the `va` elements of gst-plugins-bad
-and `rtpgccbwe`, `rtpvp9pay2` of gst-plugins-rs), and a VM started with `-display dbus` (libvirt:
-`<graphics type='dbus'/>`). Build it with Cargo, then attach it to the VM, through its QMP socket
-(peer to peer) or the D-Bus bus libvirt runs for it:
+It needs GStreamer 1.26 (the `va` elements of gst-plugins-bad for a VA-API GPU, `vp9enc` for the
+CPU, and `rtpgccbwe`, `rtpvp9pay2` of gst-plugins-rs) and a VM started with `-display dbus`
+(libvirt: `<graphics type='dbus'/>`). Two fixes to GStreamer, to be offered upstream, make the
+congestion control smoother: as released, the VA encoders send a keyframe at each change of
+bitrate, and `rtpgccbwe` raises its estimate far above the link while the desktop sends little.
+Build it with Cargo, then attach it to the VM, through its QMP socket (peer to peer) or the D-Bus
+bus libvirt runs for it:
 
 ```
 cargo build --release
@@ -69,13 +80,14 @@ target/release/qemu-dbus-webrtc --dbus unix:path=/run/libvirt/qemu/dbus/<id>-<vm
 ```
 
 and open `http://127.0.0.1:8090/`. Options: `--codec av1|vp9|hevc`, `--chroma 420|444`,
-`--bitrate <kbit/s>`, `--listen <address:port>`, `--tls <certificate.pem> <key.pem>`,
-`--record <path prefix>` (to keep each screen's stream in a file).
+`--software`, `--bitrate <max kbit/s>`, `--listen <address:port>`,
+`--tls <certificate.pem> <key.pem>`, `--record <path prefix>` (to keep each screen's stream in a
+file). `qemu-dbus-webrtc --codecs` lists what the host encodes.
 
 ## Goals
 
 - Hardware video encoding on the host (VA-API first: Intel and AMD GPUs, including integrated
-  ones), so that one inexpensive GPU serves several consoles.
+  ones), so that one inexpensive GPU serves several consoles; the CPU as a fallback.
 - Standard WebRTC in any modern browser: no plugin, no client to install.
 - Independent of the VM manager: it attaches to a running VM (QMP and D-Bus) and does not manage
   its lifecycle, so it can serve Proxmox VE, libvirt or plain QEMU alike.
