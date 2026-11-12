@@ -20,8 +20,8 @@ use tracing::{info, warn};
 
 use qdw_protocol::v1::{
     BandwidthEstimate, ClientMessage, ControlMessage, Error, Hello, IceCandidate, Input,
-    Microphone, MonitorLayout, ServerMessage, SessionDescription, VideoPause, client_message, control_message,
-    server_message,
+    Microphone, MonitorLayout, ServerMessage, SessionDescription, VideoPause, client_message,
+    control_message, server_message,
 };
 use qdw_protocol::{Message, SIGNALLING_PATH};
 use qdw_video::encode::Codec;
