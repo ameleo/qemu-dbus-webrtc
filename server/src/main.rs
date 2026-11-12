@@ -15,6 +15,7 @@ mod copied;
 mod drives;
 mod input;
 mod layout;
+mod libvirt;
 mod pointer;
 mod printers;
 mod providers;

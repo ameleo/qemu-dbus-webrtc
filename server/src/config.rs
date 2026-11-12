@@ -84,6 +84,8 @@ struct Bitrate {
 struct Libvirt {
     enabled: Option<bool>,
     dir: Option<PathBuf>,
+    /// Start a domain that is off when a client asks for it: off by default.
+    start: Option<bool>,
 }
 
 /// The VMs of Proxmox VE: off by default.
@@ -198,10 +200,9 @@ fn parse(args: Vec<String>) -> Result<Config> {
         })
         .collect::<Result<Vec<_>>>()?;
     let providers = Providers::new(
-        file.libvirt
-            .enabled
-            .unwrap_or(true)
-            .then_some(providers::Libvirt { dir: libvirt_dir }),
+        file.libvirt.enabled.unwrap_or(true).then(|| {
+            crate::libvirt::Libvirt::new(libvirt_dir, file.libvirt.start.unwrap_or(false))
+        }),
         file.proxmox
             .enabled
             .unwrap_or(false)

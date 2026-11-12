@@ -39,7 +39,11 @@ max = 30000
 [libvirt]
 # The domains with <graphics type='dbus'>. Default: enabled.
 enabled = true
-# Where libvirt puts their display's bus.
+# Start a domain that is off when a client asks for it (through libvirt-dbus). Default: false;
+# without authentication, anyone who reaches the server could start the host's VMs.
+start = false
+# Where libvirt puts their display's bus: read without libvirt-dbus, which then sees the
+# running domains only.
 # dir = "/run/libvirt/qemu/dbus"
 
 [proxmox]

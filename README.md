@@ -76,28 +76,34 @@ Coming next: automatic logon, and authentication.
 ## Running it
 
 It needs GStreamer 1.26 (the `va` elements of gst-plugins-bad for a VA-API GPU, `vp9enc` for the
-CPU, and `rtpgccbwe`, `rtpvp9pay2` of gst-plugins-rs) and a VM started with `-display dbus`
-(libvirt: `<graphics type='dbus'/>`). Two fixes to GStreamer, to be offered upstream, make the
+CPU, and `rtpgccbwe`, `rtpvp9pay2` of gst-plugins-rs), libvirt-dbus for libvirt's VMs, and VMs
+started with `-display dbus` (libvirt: `<graphics type='dbus'/>`). Two fixes to GStreamer, to be offered upstream, make the
 congestion control smoother: as released, the VA encoders send a keyframe at each change of
 bitrate, and `rtpgccbwe` raises its estimate far above the link while the desktop sends little.
-Build it with Cargo, then attach it to the VM: by its libvirt domain's name, the D-Bus bus
-libvirt runs for it, or its QMP socket (peer to peer):
+One server serves every VM of its host. It finds them through their VM manager: libvirt (the
+domains with `<graphics type='dbus'/>`, through libvirt-dbus, which also lets it start a VM
+that is off), Proxmox VE (not tried yet), or VMs given by hand. Build it with Cargo and start
+it:
 
 ```
 cargo build --release
-target/release/qemu-dbus-webrtc --domain <vm> --listen 127.0.0.1:8090 --tls cert.pem key.pem
+target/release/qemu-dbus-webrtc --listen 0.0.0.0:8090 --tls cert.pem key.pem
 ```
 
-and open `https://127.0.0.1:8090/`. It serves in HTTPS only: it needs a certificate and its key,
-for a test a self-signed one,
+A VM's page is `https://<host>:8090/vm/<uuid>/`; its name in place of the UUID (a libvirt
+domain, a Proxmox VM id or name) redirects there. The server attaches to a VM when its first
+client comes, and detaches a minute after the last one left. It serves in HTTPS only: it needs
+a certificate and its key, for a test a self-signed one,
 `openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj /CN=localhost -keyout key.pem -out cert.pem`
-(the browser asks to accept it once). The settings can live in a TOML file,
-`qemu-dbus-webrtc --config <vm>.toml`, one per VM: [config.example.toml](config.example.toml)
-describes them all. The command line's options override the file's: `--domain <name>`,
-`--dbus <address>` or `--qmp <socket>`, `--codec av1|vp9|hevc`, `--chroma 420|444`,
-`--software`, `--bitrate <max kbit/s>`, `--listen <address:port>`,
-`--tls <certificate.pem> <key.pem>` (required, unless in the file), `--record <path prefix>` (to keep each screen's stream in a
-file). `qemu-dbus-webrtc --codecs` lists what the host encodes.
+(the browser asks to accept it once).
+
+The settings can live in a TOML file, one per host, `qemu-dbus-webrtc --config <file>`:
+[config.example.toml](config.example.toml) describes them all. The command line's options
+override the file's: `--codec av1|vp9|hevc`, `--chroma 420|444`, `--software`,
+`--bitrate <max kbit/s>`, `--listen <address:port>`, `--tls <certificate.pem> <key.pem>`
+(required, unless in the file), `--record <path prefix>` (to keep each screen's stream in a
+file), and VMs by hand: `--domain <libvirt domain>`, `--dbus <address>`, `--qmp <socket>`.
+`qemu-dbus-webrtc --codecs` lists what the host encodes.
 
 ## Goals
 

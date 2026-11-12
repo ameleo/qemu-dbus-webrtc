@@ -9,11 +9,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use tracing::{info, warn};
 
 use crate::config::VmConfig;
-use crate::providers::Providers;
+use crate::providers::{Found, Providers};
 use crate::vm::{self, Vm};
 use crate::web;
 
@@ -21,6 +21,8 @@ use crate::web;
 const DETACH_AFTER: Duration = Duration::from_secs(60);
 /// How often the VMs without clients are looked at.
 const REAP_INTERVAL: Duration = Duration::from_secs(10);
+/// How long a VM just started has for its display to come up.
+const START_TIME: Duration = Duration::from_secs(15);
 
 /// A VM attached, and who uses it.
 struct Attached {
@@ -102,7 +104,7 @@ impl Vms {
         let entry = match attached.get(&uuid) {
             Some(entry) => entry.clone(),
             None => {
-                let Some(how) = self.providers.find(&uuid).await? else {
+                let Some(how) = self.attach_to(&uuid).await? else {
                     return Ok(None);
                 };
                 let vm = match vm::start(&how, &uuid, &self.config).await {
@@ -125,6 +127,36 @@ impl Vms {
         entry.clients.fetch_add(1, Ordering::AcqRel);
         *entry.idle_since.lock().unwrap() = None;
         Ok(Some(Client { attached: entry }))
+    }
+}
+
+impl Vms {
+    /// How to attach to the VM `uuid`, started first if it is off and its provider starts it:
+    /// `None` when no provider knows it.
+    async fn attach_to(&self, uuid: &str) -> Result<Option<qdw_qemu::display::Attach>> {
+        let (provider, startable) = match self.providers.find(uuid).await? {
+            None => return Ok(None),
+            Some(Found::Running(attach)) => return Ok(Some(attach)),
+            Some(Found::Off {
+                provider,
+                startable,
+            }) => (provider, startable),
+        };
+        if !startable {
+            bail!("the VM is off");
+        }
+        provider.start(uuid).await?;
+        // Its display comes up with QEMU, at once or nearly.
+        let started = Instant::now();
+        loop {
+            if let Some(Found::Running(attach)) = self.providers.find(uuid).await? {
+                return Ok(Some(attach));
+            }
+            if started.elapsed() >= START_TIME {
+                bail!("the VM started, but its display did not come up");
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
     }
 }
 

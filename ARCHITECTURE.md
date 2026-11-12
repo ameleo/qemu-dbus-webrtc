@@ -13,8 +13,16 @@ libvirt, plain QEMU) starts and stops it.
 
 ## Components
 
-- **QEMU attachment:** QMP to find and follow the VM; the D-Bus display for scanouts (DMA-BUF,
-  `ScanoutDMABUF2`), cursor, keyboard, mouse, audio and clipboard.
+- **VMs:** one server serves every VM of its host. Providers find them, one per VM manager:
+  libvirt through libvirt-dbus (every domain with a D-Bus display, running or not, by UUID and
+  name; the bus of a running one's display from its live definition; and starting one that is
+  off, when `[libvirt] start` allows it), Proxmox VE (QMP sockets and VM configurations), and
+  VMs given by hand. A VM's page is `/vm/<uuid>/`, its signalling `/vm/<uuid>/signal`; a name
+  redirects to the UUID. The server attaches to a VM when its first client comes, after
+  checking the VM's UUID, and detaches a minute after the last one left: a VM nobody watches
+  costs nothing. The server does not otherwise manage the VMs.
+- **QEMU attachment:** the D-Bus display (a libvirt bus, or peer to peer through QMP) for
+  scanouts (DMA-BUF, `ScanoutDMABUF2`), cursor, keyboard, mouse, audio and clipboard.
 - **Video:** GStreamer, VA-API hardware encoding. The guest framebuffer is a linear DMA-BUF
   that VA-API cannot import as RGB, so `vapostproc` uploads it (one CPU copy) and converts it to
   YUV on the GPU, where the encoder reads it.
@@ -40,7 +48,7 @@ libvirt, plain QEMU) starts and stops it.
 | `crates/qemu` | `qdw-qemu` | attachment to QEMU: QMP, the D-Bus display and sound, the guest agent |
 | `crates/video` | `qdw-video` | hardware encoding of a framebuffer, recording |
 | `crates/audio` | `qdw-audio` | Opus encoding of the guest's sound |
-| `server` | `qemu-dbus-webrtc` | the server: viewer sessions, signalling, the browser page |
+| `server` | `qemu-dbus-webrtc` | the server: the VMs and their providers (`providers.rs`, `libvirt.rs`, `vms.rs`), a VM's display loop (`vm.rs`), viewer sessions, signalling, the browser page |
 
 A native client will sit next to them and share `qdw-protocol`.
 

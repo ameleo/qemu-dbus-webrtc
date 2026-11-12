@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! Where the server finds the host's VMs: a provider knows how a VM manager runs them, and how
-//! to attach to their display. Each one lists the VMs it sees (their way in, and their UUID
-//! when it knows it without attaching); the server takes the VM a client asks for by its UUID.
-//! A new VM manager is a new provider.
+//! to attach to their display. Each one lists the VMs it sees (their way in while they run,
+//! and their UUID and names when it knows them without attaching), and may start one that is
+//! off; the server takes the VM a client asks for by its UUID or name. A new VM manager is a
+//! new provider: libvirt is in `libvirt.rs`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -11,61 +12,50 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use futures_util::FutureExt;
+use futures_util::future::BoxFuture;
 use qdw_qemu::display::{self, Attach, VmProxy};
 use tracing::{debug, warn};
+
+use crate::libvirt::Libvirt;
 
 /// How long the UUID of a VM may take to read, when a provider does not know it.
 const PROBE_TIME: Duration = Duration::from_secs(3);
 
 /// A VM a provider sees.
 pub struct Candidate {
-    pub attach: Attach,
+    /// How to attach to its display; `None` while it is off.
+    pub attach: Option<Attach>,
     /// Its UUID, when the provider knows it without attaching.
     pub uuid: Option<String>,
     /// The names it goes by, when the provider knows them without attaching: what a person
     /// types in an address rather than the UUID.
     pub names: Vec<String>,
+    /// Off, the provider starts it when a client asks for it.
+    pub startable: bool,
 }
 
 /// A VM manager.
 pub trait Provider: Send + Sync {
     fn name(&self) -> &'static str;
-    /// The VMs it runs now, with a display the server can attach to.
-    fn candidates(&self) -> Result<Vec<Candidate>>;
+    /// The VMs it sees now, with a display the server can attach to.
+    fn candidates(&self) -> BoxFuture<'_, Result<Vec<Candidate>>>;
+    /// Start the VM `uuid`, which is off.
+    fn start<'a>(&'a self, uuid: &'a str) -> BoxFuture<'a, Result<()>> {
+        let _ = uuid;
+        async move { bail!("{} does not start VMs", self.name()) }.boxed()
+    }
 }
 
-/// libvirt: each domain with `<graphics type='dbus'>` has the bus of its display in `dir`,
-/// `<id>-<domain>-dbus.sock`, the id changing at each start.
-pub struct Libvirt {
-    pub dir: PathBuf,
-}
-
-impl Provider for Libvirt {
-    fn name(&self) -> &'static str {
-        "libvirt"
-    }
-
-    fn candidates(&self) -> Result<Vec<Candidate>> {
-        let entries = match std::fs::read_dir(&self.dir) {
-            Ok(entries) => entries,
-            // No domain with a D-Bus display runs.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(e).with_context(|| format!("reading {}", self.dir.display())),
-        };
-        Ok(entries
-            .flatten()
-            .filter_map(|e| {
-                let file = e.file_name().to_string_lossy().into_owned();
-                Some(Candidate {
-                    names: libvirt_domain(&file)?.into_iter().collect(),
-                    attach: Attach::Bus {
-                        address: format!("unix:path={}", e.path().display()),
-                    },
-                    uuid: None,
-                })
-            })
-            .collect())
-    }
+/// What the providers say of a VM.
+pub enum Found<'a> {
+    /// It runs: attach this way.
+    Running(Attach),
+    /// It is off; this provider starts it, if it can.
+    Off {
+        provider: &'a dyn Provider,
+        startable: bool,
+    },
 }
 
 /// Proxmox VE: each VM's QMP socket is `<vmid>.qmp` in `run_dir`, and its UUID is in its
@@ -81,7 +71,13 @@ impl Provider for Proxmox {
         "proxmox"
     }
 
-    fn candidates(&self) -> Result<Vec<Candidate>> {
+    fn candidates(&self) -> BoxFuture<'_, Result<Vec<Candidate>>> {
+        async move { self.running() }.boxed()
+    }
+}
+
+impl Proxmox {
+    fn running(&self) -> Result<Vec<Candidate>> {
         let entries = match std::fs::read_dir(&self.run_dir) {
             Ok(entries) => entries,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -98,7 +94,7 @@ impl Provider for Proxmox {
                 let mut names = vec![vmid.to_owned()];
                 names.extend(proxmox_field(&conf, "name").map(str::to_owned));
                 Some(Candidate {
-                    attach: Attach::P2p { qmp: e.path() },
+                    attach: Some(Attach::P2p { qmp: e.path() }),
                     uuid: proxmox_field(&conf, "smbios1").and_then(|smbios| {
                         smbios
                             .split(',')
@@ -106,6 +102,7 @@ impl Provider for Proxmox {
                             .map(str::to_owned)
                     }),
                     names,
+                    startable: false,
                 })
             })
             .collect())
@@ -119,16 +116,6 @@ fn proxmox_field<'a>(conf: &'a str, field: &str) -> Option<&'a str> {
         .take_while(|line| !line.starts_with('['))
         .find_map(|line| line.strip_prefix(field)?.strip_prefix(':'))
         .map(str::trim)
-}
-
-/// The domain of a libvirt display socket, `<id>-<domain>-dbus.sock`; `None` for another file.
-fn libvirt_domain(file: &str) -> Option<Option<String>> {
-    let rest = file.strip_suffix("-dbus.sock")?;
-    let Some((id, domain)) = rest.split_once('-') else {
-        return Some(None);
-    };
-    let numbered = !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit());
-    Some((numbered && !domain.is_empty()).then(|| domain.to_owned()))
 }
 
 /// A VM given by hand: in the configuration (`[[vm]]`) or on the command line.
@@ -150,9 +137,14 @@ impl Provider for Statics {
         "configuration"
     }
 
-    fn candidates(&self) -> Result<Vec<Candidate>> {
-        Ok(self
-            .0
+    fn candidates(&self) -> BoxFuture<'_, Result<Vec<Candidate>>> {
+        async move { Ok(self.running()) }.boxed()
+    }
+}
+
+impl Statics {
+    fn running(&self) -> Vec<Candidate> {
+        self.0
             .iter()
             .filter_map(|source| {
                 let attach = match source {
@@ -170,12 +162,13 @@ impl Provider for Statics {
                     _ => Vec::new(),
                 };
                 Some(Candidate {
-                    attach,
+                    attach: Some(attach),
                     uuid: None,
                     names,
+                    startable: false,
                 })
             })
-            .collect())
+            .collect()
     }
 }
 
@@ -245,10 +238,10 @@ impl Providers {
         self.all().iter().map(|p| p.name()).collect()
     }
 
-    /// How to attach to the VM `uuid`, if a provider runs it.
-    pub async fn find(&self, uuid: &str) -> Result<Option<Attach>> {
+    /// What the providers say of the VM `uuid`: `None` when none knows it.
+    pub async fn find(&self, uuid: &str) -> Result<Option<Found<'_>>> {
         for provider in self.all() {
-            let candidates = match provider.candidates() {
+            let candidates = match provider.candidates().await {
                 Ok(candidates) => candidates,
                 Err(e) => {
                     warn!(provider = provider.name(), error = %format!("{e:#}"), "VMs not listed");
@@ -256,16 +249,23 @@ impl Providers {
                 }
             };
             for candidate in candidates {
-                let found = match &candidate.uuid {
-                    Some(known) => known.eq_ignore_ascii_case(uuid),
-                    None => self
-                        .probe(&candidate.attach)
+                let found = match (&candidate.uuid, &candidate.attach) {
+                    (Some(known), _) => known.eq_ignore_ascii_case(uuid),
+                    (None, Some(attach)) => self
+                        .probe(attach)
                         .await
                         .is_some_and(|probed| probed.uuid.eq_ignore_ascii_case(uuid)),
+                    (None, None) => false,
                 };
                 if found {
                     debug!(provider = provider.name(), uuid, "VM found");
-                    return Ok(Some(candidate.attach));
+                    return Ok(Some(match candidate.attach {
+                        Some(attach) => Found::Running(attach),
+                        None => Found::Off {
+                            provider,
+                            startable: candidate.startable,
+                        },
+                    }));
                 }
             }
         }
@@ -277,18 +277,23 @@ impl Providers {
     pub async fn uuid_of(&self, name: &str) -> Result<Option<String>> {
         let mut found: Vec<(String, &'static str)> = Vec::new();
         for provider in self.all() {
-            let Ok(candidates) = provider.candidates() else {
-                continue;
+            let candidates = match provider.candidates().await {
+                Ok(candidates) => candidates,
+                Err(e) => {
+                    warn!(provider = provider.name(), error = %format!("{e:#}"), "VMs not listed");
+                    continue;
+                }
             };
             for candidate in candidates {
                 let known = candidate.names.iter().any(|n| n == name);
                 // A provider that does not know the names: the VM's own.
-                let probed = if known && candidate.uuid.is_some() {
-                    None
-                } else if known || candidate.names.is_empty() {
-                    self.probe(&candidate.attach).await
-                } else {
-                    None
+                let probed = match &candidate.attach {
+                    Some(attach)
+                        if (known && candidate.uuid.is_none()) || candidate.names.is_empty() =>
+                    {
+                        self.probe(attach).await
+                    }
+                    _ => None,
                 };
                 let uuid = match (known, candidate.uuid, probed) {
                     (true, Some(uuid), _) => uuid,
@@ -380,7 +385,7 @@ mod tests {
              [snap]\nname: old\nsmbios1: uuid=00000000-0000-0000-0000-000000000000\n",
         )
         .unwrap();
-        let candidates = Proxmox { run_dir, conf_dir }.candidates().unwrap();
+        let candidates = Proxmox { run_dir, conf_dir }.running().unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(
             candidates[0].uuid.as_deref(),
@@ -388,16 +393,6 @@ mod tests {
         );
         assert_eq!(candidates[0].names, ["101", "win11"]);
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn libvirt_domains_by_their_socket() {
-        assert_eq!(
-            libvirt_domain("6-daas-win-dbus-dbus.sock"),
-            Some(Some("daas-win-dbus".into()))
-        );
-        assert_eq!(libvirt_domain("6-daas-win-dbus-dbus.pid"), None);
-        assert_eq!(libvirt_domain("x-dbus.sock"), Some(None));
     }
 
     #[test]
@@ -414,10 +409,6 @@ mod tests {
         let address = libvirt_bus(&dir, "win-dbus").unwrap();
         assert!(address.ends_with("/6-win-dbus-dbus.sock"), "{address}");
         assert!(libvirt_bus(&dir, "missing").is_err());
-        let libvirt = Libvirt { dir: dir.clone() };
-        let candidates = libvirt.candidates().unwrap();
-        assert_eq!(candidates.len(), 2);
-        assert!(candidates.iter().any(|c| c.names == ["win-dbus"]));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
