@@ -9,6 +9,7 @@ mod agent;
 mod audio;
 mod cameras;
 mod clipboard;
+mod config;
 mod copied;
 mod drives;
 mod input;
@@ -19,30 +20,19 @@ mod session;
 mod web;
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use config::Args;
 use gstreamer as gst;
-use qdw_qemu::display::{self, Attach, DisplayEvent, VmProxy};
+use qdw_qemu::display::{self, DisplayEvent, VmProxy};
 use qdw_video::encode::{Codec, Encoder, Settings};
 use qdw_video::{gpus, record};
 use session::Viewers;
 use web::Request;
-
-const USAGE: &str = "usage: qemu-dbus-webrtc (--qmp <QMP socket> | --dbus <D-Bus address>) \
-                     [--codec av1|vp9|hevc] [--chroma 420|444] [--software] [--bitrate <max kbit/s>] \
-                     [--record <path prefix>] [--listen <address:port>] \
-                     [--tls <certificate.pem> <key.pem>]\n       \
-                     qemu-dbus-webrtc --codecs   (what the GPUs encode)";
-
-/// Where the viewer page is served by default: this host only, since there is no
-/// authentication yet.
-const DEFAULT_LISTEN: &str = "127.0.0.1:8090";
 
 /// On a still screen, a console with viewers still gets a frame this often. Each one is nearly
 /// empty since nothing changed, but it shows the stream is alive: a WebRTC receiver that gets
@@ -54,14 +44,6 @@ const STILL_FRAME_INTERVAL: Duration = Duration::from_millis(250);
 /// large: on a congested connection, it brings more losses, and more requests for keyframes;
 /// lost packets are asked again (NACK) and sent again (RTX) in the meantime.
 const KEYFRAME_INTERVAL: Duration = Duration::from_secs(1);
-
-/// The bandwidth estimation, in kbit/s: never below `MIN_BITRATE` (a desktop below 4 Mbit/s is
-/// not usable, so the session rather fails visibly), starting at `START_BITRATE` (sharp at
-/// once on today's connections, where a ramp from the floor would show a blurred screen for
-/// seconds), up to `--bitrate`.
-const MIN_BITRATE: u32 = 4_000;
-const START_BITRATE: u32 = 10_000;
-const MAX_BITRATE: u32 = 30_000;
 
 /// The video bitrate follows the user's estimate when it changes by this share at least...
 const BITRATE_STEP: f64 = 0.05;
@@ -86,101 +68,6 @@ const FRAME_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / MAX_FPS as
 
 /// How often the rates of each console are reported.
 const RATE_INTERVAL: Duration = Duration::from_secs(5);
-
-struct Args {
-    attach: Attach,
-    settings: Settings,
-    /// `--codec` was given: no other codec in its place.
-    codec_given: bool,
-    bitrates: session::Bitrates,
-    /// Record each console's stream to `<prefix>-<console>.<extension>`.
-    record: Option<String>,
-    /// The address of the viewer page and its signalling.
-    listen: SocketAddr,
-    /// Serve in HTTPS.
-    tls: Option<web::Tls>,
-}
-
-fn parse_args() -> Result<Args> {
-    let mut attach = None;
-    let mut settings = Settings {
-        codec: Codec::Av1,
-        full_chroma: false,
-        bitrate: START_BITRATE,
-        ten_bits: false,
-        software: false,
-    };
-    let mut codec_given = false;
-    let mut max_bitrate = MAX_BITRATE;
-    let mut record = None;
-    let mut listen: SocketAddr = DEFAULT_LISTEN.parse()?;
-    let mut tls = None;
-    let mut args = std::env::args().skip(1);
-    while let Some(option) = args.next() {
-        // Options without a value.
-        if option == "--software" {
-            settings.software = true;
-            continue;
-        }
-        let Some(value) = args.next() else {
-            bail!(USAGE)
-        };
-        match option.as_str() {
-            "--qmp" if attach.is_none() => {
-                attach = Some(Attach::P2p {
-                    qmp: PathBuf::from(value),
-                })
-            }
-            "--dbus" if attach.is_none() => attach = Some(Attach::Bus { address: value }),
-            "--codec" => {
-                settings.codec = Codec::parse(&value).context(USAGE)?;
-                codec_given = true;
-            }
-            "--chroma" => {
-                settings.full_chroma = match value.as_str() {
-                    "420" => false,
-                    "444" => true,
-                    _ => bail!(USAGE),
-                }
-            }
-            "--bitrate" => max_bitrate = value.parse().context(USAGE)?,
-            "--record" => record = Some(value),
-            "--listen" => listen = value.parse().context(USAGE)?,
-            "--tls" => {
-                let Some(key) = args.next() else { bail!(USAGE) };
-                tls = Some(web::Tls {
-                    certificate: value.into(),
-                    key: key.into(),
-                });
-            }
-            _ => bail!(USAGE),
-        }
-    }
-    let Some(attach) = attach else { bail!(USAGE) };
-    // On the CPU, VP9 unless another codec was asked for.
-    if settings.software && !codec_given {
-        settings.codec = Codec::Vp9;
-    }
-    if settings.full_chroma && !settings.codec.has_full_chroma() {
-        bail!("{:?} has no 4:4:4 on the hardware encoders", settings.codec);
-    }
-    let max = max_bitrate.max(MIN_BITRATE);
-    let bitrates = session::Bitrates {
-        min: MIN_BITRATE,
-        start: START_BITRATE.min(max),
-        max,
-    };
-    settings.bitrate = bitrates.start;
-    Ok(Args {
-        attach,
-        settings,
-        codec_given,
-        bitrates,
-        record,
-        listen,
-        tls,
-    })
-}
 
 /// Where an encoder's output goes: to the console's viewers if it has any, and to a file when
 /// recording.
@@ -237,7 +124,7 @@ async fn main() -> Result<()> {
         print!("{}", gpus::report(&gpus::gpus(), gpus::software()));
         return Ok(());
     }
-    let mut args = parse_args()?;
+    let mut args = config::parse_args()?;
     gstreamer::init()?;
     let found = gpus::gpus();
     // Without a GPU, encode on the CPU: VP9, unless another codec was asked for.

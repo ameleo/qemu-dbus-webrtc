@@ -1,0 +1,37 @@
+# qemu-dbus-webrtc configuration: `qemu-dbus-webrtc --config <file>`. Every setting is optional;
+# the command line's options override the file's. One file per VM, for instance
+# /etc/qemu-dbus-webrtc/<vm>.toml.
+
+[vm]
+# The VM, one of the three:
+# a libvirt domain (<graphics type='dbus'>), its display found by the domain's name;
+domain = "daas-win-dbus"
+# the D-Bus bus on which QEMU owns org.qemu;
+# dbus = "unix:path=/run/libvirt/qemu/dbus/6-daas-win-dbus-dbus.sock"
+# QEMU's QMP socket, for a VM started with -display dbus (peer to peer).
+# qmp = "/run/qemu/vm.qmp"
+
+[listen]
+# The viewer page and its signalling. Default: 127.0.0.1:8090, this host only.
+address = "0.0.0.0:8090"
+# HTTPS, with both (browsers give the microphone, the camera and the clipboard only in HTTPS).
+certificate = "/etc/qemu-dbus-webrtc/tls/cert.pem"
+key = "/etc/qemu-dbus-webrtc/tls/key.pem"
+
+[video]
+# av1, vp9 or hevc (qemu-dbus-webrtc --codecs says what the GPUs encode). Default: av1, vp9 on
+# the CPU.
+codec = "hevc"
+# 420 or 444 (VP9 and HEVC). Default: 420.
+chroma = "444"
+# Encode on the CPU (VP9), without a GPU. Default: false, and true when the host has no GPU
+# encoder.
+software = false
+# Record each screen's stream to <prefix>-<console>.<extension>.
+# record = "/var/tmp/qdw"
+
+[bitrate]
+# In kbit/s: the bandwidth estimation never goes below min, starts at start, and stays under max.
+min = 4000
+start = 10000
+max = 30000

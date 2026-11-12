@@ -78,16 +78,18 @@ CPU, and `rtpgccbwe`, `rtpvp9pay2` of gst-plugins-rs) and a VM started with `-di
 (libvirt: `<graphics type='dbus'/>`). Two fixes to GStreamer, to be offered upstream, make the
 congestion control smoother: as released, the VA encoders send a keyframe at each change of
 bitrate, and `rtpgccbwe` raises its estimate far above the link while the desktop sends little.
-Build it with Cargo, then attach it to the VM, through its QMP socket (peer to peer) or the D-Bus
-bus libvirt runs for it:
+Build it with Cargo, then attach it to the VM: by its libvirt domain's name, the D-Bus bus
+libvirt runs for it, or its QMP socket (peer to peer):
 
 ```
 cargo build --release
-target/release/qemu-dbus-webrtc --dbus unix:path=/run/libvirt/qemu/dbus/<id>-<vm>-dbus.sock \
-    --listen 127.0.0.1:8090
+target/release/qemu-dbus-webrtc --domain <vm> --listen 127.0.0.1:8090
 ```
 
-and open `http://127.0.0.1:8090/`. Options: `--codec av1|vp9|hevc`, `--chroma 420|444`,
+and open `http://127.0.0.1:8090/`. The settings can live in a TOML file,
+`qemu-dbus-webrtc --config <vm>.toml`, one per VM: [config.example.toml](config.example.toml)
+describes them all. The command line's options override the file's: `--domain <name>`,
+`--dbus <address>` or `--qmp <socket>`, `--codec av1|vp9|hevc`, `--chroma 420|444`,
 `--software`, `--bitrate <max kbit/s>`, `--listen <address:port>`,
 `--tls <certificate.pem> <key.pem>`, `--record <path prefix>` (to keep each screen's stream in a
 file). `qemu-dbus-webrtc --codecs` lists what the host encodes.
