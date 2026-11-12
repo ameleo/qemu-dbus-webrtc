@@ -31,15 +31,20 @@ use qdw_video::encode::Codec;
 
 use crate::audio::Mic;
 
-/// The payload type of the video. Fixed: there is one video stream for now.
+/// The payload type of the first screen's video; the next screens take every other one after
+/// it (98, 100, 102), leaving room for the retransmission streams webrtcbin adds: webrtcbin and
+/// browsers tell the streams of a bundle apart by their payload type.
 const VIDEO_PT: u32 = 96;
+
+/// The guest screens a session carries, at most: one video track each.
+pub const MAX_SCREENS: usize = 4;
 
 /// The payload type of the sound: apart from the video's, which may grow to several screens.
 const AUDIO_PT: u32 = 111;
 
 /// The payload types of the client's cameras, one per track: webrtcbin tells the incoming
 /// streams of a bundle apart by their payload type.
-const CAMERA_PT: u32 = 100;
+const CAMERA_PT: u32 = 104;
 
 /// What the session has to send to the browser.
 #[derive(Debug)]
@@ -186,50 +191,69 @@ pub struct Session {
     webrtc: gst::Element,
     /// The data channels, in the order of [`Channel::ALL`].
     channels: Vec<gst_webrtc::WebRTCDataChannel>,
-    src: gst_app::AppSrc,
-    viewers: Viewers,
-    /// The client paused the video: its appsrc is out of the viewers.
+    /// One appsrc per guest screen, and the viewers of that screen's encoder.
+    srcs: Vec<gst_app::AppSrc>,
+    viewers: Vec<Viewers>,
+    /// How many screens: the first video tracks, before the sound's.
+    screens: usize,
+    /// The client paused the video: its appsrcs are out of the viewers.
     paused: Arc<AtomicBool>,
     audio_src: gst_app::AppSrc,
     audio_viewers: AudioViewers,
 }
 
 impl Session {
-    /// Start a session for a console's stream, encoded with `codec`, and the guest's sound.
-    /// `keyframe` is called when the client needs a keyframe (a lost frame, or the start).
+    /// Start a session for the streams of the guest's screens, encoded with `codec`, one video
+    /// track each in the order of `viewers`, and the guest's sound. `keyframe` is called with a
+    /// screen's index when the client needs a keyframe of it (a lost frame, or the start).
     #[allow(clippy::too_many_arguments)]
     pub fn start(
         codec: Codec,
         full_chroma: bool,
-        viewers: Viewers,
+        viewers: Vec<Viewers>,
         audio_viewers: AudioViewers,
         mic: Option<Arc<Mic>>,
         bitrates: Bitrates,
         signals: mpsc::UnboundedSender<Signal>,
-        keyframe: impl Fn() + Send + Sync + 'static,
+        keyframe: impl Fn(usize) + Send + Sync + 'static,
     ) -> Result<Self> {
         let (payloader, encoding) = codec.rtp();
-        let description = format!(
-            "appsrc name=src is-live=true format=time do-timestamp=true caps={caps} \
-             ! queue \
-             ! {payloader} pt={VIDEO_PT} mtu=1200 \
-             ! application/x-rtp,media=video,encoding-name={encoding},payload={VIDEO_PT},clock-rate=90000{extra},\
+        let screens = viewers.len().min(MAX_SCREENS);
+        let videos: String = (0..screens)
+            .map(|i| {
+                let pt = VIDEO_PT + 2 * i as u32;
+                format!(
+                    "appsrc name=src{i} is-live=true format=time do-timestamp=true caps={caps} \
+                     ! queue \
+                     ! {payloader} pt={pt} mtu=1200 \
+                     ! application/x-rtp,media=video,encoding-name={encoding},payload={pt},clock-rate=90000{extra},\
 rtcp-fb-nack-pli=(boolean)true,rtcp-fb-transport-cc=(boolean)true,extmap-1=(string){TWCC_URI} \
-             ! capsfilter name=rtp \
+                     ! capsfilter name=rtp{i} ",
+                    caps = codec.stream_caps(),
+                    extra = codec.rtp_extra(full_chroma),
+                )
+            })
+            .collect();
+        let description = format!(
+            "{videos} \
              appsrc name=audio is-live=true format=time caps={audio_caps} \
              ! queue leaky=downstream max-size-time=40000000 max-size-buffers=0 max-size-bytes=0 \
              ! rtpopuspay pt={AUDIO_PT} \
              ! application/x-rtp,media=audio,encoding-name=OPUS,payload={AUDIO_PT},clock-rate=48000,\
 rtcp-fb-transport-cc=(boolean)true,extmap-1=(string){TWCC_URI} \
              ! capsfilter name=audiortp",
-            caps = codec.stream_caps(),
-            extra = codec.rtp_extra(full_chroma),
             audio_caps = qdw_audio::STREAM_CAPS,
         );
         let pipeline = gst::parse::launch(&description)?
             .downcast::<gst::Pipeline>()
             .map_err(|_| anyhow!("not a pipeline"))?;
-        let rtp = pipeline.by_name("rtp").context("no RTP capsfilter")?;
+        let rtps = (0..screens)
+            .map(|i| {
+                pipeline
+                    .by_name(&format!("rtp{i}"))
+                    .context("no RTP capsfilter")
+            })
+            .collect::<Result<Vec<_>>>()?;
         let audio_rtp = pipeline
             .by_name("audiortp")
             .context("no audio RTP capsfilter")?;
@@ -267,31 +291,38 @@ rtcp-fb-transport-cc=(boolean)true,extmap-1=(string){TWCC_URI} \
             });
             Some(bwe.to_value())
         });
-        let src = pipeline
-            .by_name("src")
-            .and_then(|e| e.downcast::<gst_app::AppSrc>().ok())
-            .context("no appsrc")?;
+        let srcs = (0..screens)
+            .map(|i| {
+                pipeline
+                    .by_name(&format!("src{i}"))
+                    .and_then(|e| e.downcast::<gst_app::AppSrc>().ok())
+                    .context("no appsrc")
+            })
+            .collect::<Result<Vec<_>>>()?;
 
-        // A keyframe request from the browser (PLI) travels upstream to our appsrc.
+        // A keyframe request from the browser (PLI) travels upstream to the appsrc of its
+        // screen.
         let keyframe = Arc::new(keyframe);
-        let on_pli = keyframe.clone();
         let paused = Arc::new(AtomicBool::new(false));
-        let pli_paused = paused.clone();
-        src.static_pad("src").context("no appsrc pad")?.add_probe(
-            gst::PadProbeType::EVENT_UPSTREAM,
-            move |_, info| {
-                if let Some(event) = info.event()
-                    && gst_video::UpstreamForceKeyUnitEvent::parse(event).is_ok()
-                {
-                    // A paused client gets no video: it may ask for keyframes all the same.
-                    if !pli_paused.load(Ordering::Relaxed) {
-                        debug!("keyframe requested by the browser");
-                        on_pli();
+        for (screen, src) in srcs.iter().enumerate() {
+            let on_pli = keyframe.clone();
+            let pli_paused = paused.clone();
+            src.static_pad("src").context("no appsrc pad")?.add_probe(
+                gst::PadProbeType::EVENT_UPSTREAM,
+                move |_, info| {
+                    if let Some(event) = info.event()
+                        && gst_video::UpstreamForceKeyUnitEvent::parse(event).is_ok()
+                    {
+                        // A paused client gets no video: it may ask for keyframes all the same.
+                        if !pli_paused.load(Ordering::Relaxed) {
+                            debug!(screen, "keyframe requested by the browser");
+                            on_pli(screen);
+                        }
                     }
-                }
-                gst::PadProbeReturn::Ok
-            },
-        );
+                    gst::PadProbeReturn::Ok
+                },
+            );
+        }
 
         let offers = signals.clone();
         // One offer per session: webrtcbin may ask more than once (the data channels, then the
@@ -316,16 +347,18 @@ rtcp-fb-transport-cc=(boolean)true,extmap-1=(string){TWCC_URI} \
                 else {
                     break;
                 };
-                // The cameras' tracks, after them, only receive.
+                // The screens, then the sound, both ways; the cameras' tracks, after them, only
+                // receive.
+                let index = index as usize;
                 let direction = match index {
-                    0 => gst_webrtc::WebRTCRTPTransceiverDirection::Sendonly,
-                    1 => gst_webrtc::WebRTCRTPTransceiverDirection::Sendrecv,
+                    i if i < screens => gst_webrtc::WebRTCRTPTransceiverDirection::Sendonly,
+                    i if i == screens => gst_webrtc::WebRTCRTPTransceiverDirection::Sendrecv,
                     _ => continue,
                 };
                 transceiver.set_property("direction", direction);
                 // The video: a client that lost packets asks for them again (NACK) and gets
                 // them on a retransmission stream (RTX), rather than a whole new keyframe.
-                if index == 0 {
+                if index < screens {
                     transceiver.set_property("do-nack", true);
                 }
             }
@@ -382,7 +415,9 @@ rtcp-fb-transport-cc=(boolean)true,extmap-1=(string){TWCC_URI} \
             // receive one: a frame sent earlier is lost, and a client that never received
             // anything has no reason to ask for one.
             if state == gst_webrtc::WebRTCPeerConnectionState::Connected {
-                on_connected();
+                for screen in 0..screens {
+                    on_connected(screen);
+                }
             }
             if matches!(
                 state,
@@ -464,7 +499,9 @@ rtcp-fb-transport-cc=(boolean)true,extmap-1=(string){TWCC_URI} \
         // The video and the sound first, then the data channels, which webrtcbin makes from
         // READY on. It negotiates once caps arrive on both tracks, after PLAYING: one offer
         // covers them all.
-        rtp.link(&webrtc)?;
+        for rtp in &rtps {
+            rtp.link(&webrtc)?;
+        }
         audio_rtp.link(&webrtc)?;
         // Then the tracks the client's cameras come on, receive only, in H.264: the guest takes
         // it as it is. Any level: the client sends what its camera gives. With the
@@ -506,7 +543,9 @@ rtcp-fb-transport-cc=(boolean)true,extmap-1=(string){TWCC_URI} \
             channels.push(data_channel);
         }
         pipeline.set_state(gst::State::Playing)?;
-        viewers.lock().unwrap().push(src.clone());
+        for (screen, src) in srcs.iter().enumerate() {
+            viewers[screen].lock().unwrap().push(src.clone());
+        }
         audio_viewers.lock().unwrap().push(AudioViewer {
             src: audio_src.clone(),
             offset: None,
@@ -515,8 +554,9 @@ rtcp-fb-transport-cc=(boolean)true,extmap-1=(string){TWCC_URI} \
             pipeline,
             webrtc,
             channels,
-            src,
+            srcs,
             viewers,
+            screens,
             paused,
             audio_src,
             audio_viewers,
@@ -530,11 +570,13 @@ rtcp-fb-transport-cc=(boolean)true,extmap-1=(string){TWCC_URI} \
         if self.paused.swap(paused, Ordering::Relaxed) == paused {
             return false;
         }
-        let mut viewers = self.viewers.lock().unwrap();
-        if paused {
-            viewers.retain(|src| src != &self.src);
-        } else {
-            viewers.push(self.src.clone());
+        for (viewers, src) in self.viewers.iter().zip(&self.srcs) {
+            let mut viewers = viewers.lock().unwrap();
+            if paused {
+                viewers.retain(|s| s != src);
+            } else {
+                viewers.push(src.clone());
+            }
         }
         debug!(paused, "client video");
         !paused
@@ -586,8 +628,8 @@ rtcp-fb-transport-cc=(boolean)true,extmap-1=(string){TWCC_URI} \
 
     /// The mids of the camera tracks, once negotiated.
     pub fn camera_mids(&self) -> Vec<String> {
-        // After the video and the sound.
-        (2..)
+        // After the screens and the sound.
+        (self.screens as u32 + 1..)
             .map_while(|index: u32| {
                 self.webrtc
                     .emit_by_name::<Option<gst_webrtc::WebRTCRTPTransceiver>>(
@@ -731,7 +773,9 @@ rtcp-fb-transport-cc=(boolean)true,extmap-1=(string){TWCC_URI} \
 
 impl Drop for Session {
     fn drop(&mut self) {
-        self.viewers.lock().unwrap().retain(|src| src != &self.src);
+        for (viewers, src) in self.viewers.iter().zip(&self.srcs) {
+            viewers.lock().unwrap().retain(|s| s != src);
+        }
         self.audio_viewers
             .lock()
             .unwrap()

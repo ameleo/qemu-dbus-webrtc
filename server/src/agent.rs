@@ -12,6 +12,7 @@ use tracing::{info, warn};
 use crate::cameras::Cameras;
 use crate::clipboard::Clipboard;
 use crate::drives::Drives;
+use crate::input::AgentMouse;
 use crate::printers::Printers;
 
 /// How long before trying the agent again, when it went away.
@@ -22,6 +23,7 @@ const RETRY: Duration = Duration::from_secs(3);
 /// there is no clipboard, no drives and no printers.
 pub async fn run(
     vm: zbus::Connection,
+    mouse: AgentMouse,
     clipboard: Arc<Clipboard>,
     drives: Arc<Drives>,
     printers: Arc<Printers>,
@@ -32,6 +34,9 @@ pub async fn run(
         match agent::connect(&vm, host).await {
             Ok(connection) => {
                 info!("guest agent connected");
+                if let Err(e) = mouse.attach(&connection).await {
+                    warn!(error = %format!("{e:#}"), "guest agent pointer: the QEMU tablet instead");
+                }
                 if let Err(e) = drives.attach(&connection).await {
                     warn!(error = %format!("{e:#}"), "guest agent drives");
                 }
@@ -49,6 +54,7 @@ pub async fn run(
                 drives.detach();
                 printers.detach();
                 cameras.detach();
+                mouse.detach();
             }
             Err(e) => {
                 let e = format!("{e:#}");

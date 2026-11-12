@@ -6,7 +6,10 @@
 // WebSocket message:
 //
 // 1. the client says which video codecs it decodes: ClientMessage.hello;
-// 2. the server makes the WebRTC offer (ServerMessage.offer), or refuses (ServerMessage.error);
+// 2. the server makes the WebRTC offer (ServerMessage.offer), or refuses (ServerMessage.error):
+//    first one video track per guest screen, which it sends, in the order of the screens (0 the
+//    first); then the sound, both ways; then the cameras' video tracks, which it receives (see
+//    CameraMessage); then the data channels;
 // 3. the client answers: ClientMessage.answer;
 // 4. both sides trickle their ICE candidates: ClientMessage.ice, ServerMessage.ice.
 //
@@ -147,9 +150,12 @@ message LockKeys {
 message PointerUpdate {
   oneof update {
     PointerShape shape = 1;
-    // Whether the guest shows its pointer.
+    // Whether the guest shows its pointer on this screen.
     bool visible = 2;
   }
+  // The guest screen the update is about, as in PointerMove: 0 the first. The guest shows its
+  // pointer on the screen it is on, and hides it on the others.
+  uint32 screen = 3;
 }
 
 message PointerShape {
@@ -299,7 +305,11 @@ message VideoPause {
 // changes size; the server waits for the size to settle before applying it. The guest keeps
 // it after the client goes. Shadow clients' layouts are ignored.
 message MonitorLayout {
-  // One for now: the guest's first screen; later one per client monitor.
+  // One guest screen per monitor, in the order of the screens' video tracks: the first monitor
+  // shows the first screen. A guest with fewer screens takes the first monitors; its screens
+  // beyond the monitors are turned off. The client shows each screen full screen on its
+  // monitor: the guest arranges its desktop as the monitors are, and the pointer goes from one
+  // screen to the next as from one monitor to the next (PointerMove names the screen).
   repeated Monitor monitors = 1;
 }
 

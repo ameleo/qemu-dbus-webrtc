@@ -78,6 +78,19 @@ is lost, its display driver restoring the mode Windows remembered: the size stay
 asked again when the guest still shows another 3 s after, three times at most. The guest keeps
 the size when the user goes.
 
+With several monitors (native client), the user's client sends them all, with where they are
+among each other and their size in millimetres. The guest gets one screen per monitor, in
+order, at its size and place (`SetUIInfo` with the offsets), and its other screens are turned
+off: the guest's desktop is arranged as the client's, and the pointer goes from one screen to
+the next as on the client. Each guest screen (a graphic console, by head, four at most) has its
+own encoder and its own video track, with its own payload type (96, 98, 100, 102), which is how
+webrtcbin and browsers tell the streams of a bundle apart; the offer gives the screens first,
+in order. The bitrate the user's bandwidth allows is shared among the screens that are on: a
+floor each, the rest by area. The pointer goes through the guest agent (`Mouse1`), which places
+it on the head the client names; the QEMU tablet knows a single surface, and serves the first
+screen when there is no agent. The guest pointer's shape names its screen, and the client shows
+it there only. The browser page shows the first screen.
+
 ## Codecs
 
 | Codec | Chroma | Royalties | Use |
@@ -134,7 +147,7 @@ Only channels with no patent listed in Microsoft's Open Specifications patent ma
 | Drives | project format, modelled on MS-RDPEFS | `drive` | no | full |
 | Printers | project format, modelled on MS-RDPEPC and MS-RDPEXPS | `printer` | no | full |
 | Cameras | project format, modelled on MS-RDPECAM; video on WebRTC tracks | `camera` | yes | full |
-| Monitor layout, resize | MS-RDPEDISP | `disp` | yes | yes |
+| Monitor layout, resize | project format, modelled on MS-RDPEDISP | `control` | one monitor | several |
 | Smart cards | MS-RDPESC | `rdpdr` | no | yes |
 | USB | MS-RDPEUSB | `urbdrc` | no | yes |
 | Keyboard, mouse | project format, modelled on RDP | `input` | yes | yes |

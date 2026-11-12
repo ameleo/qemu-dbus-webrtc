@@ -2,12 +2,18 @@
 
 //! A viewer's keyboard and pointer, applied to the guest.
 //!
+//! The pointer goes through the guest agent when there is one: it places it on each guest
+//! screen, where the QEMU tablet knows one surface only, and scrolls by fractions of a notch.
+//! Without the agent, the QEMU tablet, on the first screen.
+//!
 //! What is pressed is tracked, so that a viewer that goes away leaves no key or button stuck.
 
 use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use qdw_protocol::v1::{Button, Input, InputEvent, Key, LockKeys, input_event::Event};
+use qdw_qemu::agent::MouseProxy;
 use qdw_qemu::input::{self as qemu, CAPS_LOCK, NUM_LOCK, SCROLL_LOCK};
 use tracing::debug;
 
@@ -22,9 +28,34 @@ const SCROLL_LOCK_KEY: u32 = 0x46;
 /// QEMU's number for Pause, which PC keyboards send as E1 1D 45.
 const PAUSE: u32 = 0xC6;
 
+/// The guest agent's pointer, while the agent is connected.
+#[derive(Clone, Default)]
+pub struct AgentMouse(Arc<Mutex<Option<MouseProxy<'static>>>>);
+
+impl AgentMouse {
+    /// The agent is connected.
+    pub async fn attach(&self, connection: &zbus::Connection) -> zbus::Result<()> {
+        let mouse = MouseProxy::new(connection).await?;
+        *self.0.lock().unwrap() = Some(mouse);
+        Ok(())
+    }
+
+    /// The agent went away.
+    pub fn detach(&self) {
+        *self.0.lock().unwrap() = None;
+    }
+
+    fn get(&self) -> Option<MouseProxy<'static>> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
 /// The input of one viewer.
 pub struct ViewerInput {
     qemu: qemu::Input,
+    agent: AgentMouse,
+    /// The guest's head of each screen, in screen order.
+    heads: Vec<u32>,
     keys: HashSet<u32>,
     buttons: HashSet<qemu::Button>,
     /// Wheel rotation not yet sent, less than a notch.
@@ -32,9 +63,11 @@ pub struct ViewerInput {
 }
 
 impl ViewerInput {
-    pub fn new(qemu: qemu::Input) -> Self {
+    pub fn new(qemu: qemu::Input, agent: AgentMouse, heads: Vec<u32>) -> Self {
         Self {
             qemu,
+            agent,
+            heads,
             keys: HashSet::new(),
             buttons: HashSet::new(),
             wheel: (0, 0),
@@ -46,9 +79,14 @@ impl ViewerInput {
             match event {
                 Some(Event::Key(key)) => self.key(&key).await?,
                 Some(Event::PointerMove(m)) => {
-                    // One screen for now: the console this viewer is shown.
-                    if m.screen == 0 {
-                        self.qemu.move_to(m.x, m.y).await?;
+                    let head = self.heads.get(m.screen as usize).copied();
+                    match (self.agent.get(), head) {
+                        (Some(mouse), Some(head)) => {
+                            mouse.set_abs_position(head, m.x, m.y).await?;
+                        }
+                        // The QEMU tablet: the first screen only.
+                        (None, _) if m.screen == 0 => self.qemu.move_to(m.x, m.y).await?,
+                        _ => {}
                     }
                 }
                 Some(Event::PointerButton(b)) => {
@@ -61,7 +99,7 @@ impl ViewerInput {
                         Button::Unspecified => continue,
                     };
                     debug!(?button, down = b.down, "button");
-                    self.qemu.button(button, b.down).await?;
+                    self.button(button, b.down).await?;
                     if b.down {
                         self.buttons.insert(button);
                     } else {
@@ -96,8 +134,22 @@ impl ViewerInput {
         Ok(())
     }
 
-    /// Whole notches go to the guest, the rest waits for more.
+    async fn button(&self, button: qemu::Button, down: bool) -> Result<()> {
+        match self.agent.get() {
+            Some(mouse) if down => mouse.press(button as u32).await?,
+            Some(mouse) => mouse.release(button as u32).await?,
+            None => self.qemu.button(button, down).await?,
+        }
+        Ok(())
+    }
+
+    /// Through the agent, as it comes, in 1/120 of a notch; to the QEMU tablet, whole notches,
+    /// the rest waiting for more.
     async fn wheel(&mut self, dx: i32, dy: i32) -> Result<()> {
+        if let Some(mouse) = self.agent.get() {
+            mouse.scroll(dx, dy).await?;
+            return Ok(());
+        }
         self.wheel.0 += dx;
         self.wheel.1 += dy;
         while self.wheel.1 >= NOTCH {
@@ -141,8 +193,8 @@ impl ViewerInput {
         for keycode in self.keys.drain() {
             self.qemu.key(keycode, false).await?;
         }
-        for button in self.buttons.drain() {
-            self.qemu.button(button, false).await?;
+        for button in std::mem::take(&mut self.buttons) {
+            self.button(button, false).await?;
         }
         Ok(())
     }

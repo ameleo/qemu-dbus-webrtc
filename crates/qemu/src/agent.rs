@@ -60,6 +60,26 @@ pub trait Agent {
     fn channels(&self) -> zbus::Result<Vec<String>>;
 }
 
+/// The pointer, through the agent: absolute positions on each head of a multi-head guest,
+/// which the QEMU tablet cannot give (it knows one surface). `head` is the virtio-gpu scanout,
+/// the same index as its QEMU console's head; buttons are QEMU's `InputButton` numbers.
+#[zbus::proxy(
+    interface = "fr.ameleo.Agent.Mouse1",
+    default_service = "fr.ameleo.Agent",
+    default_path = "/fr/ameleo/Agent"
+)]
+pub trait Mouse {
+    #[zbus(no_reply)]
+    fn set_abs_position(&self, head: u32, x: u32, y: u32) -> zbus::Result<()>;
+    #[zbus(no_reply)]
+    fn press(&self, button: u32) -> zbus::Result<()>;
+    #[zbus(no_reply)]
+    fn release(&self, button: u32) -> zbus::Result<()>;
+    /// In Windows wheel units: 120 a notch.
+    #[zbus(no_reply)]
+    fn scroll(&self, dx: i32, dy: i32) -> zbus::Result<()>;
+}
+
 /// The guest clipboard. Whoever copied last owns the clipboard and announces the media types
 /// it can provide; the other side asks for the data when an application pastes.
 #[zbus::proxy(

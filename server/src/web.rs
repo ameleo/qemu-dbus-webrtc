@@ -32,7 +32,7 @@ use crate::audio::Mic;
 use crate::cameras::{Cameras, CamerasFollow, ViewerCameras};
 use crate::clipboard::{Clipboard, ViewerClipboard, ViewerFollow};
 use crate::drives::{Drives, DrivesFollow, ViewerDrives};
-use crate::input::ViewerInput;
+use crate::input::{AgentMouse, ViewerInput};
 use crate::layout::{Layout, Size};
 use crate::pointer::{self, Pointer};
 use crate::printers::{Printers, PrintersFollow, ViewerPrinters};
@@ -45,8 +45,8 @@ const PAGE: &str = include_str!("../web/index.html");
 pub enum Request {
     /// The viewer needs a keyframe of this console.
     Keyframe { console: u32 },
-    /// The user's connection takes this video bitrate, in kbit/s.
-    Bitrate { console: u32, bitrate: u32 },
+    /// The user's connection takes this video bitrate, in kbit/s, for all the screens.
+    Bitrate { bitrate: u32 },
     /// Whether every viewer decodes the video in 10 bits.
     TenBits(bool),
 }
@@ -56,23 +56,24 @@ pub struct Shared {
     pub codec: Codec,
     /// The video is in 4:4:4.
     pub full_chroma: bool,
-    /// The console shown to viewers, and its viewers.
-    pub console: u32,
-    pub viewers: Viewers,
+    /// The guest's screens, in order: what the viewers get, one video track each.
+    pub screens: Vec<Screen>,
     /// The viewers of the guest's sound.
     pub audio_viewers: AudioViewers,
     /// The guest's microphone.
     pub mic: Arc<Mic>,
     pub requests: mpsc::UnboundedSender<Request>,
-    /// The keyboard and pointer of the shown console.
+    /// The keyboard, and the QEMU tablet of the first screen.
     pub input: qdw_qemu::input::Input,
-    /// The guest pointer of the shown console.
-    pub pointer: watch::Receiver<Pointer>,
+    /// The pointer through the guest agent, on every screen.
+    pub agent_mouse: AgentMouse,
+    /// The guest pointer on each screen.
+    pub pointer: watch::Receiver<Vec<Pointer>>,
     pub clipboard: Arc<Clipboard>,
     pub drives: Arc<Drives>,
     pub printers: Arc<Printers>,
     pub cameras: Arc<Cameras>,
-    /// The size of the shown console's screen.
+    /// The size and place of the guest's screens.
     pub layout: Arc<Layout>,
     /// The user of the session.
     pub user: Arc<User>,
@@ -80,6 +81,15 @@ pub struct Shared {
     pub bitrates: Bitrates,
     /// Which viewers decode the video in 10 bits.
     pub depths: Arc<Depths>,
+}
+
+/// A guest screen: its QEMU console, its head (the virtio-gpu scanout), and the viewers its
+/// encoder feeds.
+#[derive(Clone)]
+pub struct Screen {
+    pub console: u32,
+    pub head: u32,
+    pub viewers: Viewers,
 }
 
 /// Which viewers decode the video in 10 bits. The video is shared: it is in 10 bits only when
@@ -258,17 +268,20 @@ async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
     let (depth_id, ten_bits) = shared.depths.join(deep);
     let _ = shared.requests.send(Request::TenBits(ten_bits));
     let (signals_tx, mut signals) = mpsc::unbounded_channel();
-    let (requests, console) = (shared.requests.clone(), shared.console);
+    let requests = shared.requests.clone();
+    let consoles: Vec<u32> = shared.screens.iter().map(|s| s.console).collect();
     let session = Session::start(
         shared.codec,
         shared.full_chroma,
-        shared.viewers.clone(),
+        shared.screens.iter().map(|s| s.viewers.clone()).collect(),
         shared.audio_viewers.clone(),
         (!shadow).then(|| shared.mic.clone()),
         shared.bitrates,
         signals_tx,
-        move || {
-            let _ = requests.send(Request::Keyframe { console });
+        move |screen| {
+            if let Some(&console) = consoles.get(screen) {
+                let _ = requests.send(Request::Keyframe { console });
+            }
         },
     )?;
     let user = (!shadow).then(|| shared.user.take_over());
@@ -278,7 +291,11 @@ async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
     let (printers, printers_follow) = shared.printers.viewer();
     let (cameras, cameras_follow) = shared.cameras.viewer();
     let mut state = ViewerState {
-        input: ViewerInput::new(shared.input.clone()),
+        input: ViewerInput::new(
+            shared.input.clone(),
+            shared.agent_mouse.clone(),
+            shared.screens.iter().map(|s| s.head).collect(),
+        ),
         clipboard,
         drives,
         printers,
@@ -340,7 +357,7 @@ struct ViewerState {
 
 /// What a viewer follows besides its connection.
 struct Follow {
-    pointer: watch::Receiver<Pointer>,
+    pointer: watch::Receiver<Vec<Pointer>>,
     clip: ViewerFollow,
     drives: DrivesFollow,
     printers: PrintersFollow,
@@ -363,9 +380,12 @@ async fn run(
     mut follow: Follow,
     shared: &Shared,
 ) -> Result<()> {
-    let console = shared.console;
     let keyframe = || {
-        let _ = shared.requests.send(Request::Keyframe { console });
+        for screen in &shared.screens {
+            let _ = shared.requests.send(Request::Keyframe {
+                console: screen.console,
+            });
+        }
     };
     // The last estimate sent to the client, and when.
     let mut estimate_sent: Option<(std::time::Instant, u32)> = None;
@@ -435,8 +455,15 @@ async fn run(
                         }
                     }
                     Ok(ControlMessage { message: Some(control_message::Message::MonitorLayout(MonitorLayout { monitors })) }) => {
-                        if user && let Some(size) = monitors.first().and_then(Size::of) {
-                            shared.layout.want(size);
+                        // One guest screen per monitor, as many as the guest has; the
+                        // others off.
+                        let screens: Vec<Size> = monitors
+                            .iter()
+                            .filter_map(Size::of)
+                            .take(shared.screens.len())
+                            .collect();
+                        if user && !screens.is_empty() {
+                            shared.layout.want(screens);
                         }
                     }
                     Ok(_) => {}
@@ -469,7 +496,6 @@ async fn run(
                     // share: a shadow client on a slower connection gets what it can.
                     if user {
                         let _ = shared.requests.send(Request::Bitrate {
-                            console,
                             bitrate: video_bitrate(estimate),
                         });
                     }

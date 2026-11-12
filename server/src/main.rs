@@ -259,7 +259,8 @@ async fn main() -> Result<()> {
 
     let (events_tx, mut events) = mpsc::unbounded_channel();
     let mut listeners = Vec::new();
-    let mut shown = None;
+    // The graphic consoles: the guest's screens, by head.
+    let mut graphic = Vec::new();
     for id in ids {
         let console = display::ConsoleProxy::builder(&vm_connection)
             .path(format!("/org/qemu/Display1/Console_{id}"))?
@@ -277,33 +278,55 @@ async fn main() -> Result<()> {
         if kind == "Graphic" {
             listeners.push(display::listen(&vm_connection, id, events_tx.clone()).await?);
             info!(console = id, "listening");
-            shown.get_or_insert(id);
+            graphic.push((console.head().await?, id, console));
         }
     }
     drop(events_tx);
 
-    // Viewers see the first graphic console; several monitors come later.
-    let shown = shown.context("the VM has no graphic console")?;
-    let viewers: HashMap<u32, Viewers> = HashMap::from([(shown, Viewers::default())]);
+    // The guest's screens, in the order of their heads: one video track each for the viewers,
+    // as many as a session carries.
+    graphic.sort_by_key(|(head, id, _)| (*head, *id));
+    graphic.truncate(session::MAX_SCREENS);
+    if graphic.is_empty() {
+        bail!("the VM has no graphic console");
+    }
+    let screens: Vec<web::Screen> = graphic
+        .iter()
+        .map(|&(head, console, _)| web::Screen {
+            console,
+            head,
+            viewers: Viewers::default(),
+        })
+        .collect();
+    info!(screens = ?screens.iter().map(|s| s.console).collect::<Vec<_>>(), "guest screens");
+    let viewers: HashMap<u32, Viewers> = screens
+        .iter()
+        .map(|s| (s.console, s.viewers.clone()))
+        .collect();
+    // The screen of each console.
+    let screen_of: HashMap<u32, usize> = screens
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.console, i))
+        .collect();
+    let first = screens[0].console;
     let (requests_tx, mut requests) = mpsc::unbounded_channel();
     // The guest's sound, encoded once for every viewer.
     let audio_viewers = session::AudioViewers::default();
     let audio = audio::start(&vm_connection, audio_viewers.clone()).await?;
-    let (pointer_tx, pointer_rx) = tokio::sync::watch::channel(pointer::Pointer::default());
+    let (pointer_tx, pointer_rx) =
+        tokio::sync::watch::channel(vec![pointer::Pointer::default(); screens.len()]);
     // The clipboard, through the guest agent, if the VM has one.
     let clipboard = clipboard::Clipboard::new();
     let drives = drives::Drives::new();
     let printers = printers::Printers::new();
     let cameras = cameras::Cameras::new();
-    // The shown console at the size of the user's window.
-    let layout = layout::Layout::start(
-        display::ConsoleProxy::builder(&vm_connection)
-            .path(format!("/org/qemu/Display1/Console_{shown}"))?
-            .build()
-            .await?,
-    );
+    // The guest's screens at the size and place of the user's monitors.
+    let layout = layout::Layout::start(graphic.into_iter().map(|(_, _, c)| c).collect());
+    let agent_mouse = input::AgentMouse::default();
     tokio::spawn(agent::run(
         vm_connection.clone(),
+        agent_mouse.clone(),
         clipboard.clone(),
         drives.clone(),
         printers.clone(),
@@ -312,12 +335,12 @@ async fn main() -> Result<()> {
     let shared = web::Shared {
         codec: args.settings.codec,
         full_chroma: args.settings.full_chroma,
-        console: shown,
-        viewers: viewers[&shown].clone(),
+        screens: screens.clone(),
         audio_viewers: audio_viewers.clone(),
         mic: audio.mic.clone(),
         requests: requests_tx,
-        input: qdw_qemu::input::Input::new(&vm_connection, shown).await?,
+        input: qdw_qemu::input::Input::new(&vm_connection, first).await?,
+        agent_mouse,
         pointer: pointer_rx,
         clipboard: clipboard.clone(),
         drives: drives.clone(),
@@ -355,6 +378,8 @@ async fn main() -> Result<()> {
     };
 
     let mut encoders: HashMap<u32, Encoder> = HashMap::new();
+    // The size of each console's screen while it is on: the screens share the bitrate by it.
+    let mut sizes: HashMap<u32, (u32, u32)> = HashMap::new();
     // The framebuffers QEMU copies in its calls rather than share, by console.
     let mut copies: HashMap<u32, copied::Copied> = HashMap::new();
     // An update that comes sooner than `FRAME_INTERVAL` after the last frame is not dropped:
@@ -420,14 +445,18 @@ async fn main() -> Result<()> {
             }
             Some(request) = requests.recv() => {
                 match request {
-                    Request::Bitrate { console, bitrate } => {
-                        // Within reach of what the encoder produced lately.
-                        let bitrate = match output.get(&console).and_then(|samples| {
-                            let (&(first, from), &(last, to)) = (samples.front()?, samples.back()?);
-                            let span = last.duration_since(first).as_secs_f64();
-                            (span >= OUTPUT_WINDOW.as_secs_f64() / 2.)
-                                .then(|| to.saturating_sub(from) as f64 * 8. / 1000. / span)
-                        }) {
+                    Request::Bitrate { bitrate } => {
+                        // Within reach of what the encoders produced lately.
+                        let produced: Option<f64> = output
+                            .values()
+                            .map(|samples| {
+                                let (&(first, from), &(last, to)) = (samples.front()?, samples.back()?);
+                                let span = last.duration_since(first).as_secs_f64();
+                                (span >= OUTPUT_WINDOW.as_secs_f64() / 2.)
+                                    .then(|| to.saturating_sub(from) as f64 * 8. / 1000. / span)
+                            })
+                            .sum();
+                        let bitrate = match produced {
                             Some(produced) => bitrate
                                 .min((produced * OUTPUT_HEADROOM) as u32)
                                 .max(args.bitrates.min),
@@ -439,12 +468,10 @@ async fn main() -> Result<()> {
                         if change >= BITRATE_STEP
                             && (congested || bitrate_changed.elapsed() >= BITRATE_INTERVAL)
                         {
-                            debug!(console, from = settings.bitrate, to = bitrate, "video bitrate");
+                            debug!(from = settings.bitrate, to = bitrate, "video bitrate");
                             settings.bitrate = bitrate;
                             bitrate_changed = Instant::now();
-                            if let Some(encoder) = encoders.get(&console) {
-                                encoder.set_bitrate(bitrate);
-                            }
+                            share(&encoders, &sizes, bitrate, args.bitrates.min);
                         }
                     }
                     Request::TenBits(ten_bits) => {
@@ -478,6 +505,8 @@ async fn main() -> Result<()> {
         };
         // The console the guest drew on, if it did.
         let mut drawn = None;
+        // The screens on changed: they share the bitrate anew.
+        let mut rebalance = false;
         match event {
             DisplayEvent::Scanout {
                 console,
@@ -495,9 +524,11 @@ async fn main() -> Result<()> {
                     "scanout (copied)"
                 );
                 fresh.insert(console);
-                if console == shown {
-                    layout.shown(width, height);
+                if let Some(&screen) = screen_of.get(&console) {
+                    layout.shown(screen, width, height);
                 }
+                sizes.insert(console, (width, height));
+                rebalance = true;
                 let result = copied::Copied::new(width, height, stride, &data).and_then(|copy| {
                     let fd = copy.fd()?;
                     scanout(
@@ -544,9 +575,11 @@ async fn main() -> Result<()> {
                 );
                 fresh.insert(console);
                 copies.remove(&console);
-                if console == shown {
-                    layout.shown(width, height);
+                if let Some(&screen) = screen_of.get(&console) {
+                    layout.shown(screen, width, height);
                 }
+                sizes.insert(console, (width, height));
+                rebalance = true;
                 if let Err(e) = scanout(
                     viewers.get(&console).cloned(),
                     &args,
@@ -590,9 +623,11 @@ async fn main() -> Result<()> {
                 );
                 fresh.insert(console);
                 copies.remove(&console);
-                if console == shown {
-                    layout.shown(width, height);
+                if let Some(&screen) = screen_of.get(&console) {
+                    layout.shown(screen, width, height);
                 }
+                sizes.insert(console, (width, height));
+                rebalance = true;
                 if let Err(e) = scanout(
                     viewers.get(&console).cloned(),
                     &args,
@@ -656,6 +691,8 @@ async fn main() -> Result<()> {
                 if let Some(encoder) = encoders.get_mut(&console) {
                     encoder.clear_framebuffer();
                 }
+                sizes.remove(&console);
+                rebalance = true;
             }
             DisplayEvent::MouseSet {
                 console,
@@ -664,9 +701,9 @@ async fn main() -> Result<()> {
                 visible,
             } => {
                 debug!(console, x, y, visible, "pointer");
-                if console == shown {
-                    pointer_tx.send_if_modified(|p| {
-                        std::mem::replace(&mut p.visible, visible) != visible
+                if let Some(&screen) = screen_of.get(&console) {
+                    pointer_tx.send_if_modified(|pointers| {
+                        std::mem::replace(&mut pointers[screen].visible, visible) != visible
                     });
                 }
             }
@@ -679,11 +716,11 @@ async fn main() -> Result<()> {
                 data,
             } => {
                 debug!(console, size = %format!("{width}x{height}"), hot_x, hot_y, "pointer shape");
-                if console == shown {
+                if let Some(&screen) = screen_of.get(&console) {
                     match pointer::shape(width, height, hot_x, hot_y, &data) {
-                        Some(shape) => {
-                            pointer_tx.send_modify(|p| p.shape = Some(std::sync::Arc::new(shape)))
-                        }
+                        Some(shape) => pointer_tx.send_modify(|pointers| {
+                            pointers[screen].shape = Some(std::sync::Arc::new(shape))
+                        }),
                         None => warn!(
                             console,
                             bytes = data.len(),
@@ -692,6 +729,9 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+        }
+        if rebalance {
+            share(&encoders, &sizes, settings.bitrate, args.bitrates.min);
         }
         if let Some(console) = drawn {
             *updates.entry(console).or_default() += 1;
@@ -728,6 +768,41 @@ async fn main() -> Result<()> {
 /// A new DMA-BUF framebuffer on `console`: point its encoder at it, creating the encoder first
 /// if needed.
 #[allow(clippy::too_many_arguments)]
+/// Share `total` kbit/s among the screens that are on: each gets a floor (its share of
+/// `min_total`, or of `total` when it is lower), and the rest goes by area, so that the sum
+/// stays within `total`.
+fn share(
+    encoders: &HashMap<u32, Encoder>,
+    sizes: &HashMap<u32, (u32, u32)>,
+    total: u32,
+    min_total: u32,
+) {
+    let on: Vec<(u32, f64)> = encoders
+        .keys()
+        .filter_map(|c| {
+            sizes
+                .get(c)
+                .map(|&(w, h)| (*c, f64::from(w) * f64::from(h)))
+        })
+        .collect();
+    let Ok(count) = u32::try_from(on.len()) else {
+        return;
+    };
+    if count == 0 {
+        return;
+    }
+    let floor = (min_total / count).min(total / count);
+    let rest = total.saturating_sub(floor * count);
+    let area: f64 = on.iter().map(|(_, a)| a).sum();
+    for (console, a) in on {
+        let bitrate = floor + (f64::from(rest) * a / area.max(1.)) as u32;
+        debug!(console, bitrate, "screen bitrate");
+        if let Some(encoder) = encoders.get(&console) {
+            encoder.set_bitrate(bitrate.max(1));
+        }
+    }
+}
+
 /// Where a console's new framebuffer is.
 enum Source<'a> {
     /// GPU memory: a single linear plane.

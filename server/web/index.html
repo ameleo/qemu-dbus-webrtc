@@ -145,6 +145,17 @@ ws.onopen = () => {
     .map((c) => c.mimeType + (c.sdpFmtpLine ? `;${c.sdpFmtpLine}` : ""));
   send(hello([...new Set(codecs)]));
 };
+// The mids of the video tracks an offer only receives: the cameras' tracks.
+function cameraTracks(sdp) {
+  const mids = new Set();
+  for (const section of sdp.split(/\r?\nm=/).slice(1)) {
+    if (section.startsWith("video") && /\r?\na=recvonly/.test(section)) {
+      const mid = section.match(/\r?\na=mid:(\S+)/);
+      if (mid) mids.add(mid[1]);
+    }
+  }
+  return mids;
+}
 ws.onclose = () => { if (pc.connectionState !== "failed") fail("disconnected"); };
 // ServerMessage: offer = 1, ice = 2, error = 3.
 ws.onmessage = async (event) => {
@@ -153,10 +164,10 @@ ws.onmessage = async (event) => {
     await pc.setRemoteDescription({ type: "offer", sdp: str(pb.parse(message.get(1)[0]), 1) });
     // Sound both ways: the microphone can then go on the sound's track without renegotiating.
     for (const t of pc.getTransceivers()) if (t.receiver.track.kind === "audio") t.direction = "sendrecv";
-    // The video tracks after the screen's carry the cameras, from here: sending, with no track
-    // until the guest opens a camera.
-    const videos = pc.getTransceivers().filter((t) => t.receiver.track.kind === "video");
-    for (const t of videos.slice(1)) t.direction = "sendonly";
+    // The video tracks the server receives carry the cameras, from here: sending, with no
+    // track until the guest opens a camera. The others are the guest's screens.
+    const cameraMids = cameraTracks(str(pb.parse(message.get(1)[0]), 1));
+    for (const t of pc.getTransceivers()) if (cameraMids.has(t.mid)) t.direction = "sendonly";
     await pc.setLocalDescription(await pc.createAnswer());
     send(answer(pc.localDescription.sdp));
   } else if (message.has(2)) {
@@ -306,6 +317,8 @@ video.addEventListener("wheel", (e) => {
 const pointer = { css: "default", visible: true };
 function pointerUpdate(bytes) {
   const update = pb.parse(bytes);
+  // PointerUpdate: screen = 3. The page shows the first screen only.
+  if (uint(update, 3) !== 0) return;
   if (update.has(1)) {
     const s = pb.parse(update.get(1)[0]);
     const [w, h] = [uint(s, 1), uint(s, 2)];

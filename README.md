@@ -24,6 +24,10 @@ Without anything in the guest:
 - **The network:** the bitrate follows the user's bandwidth, estimated with Google Congestion
   Control from the client's reports (between 4 and 30 Mbit/s, `--bitrate` for the ceiling);
   each client is told its estimate.
+- **Several monitors,** as with RDP (native client): one guest screen per client monitor, at its
+  size and place, so the pointer and windows go from one screen to the next as on the client's
+  own desktop. Four screens at most, each a video track of its own; the bitrate is shared among
+  them. The browser shows the first screen.
 - **One user, watchers:** the guest's screen takes the size of the user's window. One client
   uses the session at a time, as with RDP: a new one takes it over. Shadow clients (`?shadow` in
   the page's address) only watch and listen.
@@ -64,7 +68,7 @@ Clients: the page served by the program itself; a native client built on libwebr
 works. All messages are Protocol Buffers ([qdw.proto](crates/protocol/proto/qdw.proto)), so
 other clients can be written from it.
 
-Coming next: several monitors, automatic logon, and authentication.
+Coming next: automatic logon, and authentication.
 
 ## Running it
 
