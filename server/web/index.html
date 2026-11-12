@@ -13,13 +13,16 @@
   #stats.error { background: #8b1a1a; }
   #mic { position: fixed; top: 8px; right: 8px; padding: 6px 10px; border: 0; border-radius: 4px;
          background: rgba(0, 0, 0, .65); color: #eee; font: inherit; cursor: pointer; }
-  #mic.on { background: #1a6b2e; }
+  #mic.on, #cam.on { background: #1a6b2e; }
+  #cam { position: fixed; top: 8px; right: 84px; padding: 6px 10px; border: 0; border-radius: 4px;
+         background: rgba(0, 0, 0, .65); color: #eee; font: inherit; cursor: pointer; }
 </style>
 </head>
 <body>
 <video id="video" autoplay muted playsinline></video>
 <div id="stats">connecting…</div>
 <button id="mic" type="button" title="Send this computer's microphone to the guest">Mic off</button>
+<button id="cam" type="button" title="Show this computer's camera in the guest">Cam off</button>
 <script>
 "use strict";
 const video = document.getElementById("video");
@@ -91,6 +94,9 @@ const send = (bytes) => ws.send(new Uint8Array(bytes));
 // something on the page: the element starts muted, and the first click or key unmutes it.
 const media = new MediaStream();
 pc.ontrack = (event) => {
+  // The screen and the sound; the camera tracks only go the other way.
+  const screen = pc.getTransceivers().find((t) => t.receiver.track.kind === "video");
+  if (event.track.kind === "video" && event.transceiver !== screen) return;
   media.addTrack(event.track);
   if (video.srcObject !== media) video.srcObject = media;
   // Firefox stops playing when a track joins the stream: play again (nothing in Chrome).
@@ -106,6 +112,10 @@ pc.ondatachannel = ({ channel }) => {
   channel.binaryType = "arraybuffer";
   if (channel.label === "input") input.channel = channel;
   if (channel.label === "pointer") channel.onmessage = (event) => pointerUpdate(new Uint8Array(event.data));
+  if (channel.label === "camera") {
+    camera.channel = channel;
+    channel.onmessage = (event) => cameraMessage(new Uint8Array(event.data));
+  }
   if (channel.label === "control") {
     control.channel = channel;
     channel.onopen = () => { control.videoPause(); control.layout(); };
@@ -143,6 +153,10 @@ ws.onmessage = async (event) => {
     await pc.setRemoteDescription({ type: "offer", sdp: str(pb.parse(message.get(1)[0]), 1) });
     // Sound both ways: the microphone can then go on the sound's track without renegotiating.
     for (const t of pc.getTransceivers()) if (t.receiver.track.kind === "audio") t.direction = "sendrecv";
+    // The video tracks after the screen's carry the cameras, from here: sending, with no track
+    // until the guest opens a camera.
+    const videos = pc.getTransceivers().filter((t) => t.receiver.track.kind === "video");
+    for (const t of videos.slice(1)) t.direction = "sendonly";
     await pc.setLocalDescription(await pc.createAnswer());
     send(answer(pc.localDescription.sdp));
   } else if (message.has(2)) {
@@ -515,6 +529,138 @@ setInterval(async () => {
     sound,
   ].join("\n");
 }, 1000);
+
+// ---------------------------------------------------------------------------------------------
+// The camera, on demand: the button shows it in the guest, which opens it only when an
+// application uses it; it then goes as H.264 on the track the server names.
+// CameraMessage: announce = 1, remove = 2, control_value = 3 (to the server); added = 4,
+// start = 5, stop = 6, set_control = 7 (from the server).
+const camButton = document.getElementById("cam");
+if (shadow) camButton.hidden = true;
+const camera = { channel: null, announced: false, formats: [], controls: [], track: null, sender: null };
+// The browser's camera settings, as MS-RDPECAM numbers them: set 1 CameraControl, 2
+// VideoProcAmp; `mode` is the setting that switches it to automatic.
+const CAMERA_CONTROLS = [
+  { set: 2, property: 2, key: "brightness" },
+  { set: 2, property: 3, key: "contrast" },
+  { set: 2, property: 5, key: "colorTemperature", mode: "whiteBalanceMode" },
+  { set: 1, property: 1, key: "exposureTime", mode: "exposureMode" },
+  { set: 1, property: 2, key: "focusDistance", mode: "focusMode" },
+  { set: 1, property: 3, key: "pan" },
+  { set: 1, property: 5, key: "tilt" },
+  { set: 1, property: 6, key: "zoom" },
+];
+const camSend = (field, build) => {
+  if (camera.channel?.readyState === "open") camera.channel.send(new Uint8Array(pb.message((o) => pb.bytes(o, field, pb.message(build)))));
+};
+// What the camera can do: the usual sizes it reaches, at up to 30 frames a second, and the
+// settings the browser exposes, in integers (scaled when the browser's step is a fraction).
+async function cameraProbe() {
+  const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+  const track = stream.getVideoTracks()[0];
+  const caps = track.getCapabilities ? track.getCapabilities() : {};
+  const settings = track.getSettings();
+  const fps = Math.max(1, Math.min(30, Math.floor(caps.frameRate?.max || 30)));
+  const sizes = [[3840, 2160], [1920, 1080], [1280, 720], [640, 480], [320, 240]]
+    .filter(([w, h]) => w <= (caps.width?.max || settings.width) && h <= (caps.height?.max || settings.height));
+  camera.formats = sizes.map(([width, height]) => ({ width, height, fps }));
+  camera.controls = [];
+  for (const c of CAMERA_CONTROLS) {
+    const range = caps[c.key];
+    if (!range || range.max === undefined) continue;
+    const scale = range.step && range.step < 1 ? Math.min(1000, Math.round(1 / range.step)) : 1;
+    const modes = c.mode ? caps[c.mode] || [] : [];
+    camera.controls.push({ set: c.set, property: c.property, key: c.key, modeName: c.mode, scale,
+      capabilities: 1 | (modes.includes("continuous") ? 2 : 0),
+      min: Math.round(range.min * scale), max: Math.round(range.max * scale),
+      step: Math.max(1, Math.round((range.step || 1) * scale)),
+      value: Math.round((settings[c.key] ?? range.min) * scale),
+      mode: c.mode && settings[c.mode] === "continuous" ? 2 : 1 });
+  }
+  const name = track.label || "Camera";
+  track.stop();
+  return name;
+}
+function cameraControlValue(c) {
+  camSend(3, (v) => { pb.uint(v, 1, 1); pb.uint(v, 2, c.set); pb.uint(v, 3, c.property); pb.uint(v, 4, c.mode); pb.int(v, 5, c.value); });
+}
+// Apply a setting to the open camera; the value it took comes back in `c`.
+async function cameraApply(c) {
+  if (!camera.track) return;
+  const constraint = c.mode === 2 && c.modeName ? { [c.modeName]: "continuous" }
+    : { ...(c.modeName ? { [c.modeName]: "manual" } : {}), [c.key]: c.value / c.scale };
+  try {
+    await camera.track.applyConstraints({ advanced: [constraint] });
+    const now = camera.track.getSettings()[c.key];
+    if (now !== undefined) c.value = Math.round(now * c.scale);
+  } catch (e) { console.warn("camera setting", c.key, e); }
+}
+async function cameraMessage(bytes) {
+  const message = pb.parse(bytes);
+  if (message.has(4)) {
+    const added = pb.parse(message.get(4)[0]);
+    const error = str(added, 2);
+    camButton.title = error ? `Camera not shown: ${error}` : "The camera is shown in the guest";
+    if (error) console.warn("camera not shown:", error);
+  } else if (message.has(5)) {
+    const start = pb.parse(message.get(5)[0]);
+    const f = camera.formats[uint(start, 2)];
+    const transceiver = pc.getTransceivers().find((t) => t.mid === str(start, 3));
+    if (!f || !transceiver) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: {
+        width: { ideal: f.width }, height: { ideal: f.height }, frameRate: { ideal: f.fps } } });
+      camera.track?.stop();
+      camera.track = stream.getVideoTracks()[0];
+      camera.sender = transceiver.sender;
+      await camera.sender.replaceTrack(camera.track);
+      for (const c of camera.controls) await cameraApply(c);
+      camButton.className = "on";
+    } catch (e) { console.warn("camera:", e); }
+  } else if (message.has(6)) {
+    await camera.sender?.replaceTrack(null);
+    camera.track?.stop();
+    camera.track = null;
+  } else if (message.has(7)) {
+    const v = pb.parse(message.get(7)[0]);
+    const c = camera.controls.find((c) => c.set === uint(v, 2) && c.property === uint(v, 3));
+    if (!c) return;
+    c.mode = uint(v, 4) || 1;
+    if (c.mode === 1) c.value = uint(v, 5);
+    await cameraApply(c);
+    cameraControlValue(c);
+  }
+}
+camButton.addEventListener("click", async () => {
+  if (camera.announced) {
+    camSend(2, (r) => pb.uint(r, 1, 1));
+    await camera.sender?.replaceTrack(null);
+    camera.track?.stop();
+    camera.track = null;
+    camera.announced = false;
+    camButton.textContent = "Cam off";
+    camButton.className = "";
+    return;
+  }
+  try {
+    const name = await cameraProbe();
+    camSend(1, (a) => {
+      pb.uint(a, 1, 1);
+      pb.string(a, 2, name);
+      for (const f of camera.formats) pb.bytes(a, 3, pb.message((m) => { pb.uint(m, 1, f.width); pb.uint(m, 2, f.height); pb.uint(m, 3, f.fps); pb.uint(m, 4, 1); }));
+      for (const c of camera.controls) pb.bytes(a, 4, pb.message((m) => {
+        pb.uint(m, 1, c.set); pb.uint(m, 2, c.property); pb.uint(m, 3, c.capabilities);
+        pb.int(m, 4, c.min); pb.int(m, 5, c.max); pb.int(m, 6, c.step); pb.int(m, 7, c.value);
+        pb.uint(m, 8, c.mode); pb.int(m, 9, c.value);
+      }));
+    });
+    camera.announced = true;
+    camButton.textContent = "Cam on";
+  } catch (e) {
+    camButton.title = `No camera: ${e.message}`;
+    console.warn("camera:", e);
+  }
+});
 </script>
 </body>
 </html>

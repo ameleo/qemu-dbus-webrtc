@@ -9,6 +9,7 @@
 //! The server makes the offer; the signalling (SDP and ICE candidates) goes through the
 //! caller, as `Signal`s out and `apply_answer`/`add_ice_candidate` in.
 
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -23,8 +24,8 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use qdw_protocol::{
-    CLIPBOARD_CHANNEL, CONTROL_CHANNEL, DRIVE_CHANNEL, INPUT_CHANNEL, POINTER_CHANNEL,
-    PRINTER_CHANNEL,
+    CAMERA_CHANNEL, CLIPBOARD_CHANNEL, CONTROL_CHANNEL, DRIVE_CHANNEL, INPUT_CHANNEL,
+    MAX_CAMERA_STREAMS, POINTER_CHANNEL, PRINTER_CHANNEL,
 };
 use qdw_video::encode::Codec;
 
@@ -35,6 +36,10 @@ const VIDEO_PT: u32 = 96;
 
 /// The payload type of the sound: apart from the video's, which may grow to several screens.
 const AUDIO_PT: u32 = 111;
+
+/// The payload types of the client's cameras, one per track: webrtcbin tells the incoming
+/// streams of a bundle apart by their payload type.
+const CAMERA_PT: u32 = 100;
 
 /// What the session has to send to the browser.
 #[derive(Debug)]
@@ -48,6 +53,12 @@ pub enum Signal {
     Open(Channel),
     /// A message came on a data channel.
     Message(Channel, Vec<u8>),
+    /// An H.264 access unit (Annex B) from a client camera, on the track of `mid`.
+    CameraFrame {
+        mid: String,
+        timestamp_us: u64,
+        data: Vec<u8>,
+    },
     /// A new estimate of the bandwidth to the client, in kbit/s.
     Estimate(u32),
     /// The connection failed or ended; the session is over.
@@ -69,16 +80,19 @@ pub enum Channel {
     Drive,
     /// The client's printers, both ways.
     Printer,
+    /// The client's cameras, both ways.
+    Camera,
 }
 
 impl Channel {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Input,
         Self::Pointer,
         Self::Clipboard,
         Self::Control,
         Self::Drive,
         Self::Printer,
+        Self::Camera,
     ];
 
     fn label(self) -> &'static str {
@@ -89,6 +103,7 @@ impl Channel {
             Self::Control => CONTROL_CHANNEL,
             Self::Drive => DRIVE_CHANNEL,
             Self::Printer => PRINTER_CHANNEL,
+            Self::Camera => CAMERA_CHANNEL,
         }
     }
 }
@@ -301,10 +316,11 @@ rtcp-fb-transport-cc=(boolean)true,extmap-1=(string){TWCC_URI} \
                 else {
                     break;
                 };
-                let direction = if index == 1 {
-                    gst_webrtc::WebRTCRTPTransceiverDirection::Sendrecv
-                } else {
-                    gst_webrtc::WebRTCRTPTransceiverDirection::Sendonly
+                // The cameras' tracks, after them, only receive.
+                let direction = match index {
+                    0 => gst_webrtc::WebRTCRTPTransceiverDirection::Sendonly,
+                    1 => gst_webrtc::WebRTCRTPTransceiverDirection::Sendrecv,
+                    _ => continue,
                 };
                 transceiver.set_property("direction", direction);
                 // The video: a client that lost packets asks for them again (NACK) and gets
@@ -355,6 +371,7 @@ rtcp-fb-transport-cc=(boolean)true,extmap-1=(string){TWCC_URI} \
 
         let closed_on_error = signals.clone();
         let closed_on_input = signals.clone();
+        let frames = signals.clone();
         let closed = signals;
         let on_connected = keyframe.clone();
         webrtc.connect_notify(Some("connection-state"), move |webrtc, _| {
@@ -417,6 +434,21 @@ rtcp-fb-transport-cc=(boolean)true,extmap-1=(string){TWCC_URI} \
             let Some(pipeline) = weak.upgrade() else {
                 return;
             };
+            // A client camera: on a video track.
+            let transceiver =
+                pad.property::<Option<gst_webrtc::WebRTCRTPTransceiver>>("transceiver");
+            if let Some(transceiver) = transceiver
+                && transceiver.property::<gst_webrtc::WebRTCKind>("kind")
+                    == gst_webrtc::WebRTCKind::Video
+            {
+                let mid = transceiver
+                    .property::<Option<String>>("mid")
+                    .unwrap_or_default();
+                if let Err(e) = Self::relay_camera(&pipeline, pad, mid, frames.clone()) {
+                    warn!(error = %format!("{e:#}"), "client camera not relayed");
+                }
+                return;
+            }
             let linked = match (&mic, speaker) {
                 (Some(mic), Some(speaker)) => {
                     Self::decode_mic(&pipeline, pad, mic.clone(), speaker)
@@ -434,6 +466,23 @@ rtcp-fb-transport-cc=(boolean)true,extmap-1=(string){TWCC_URI} \
         // covers them all.
         rtp.link(&webrtc)?;
         audio_rtp.link(&webrtc)?;
+        // Then the tracks the client's cameras come on, receive only, in H.264: the guest takes
+        // it as it is. Any level: the client sends what its camera gives. With the
+        // transport-wide congestion control reports, from which the client estimates the
+        // bandwidth: without them, it sends nothing.
+        for slot in 0..MAX_CAMERA_STREAMS as u32 {
+            let caps = gst::Caps::from_str(&format!(
+                "application/x-rtp,media=video,encoding-name=H264,clock-rate=90000,\
+                 payload={pt},packetization-mode=(string)1,profile-level-id=(string)42e01f,\
+                 level-asymmetry-allowed=(string)1,rtcp-fb-nack-pli=(boolean)true,\
+                 rtcp-fb-transport-cc=(boolean)true,extmap-1=(string){TWCC_URI}",
+                pt = CAMERA_PT + slot
+            ))?;
+            webrtc.emit_by_name::<gst_webrtc::WebRTCRTPTransceiver>(
+                "add-transceiver",
+                &[&gst_webrtc::WebRTCRTPTransceiverDirection::Recvonly, &caps],
+            );
+        }
         pipeline.set_state(gst::State::Ready)?;
         let mut channels = Vec::new();
         for channel in Channel::ALL {
@@ -489,6 +538,76 @@ rtcp-fb-transport-cc=(boolean)true,extmap-1=(string){TWCC_URI} \
         }
         debug!(paused, "client video");
         !paused
+    }
+
+    /// Relay the H.264 of a client camera coming out of webrtcbin's `pad`, the track of `mid`,
+    /// as whole access units in Annex B with SPS and PPS before each IDR, which the guest's
+    /// decoder takes as they are.
+    fn relay_camera(
+        pipeline: &gst::Pipeline,
+        pad: &gst::Pad,
+        mid: String,
+        frames: mpsc::UnboundedSender<Signal>,
+    ) -> Result<()> {
+        let chain = gst::parse::bin_from_description(
+            &format!(
+                "rtph264depay ! h264parse config-interval=-1 \
+                 ! video/x-h264,stream-format=byte-stream,alignment=au \
+                 ! appsink name=camera-{mid} sync=false"
+            ),
+            true,
+        )?;
+        let sink = chain
+            .by_name(&format!("camera-{mid}"))
+            .and_then(|e| e.downcast::<gst_app::AppSink>().ok())
+            .context("no camera appsink")?;
+        sink.set_callbacks(
+            gst_app::AppSinkCallbacks::builder()
+                .new_sample(move |sink| {
+                    let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                    let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
+                    let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
+                    let timestamp_us = buffer.pts().map_or(0, |t| t.useconds());
+                    let _ = frames.send(Signal::CameraFrame {
+                        mid: mid.clone(),
+                        timestamp_us,
+                        data: map.to_vec(),
+                    });
+                    Ok(gst::FlowSuccess::Ok)
+                })
+                .build(),
+        );
+        pipeline.add(&chain)?;
+        chain.sync_state_with_parent()?;
+        pad.link(&chain.static_pad("sink").context("no camera chain sink")?)?;
+        debug!(mid = sink.name().as_str(), "client camera track");
+        Ok(())
+    }
+
+    /// The mids of the camera tracks, once negotiated.
+    pub fn camera_mids(&self) -> Vec<String> {
+        // After the video and the sound.
+        (2..)
+            .map_while(|index: u32| {
+                self.webrtc
+                    .emit_by_name::<Option<gst_webrtc::WebRTCRTPTransceiver>>(
+                        "get-transceiver",
+                        &[&(index as i32)],
+                    )
+            })
+            .filter_map(|t| t.property::<Option<String>>("mid"))
+            .collect()
+    }
+
+    /// Ask the client for a keyframe on the camera track of `mid` (RTCP PLI).
+    pub fn camera_keyframe(&self, mid: &str) {
+        if let Some(sink) = self.pipeline.by_name(&format!("camera-{mid}")) {
+            sink.send_event(
+                gst_video::UpstreamForceKeyUnitEvent::builder()
+                    .all_headers(true)
+                    .build(),
+            );
+        }
     }
 
     /// Drop the stream coming out of webrtcbin's `pad`: an unlinked pad would stop the pipeline.

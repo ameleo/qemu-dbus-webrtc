@@ -7,6 +7,7 @@
 
 mod agent;
 mod audio;
+mod cameras;
 mod clipboard;
 mod copied;
 mod drives;
@@ -293,6 +294,7 @@ async fn main() -> Result<()> {
     let clipboard = clipboard::Clipboard::new();
     let drives = drives::Drives::new();
     let printers = printers::Printers::new();
+    let cameras = cameras::Cameras::new();
     // The shown console at the size of the user's window.
     let layout = layout::Layout::start(
         display::ConsoleProxy::builder(&vm_connection)
@@ -305,6 +307,7 @@ async fn main() -> Result<()> {
         clipboard.clone(),
         drives.clone(),
         printers.clone(),
+        cameras.clone(),
     ));
     let shared = web::Shared {
         codec: args.settings.codec,
@@ -319,6 +322,7 @@ async fn main() -> Result<()> {
         clipboard: clipboard.clone(),
         drives: drives.clone(),
         printers: printers.clone(),
+        cameras: cameras.clone(),
         layout: layout.clone(),
         user: Default::default(),
         bitrates: args.bitrates,

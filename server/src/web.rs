@@ -29,6 +29,7 @@ use qdw_video::encode::Codec;
 use std::sync::Arc;
 
 use crate::audio::Mic;
+use crate::cameras::{Cameras, CamerasFollow, ViewerCameras};
 use crate::clipboard::{Clipboard, ViewerClipboard, ViewerFollow};
 use crate::drives::{Drives, DrivesFollow, ViewerDrives};
 use crate::input::ViewerInput;
@@ -70,6 +71,7 @@ pub struct Shared {
     pub clipboard: Arc<Clipboard>,
     pub drives: Arc<Drives>,
     pub printers: Arc<Printers>,
+    pub cameras: Arc<Cameras>,
     /// The size of the shown console's screen.
     pub layout: Arc<Layout>,
     /// The user of the session.
@@ -274,11 +276,13 @@ async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
     let (clipboard, clip) = shared.clipboard.viewer();
     let (drives, drives_follow) = shared.drives.viewer();
     let (printers, printers_follow) = shared.printers.viewer();
+    let (cameras, cameras_follow) = shared.cameras.viewer();
     let mut state = ViewerState {
         input: ViewerInput::new(shared.input.clone()),
         clipboard,
         drives,
         printers,
+        cameras,
     };
     let (user_id, taken_over) = user.unzip();
     let ended = run(
@@ -291,6 +295,7 @@ async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
             clip,
             drives: drives_follow,
             printers: printers_follow,
+            cameras: cameras_follow,
             taken_over,
         },
         &shared,
@@ -302,6 +307,7 @@ async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
     state.clipboard.release().await?;
     state.drives.release().await;
     state.printers.release().await;
+    state.cameras.release().await;
     if let Some(id) = user_id {
         shared.user.leave(id);
     }
@@ -329,6 +335,7 @@ struct ViewerState {
     clipboard: ViewerClipboard,
     drives: ViewerDrives,
     printers: ViewerPrinters,
+    cameras: ViewerCameras,
 }
 
 /// What a viewer follows besides its connection.
@@ -337,6 +344,7 @@ struct Follow {
     clip: ViewerFollow,
     drives: DrivesFollow,
     printers: PrintersFollow,
+    cameras: CamerasFollow,
     /// For the user: another client took the session over. `None` for a shadow client.
     taken_over: Option<oneshot::Receiver<()>>,
 }
@@ -379,6 +387,7 @@ async fn run(
         clipboard,
         drives,
         printers,
+        cameras,
     } = state;
     // Pointer updates wait for the pointer channel to open.
     let mut sent: Option<pointer::Sent> = None;
@@ -400,7 +409,17 @@ async fn run(
                     let ice = IceCandidate { candidate, sdp_mline_index: mline_index };
                     send(socket, server_message::Message::Ice(ice)).await?
                 }
-                Some(Signal::Message(Channel::Input | Channel::Clipboard | Channel::Drive | Channel::Printer, _)) if !user => {}
+                Some(Signal::Message(Channel::Input | Channel::Clipboard | Channel::Drive | Channel::Printer | Channel::Camera, _)) if !user => {}
+                Some(Signal::Message(Channel::Camera, bytes)) => {
+                    if let Err(e) = cameras.message(&bytes).await {
+                        warn!(error = %format!("{e:#}"), "camera");
+                    }
+                }
+                Some(Signal::CameraFrame { mid, timestamp_us, data }) => {
+                    if user {
+                        cameras.frame(&mid, timestamp_us, data);
+                    }
+                }
                 Some(Signal::Message(Channel::Input, bytes)) => match Input::decode(bytes.as_slice()) {
                     Ok(events) => input.apply(events).await?,
                     Err(e) => warn!(error = %e, "undecodable input"),
@@ -444,7 +463,7 @@ async fn run(
                     let guest = follow.clip.guest.borrow_and_update().clone();
                     send_all(session, Channel::Clipboard, clipboard.opened(guest));
                 }
-                Some(Signal::Open(Channel::Input | Channel::Control | Channel::Drive | Channel::Printer)) => {}
+                Some(Signal::Open(Channel::Input | Channel::Control | Channel::Drive | Channel::Printer | Channel::Camera)) => {}
                 Some(Signal::Estimate(estimate)) => {
                     // The user's bandwidth sets the bitrate of the video, which all viewers
                     // share: a shadow client on a slower connection gets what it can.
@@ -486,6 +505,8 @@ async fn run(
             Some(message) = follow.drives.outgoing.recv() => session.send(Channel::Drive, message),
             Some(call) = follow.printers.calls.recv() => send_all(session, Channel::Printer, printers.call(call)),
             Some(message) = follow.printers.outgoing.recv() => session.send(Channel::Printer, message),
+            Some(call) = follow.cameras.calls.recv() => send_all(session, Channel::Camera, cameras.call(call, session)),
+            Some(message) = follow.cameras.outgoing.recv() => session.send(Channel::Camera, message),
             message = receive(socket) => match message? {
                 Some(client_message::Message::Answer(SessionDescription { sdp })) => session.apply_answer(&sdp)?,
                 // An empty candidate marks the end of the client's candidates.

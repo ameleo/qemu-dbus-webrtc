@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! The connection to the guest agent, which the clipboard, the drives and the printers go
-//! through.
+//! The connection to the guest agent, which the clipboard, the drives, the printers and the
+//! cameras go through.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,6 +9,7 @@ use std::time::Duration;
 use qdw_qemu::agent;
 use tracing::{info, warn};
 
+use crate::cameras::Cameras;
 use crate::clipboard::Clipboard;
 use crate::drives::Drives;
 use crate::printers::Printers;
@@ -24,6 +25,7 @@ pub async fn run(
     clipboard: Arc<Clipboard>,
     drives: Arc<Drives>,
     printers: Arc<Printers>,
+    cameras: Arc<Cameras>,
 ) {
     loop {
         let host = |builder| printers.serve(drives.serve(clipboard.serve(builder)?)?);
@@ -36,6 +38,9 @@ pub async fn run(
                 if let Err(e) = printers.attach(&connection).await {
                     warn!(error = %format!("{e:#}"), "guest agent printers");
                 }
+                if let Err(e) = cameras.attach(&connection).await {
+                    warn!(error = %format!("{e:#}"), "guest agent cameras");
+                }
                 if let Err(e) = clipboard.follow(&connection).await {
                     warn!(error = %format!("{e:#}"), "guest agent");
                 }
@@ -43,11 +48,14 @@ pub async fn run(
                 clipboard.detach();
                 drives.detach();
                 printers.detach();
+                cameras.detach();
             }
             Err(e) => {
                 let e = format!("{e:#}");
                 if e.contains("no fr.ameleo.agent.0") {
-                    info!("no guest agent device on this VM: no clipboard, no drives, no printers");
+                    info!(
+                        "no guest agent device on this VM: no clipboard, no drives, no printers, no cameras"
+                    );
                     return;
                 }
                 warn!(error = %e, "guest agent not reachable");

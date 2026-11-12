@@ -38,6 +38,13 @@ pub const DRIVE_CHANNEL: &str = "drive";
 /// The data channel of the client's printers, both ways: [`v1::PrinterMessage`] messages.
 pub const PRINTER_CHANNEL: &str = "printer";
 
+/// The data channel of the client's cameras, both ways: [`v1::CameraMessage`] messages.
+pub const CAMERA_CHANNEL: &str = "camera";
+
+/// The most a client's cameras stream at once, on as many receive-only H.264 tracks of the
+/// offer.
+pub const MAX_CAMERA_STREAMS: usize = 4;
+
 /// The most bytes of a print job the server sends before the client acknowledges them:
 /// 1 MiB.
 pub const PRINTER_WINDOW: u32 = 1024 * 1024;

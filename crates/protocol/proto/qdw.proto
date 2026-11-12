@@ -652,3 +652,100 @@ message PrinterPropertiesDone {
   string print_ticket = 2;
   bool cancelled = 3;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Data channel "camera", both ways, reliable and ordered: one CameraMessage per message.
+//
+// Client cameras shown in the guest as cameras, as RDP redirects them (MS-RDPECAM). The client
+// announces its cameras, with the formats each can send and its controls (brightness, focus...).
+// When a guest application opens one, the server asks the client to start it in one of those
+// formats (CameraStart): the client sends it as H.264 on the video track of the offer whose
+// mid the server names, one of the offer's receive-only H.264 tracks kept for the cameras (no
+// renegotiation: the client sets the transceiver's direction to send when it answers, and
+// replaces the sender's track). The server relays the H.264 to the guest as it is. When no
+// application uses it anymore, CameraStop: the client stops sending (replaceTrack(null)).
+// When the guest's decoder loses track, the server asks the client for a keyframe on that
+// track (RTCP PLI), as a browser does.
+//
+// Controls are numbered as in MS-RDPECAM: sets 1 CameraControl (1 exposure, 2 focus, 3 pan,
+// 4 roll, 5 tilt, 6 zoom) and 2 VideoProcAmp (1 backlight compensation, 2 brightness,
+// 3 contrast, 4 hue, 5 white balance); capabilities and modes 1 manual, 2 auto. Only the user
+// shares cameras, not shadow clients.
+
+message CameraMessage {
+  oneof message {
+    // Client to server.
+    CameraAnnounce announce = 1;
+    CameraRemove remove = 2;
+    // The value a control has now, after a CameraSetControl or at any time.
+    CameraControlValue control_value = 3;
+    // Server to client.
+    CameraAdded added = 4;
+    CameraStart start = 5;
+    CameraStop stop = 6;
+    CameraControlValue set_control = 7;
+  }
+}
+
+// A camera of the client, to show in the guest. The client chooses the id.
+message CameraAnnounce {
+  uint32 id = 1;
+  // Shown in the guest.
+  string name = 2;
+  // What the camera can send, in H.264; CameraStart names one by its index in this list.
+  repeated CameraFormat formats = 3;
+  repeated CameraControl controls = 4;
+}
+
+message CameraFormat {
+  uint32 width = 1;
+  uint32 height = 2;
+  uint32 fps_numerator = 3;
+  uint32 fps_denominator = 4;
+}
+
+// A control the camera offers (PROPERTY_DESCRIPTION), and its value now (PROPERTY_VALUE).
+message CameraControl {
+  uint32 set = 1;
+  uint32 property = 2;
+  uint32 capabilities = 3;
+  int32 min = 4;
+  int32 max = 5;
+  int32 step = 6;
+  int32 default = 7;
+  uint32 mode = 8;
+  int32 value = 9;
+}
+
+// The client's camera is gone.
+message CameraRemove {
+  uint32 id = 1;
+}
+
+// What became of an announced camera: empty error when the guest shows it.
+message CameraAdded {
+  uint32 id = 1;
+  string error = 2;
+}
+
+// Send camera `id` in format `format` (an index in its CameraAnnounce) on the track of `mid`.
+message CameraStart {
+  uint32 id = 1;
+  uint32 format = 2;
+  string mid = 3;
+}
+
+// Stop sending camera `id`.
+message CameraStop {
+  uint32 id = 1;
+}
+
+// A control's value: the one the guest asks for (server to client: `value` means nothing in
+// mode 2, auto), or the one the camera took (client to server).
+message CameraControlValue {
+  uint32 id = 1;
+  uint32 set = 2;
+  uint32 property = 3;
+  uint32 mode = 4;
+  int32 value = 5;
+}

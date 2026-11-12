@@ -8,7 +8,7 @@
 //! interfaces at `/fr/ameleo/Agent`, we export ours at `/fr/ameleo/Host`.
 //!
 //! Only what this program uses of the agent's contract is declared here: the core interface,
-//! the clipboard (files included), the client drives and the client printers.
+//! the clipboard (files included), the client drives, printers and cameras.
 
 use std::os::unix::net::UnixStream as StdUnixStream;
 
@@ -174,6 +174,74 @@ pub mod printer {
     pub const MAX_PRINTERS: usize = 32;
     /// Largest PrintCapabilities or PrintTicket, in bytes.
     pub const MAX_XML: usize = 4 * 1024 * 1024;
+}
+
+/// Client cameras shown in the guest as Windows cameras (RDP camera redirection, MS-RDPECAM).
+/// The host announces each with the H.264 formats it sends; when an application opens it, the
+/// guest asks for a format, and the host pushes each H.264 access unit (Annex B, SPS and PPS
+/// before each IDR). Ids are chosen by the host.
+#[zbus::proxy(
+    interface = "fr.ameleo.Agent.Camera1",
+    default_service = "fr.ameleo.Agent",
+    default_path = "/fr/ameleo/Agent"
+)]
+pub trait Camera {
+    /// `formats`: `(width, height, fps numerator, fps denominator)`.
+    fn add_camera(
+        &self,
+        id: u32,
+        name: &str,
+        formats: Vec<(u32, u32, u32, u32)>,
+    ) -> zbus::Result<()>;
+    fn remove_camera(&self, id: u32) -> zbus::Result<()>;
+    /// One access unit, in the format of the last `StreamRequested`; `timestamp_us`: capture
+    /// time on the client.
+    #[zbus(no_reply)]
+    fn push_frame(&self, id: u32, timestamp_us: u64, data: Vec<u8>) -> zbus::Result<()>;
+    /// An application opened camera `id` in format `format` (an index in `AddCamera`).
+    #[zbus(signal)]
+    fn stream_requested(&self, id: u32, format: u32) -> zbus::Result<()>;
+    /// No application uses camera `id` anymore.
+    #[zbus(signal)]
+    fn stream_stopped(&self, id: u32) -> zbus::Result<()>;
+    /// The guest needs a keyframe to decode camera `id` again.
+    #[zbus(signal)]
+    fn key_frame_needed(&self, id: u32) -> zbus::Result<()>;
+    /// The controls of camera `id`, replacing any given before.
+    fn set_controls(&self, id: u32, controls: Vec<camera::Control>) -> zbus::Result<()>;
+    /// The value a control of camera `id` has now.
+    fn control_value(
+        &self,
+        id: u32,
+        set: u8,
+        property: u8,
+        mode: u8,
+        value: i32,
+    ) -> zbus::Result<()>;
+    /// An application changed a control: `value` means nothing in the auto mode.
+    #[zbus(signal)]
+    fn control_requested(
+        &self,
+        id: u32,
+        set: u8,
+        property: u8,
+        mode: u8,
+        value: i32,
+    ) -> zbus::Result<()>;
+}
+
+/// Camera limits and wire types of the agent's contract.
+pub mod camera {
+    /// Client cameras shown at the same time.
+    pub const MAX_CAMERAS: usize = 4;
+    /// Largest frame size.
+    pub const MAX_WIDTH: u32 = 3840;
+    pub const MAX_HEIGHT: u32 = 2160;
+    /// Controls given at once.
+    pub const MAX_CONTROLS: usize = 16;
+    /// `(set, property, capabilities, min, max, step, default, mode, value)`, numbered as in
+    /// MS-RDPECAM.
+    pub type Control = (u8, u8, u8, i32, i32, i32, i32, u8, i32);
 }
 
 /// Connect to the guest agent. `host` adds our interfaces (the calls the guest makes) to the
