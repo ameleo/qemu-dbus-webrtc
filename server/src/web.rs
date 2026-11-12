@@ -21,9 +21,9 @@ use tracing::{Instrument, info, warn};
 
 use qdw_protocol::Message;
 use qdw_protocol::v1::{
-    BandwidthEstimate, ClientMessage, ControlMessage, Error, Hello, IceCandidate, Input,
+    BandwidthEstimate, ClientMessage, ControlMessage, Ended, Error, Hello, IceCandidate, Input,
     Microphone, MonitorLayout, ServerMessage, SessionDescription, VideoPause, client_message,
-    control_message, server_message,
+    control_message, ended, server_message,
 };
 use qdw_video::encode::Codec;
 
@@ -55,6 +55,8 @@ pub enum Request {
 
 #[derive(Clone)]
 pub struct Shared {
+    /// Turns true when the VM stops: its viewers' sessions end.
+    pub vm_stopped: watch::Receiver<bool>,
     pub codec: Codec,
     /// The video is in 4:4:4.
     pub full_chroma: bool,
@@ -222,11 +224,7 @@ async fn upgrade(
         }
         Err(e) => {
             warn!(%peer, uuid, error = %format!("{e:#}"), "VM not attached");
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "the VM could not be attached",
-            )
-                .into_response();
+            return (StatusCode::SERVICE_UNAVAILABLE, format!("{e:#}")).into_response();
         }
     };
     let span = client.span().clone();
@@ -428,6 +426,7 @@ async fn run(
     let mut estimate_sent: Option<(std::time::Instant, u32)> = None;
     // A shadow client only watches: what it sends to the guest is ignored, and it gets nothing
     // of the guest's clipboard.
+    let mut vm_stopped = shared.vm_stopped.clone();
     let taken_over = follow.taken_over.take();
     let user = taken_over.is_some();
     let taken_over = async move {
@@ -462,9 +461,13 @@ async fn run(
         tokio::select! {
             _ = reception.tick() => session.report_reception(),
             () = &mut taken_over => {
-                let message = "another client took the session over".to_string();
-                send(socket, server_message::Message::Error(Error { message: message.clone() })).await?;
-                info!("{message}");
+                info!("another client took the session over");
+                send(socket, server_message::Message::Ended(Ended { reason: ended::Reason::TakenOver.into() })).await?;
+                return Ok(());
+            }
+            true = async { vm_stopped.wait_for(|stopped| *stopped).await.is_ok() } => {
+                info!("the VM stopped: the session ends");
+                send(socket, server_message::Message::Ended(Ended { reason: ended::Reason::VmStopped.into() })).await?;
                 return Ok(());
             }
             signal = signals.recv() => match signal {

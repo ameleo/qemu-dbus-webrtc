@@ -34,7 +34,22 @@ message ServerMessage {
     SessionDescription offer = 1;
     IceCandidate ice = 2;
     Error error = 3;
+    Ended ended = 4;
   }
+}
+
+// The session is over, and why: the server closes the WebSocket and the peer connection
+// right after. The client closes too (a native client its windows), rather than wait on a
+// frozen picture.
+message Ended {
+  enum Reason {
+    REASON_UNSPECIFIED = 0;
+    // Another client took the session over (one user at a time).
+    TAKEN_OVER = 1;
+    // The VM stopped: shut down, or QEMU ended.
+    VM_STOPPED = 2;
+  }
+  Reason reason = 1;
 }
 
 // The first message of a client.

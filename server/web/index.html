@@ -162,8 +162,10 @@ function cameraTracks(sdp) {
   }
   return mids;
 }
-ws.onclose = () => { if (pc.connectionState !== "failed") fail("disconnected"); };
-// ServerMessage: offer = 1, ice = 2, error = 3.
+ws.onclose = () => { if (!ended && pc.connectionState !== "failed") fail("disconnected"); };
+// ServerMessage: offer = 1, ice = 2, error = 3, ended = 4; Ended: reason = 1 (1 another client
+// took the session over, 2 the VM stopped).
+let ended = false;
 ws.onmessage = async (event) => {
   const message = pb.parse(new Uint8Array(event.data));
   if (message.has(1)) {
@@ -181,6 +183,11 @@ ws.onmessage = async (event) => {
     await pc.addIceCandidate({ candidate: str(c, 1), sdpMLineIndex: uint(c, 2) });
   } else if (message.has(3)) {
     fail(str(pb.parse(message.get(3)[0]), 1));
+  } else if (message.has(4)) {
+    const reason = uint(pb.parse(message.get(4)[0]), 1);
+    ended = true;
+    pc.close();
+    fail(reason === 2 ? "The VM stopped." : reason === 1 ? "Another client took the session over." : "The session ended.");
   }
 };
 
