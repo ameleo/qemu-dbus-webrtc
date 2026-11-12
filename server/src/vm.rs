@@ -54,7 +54,7 @@ const FRAME_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / MAX_FPS as
 
 /// How often the VM is asked whether it still runs, and how long it has to answer: QEMU's
 /// listeners do not say when it goes.
-const ALIVE_INTERVAL: Duration = Duration::from_secs(2);
+const ALIVE_INTERVAL: Duration = Duration::from_secs(1);
 const ALIVE_TIME: Duration = Duration::from_secs(5);
 
 /// How often the rates of each console are reported.

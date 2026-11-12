@@ -342,37 +342,52 @@ async fn viewer(
         cameras,
     };
     let (user_id, taken_over) = user.unzip();
-    let ended = run(
-        &mut socket,
-        &session,
-        &mut signals,
-        &mut state,
-        Follow {
-            pointer: shared.pointer.clone(),
-            clip,
-            drives: drives_follow,
-            printers: printers_follow,
-            cameras: cameras_follow,
-            taken_over,
-            server_stopping,
-        },
-        &shared,
-    )
-    .await;
-    // Whatever ended the session (a call to a VM that stops fails, usually before the display
-    // loop sees it), the WebSocket closes cleanly: the client takes the end as one.
+    // The session waits on calls to the VM: when the VM stops, one may only fail when its bus
+    // goes, seconds later. The session ends as soon as the display loop sees the VM stop,
+    // whatever it waits on.
+    let mut vm_stopped = shared.vm_stopped.clone();
+    let ended = tokio::select! {
+        ended = run(
+            &mut socket,
+            &session,
+            &mut signals,
+            &mut state,
+            Follow {
+                pointer: shared.pointer.clone(),
+                clip,
+                drives: drives_follow,
+                printers: printers_follow,
+                cameras: cameras_follow,
+                taken_over,
+                server_stopping,
+            },
+            &shared,
+        ) => ended,
+        true = async { vm_stopped.wait_for(|stopped| *stopped).await.is_ok() } => {
+            info!("the VM stopped: the session ends");
+            Ok(())
+        }
+    };
+    // Whatever ended the session, the WebSocket closes cleanly: the client takes the end as one.
     let _ = socket.send(WsMessage::Close(None)).await;
-    // Whatever ended the session, leave no key or button pressed in the guest, and the
-    // clipboard to the guest; of a VM that stopped, there is nothing left to release.
-    if let Err(e) = state.input.release_all().await {
-        debug!(error = %format!("{e:#}"), "keys not released");
+    // Leave no key or button pressed in the guest, and the clipboard to the guest; of a VM that
+    // stopped, there is nothing left to release, and calls to it would wait in vain.
+    if !*shared.vm_stopped.borrow() {
+        let release = async {
+            if let Err(e) = state.input.release_all().await {
+                debug!(error = %format!("{e:#}"), "keys not released");
+            }
+            if let Err(e) = state.clipboard.release().await {
+                debug!(error = %format!("{e:#}"), "clipboard not released");
+            }
+            state.drives.release().await;
+            state.printers.release().await;
+            state.cameras.release().await;
+        };
+        if tokio::time::timeout(RELEASE_TIME, release).await.is_err() {
+            debug!("the guest did not answer: the session's keys and devices not all released");
+        }
     }
-    if let Err(e) = state.clipboard.release().await {
-        debug!(error = %format!("{e:#}"), "clipboard not released");
-    }
-    state.drives.release().await;
-    state.printers.release().await;
-    state.cameras.release().await;
     if let Some(id) = user_id {
         shared.user.leave(id);
     }
@@ -381,6 +396,10 @@ async fn viewer(
         .send(Request::TenBits(shared.depths.leave(depth_id)));
     ended
 }
+
+/// How long the guest has to release what a session that ends held: keys, the clipboard,
+/// drives, printers, cameras.
+const RELEASE_TIME: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The client hears of the bandwidth estimate at most this often.
 const ESTIMATE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
@@ -441,7 +460,6 @@ async fn run(
     let mut estimate_sent: Option<(std::time::Instant, u32)> = None;
     // A shadow client only watches: what it sends to the guest is ignored, and it gets nothing
     // of the guest's clipboard.
-    let mut vm_stopped = shared.vm_stopped.clone();
     let mut server_stopping = follow.server_stopping.clone();
     let taken_over = follow.taken_over.take();
     let user = taken_over.is_some();
@@ -479,10 +497,6 @@ async fn run(
             () = &mut taken_over => {
                 info!("another client took the session over");
                 send(socket, server_message::Message::Ended(Ended { reason: ended::Reason::TakenOver.into() })).await?;
-                return Ok(());
-            }
-            true = async { vm_stopped.wait_for(|stopped| *stopped).await.is_ok() } => {
-                info!("the VM stopped: the session ends");
                 return Ok(());
             }
             true = async { server_stopping.wait_for(|stopping| *stopping).await.is_ok() } => {
