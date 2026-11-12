@@ -241,10 +241,12 @@ async fn upgrade(
     ws.on_upgrade(move |socket| {
         async move {
             info!(%peer, "viewer connected");
+            let mut client = client;
             if let Err(e) = viewer(socket, &client, stopping).await {
                 warn!(%peer, error = %format!("{e:#}"), "viewer session ended");
             } else {
                 info!(%peer, "viewer left");
+                client.leaves();
             }
         }
         .instrument(span)

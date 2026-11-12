@@ -17,8 +17,12 @@ use crate::providers::{Found, Providers};
 use crate::vm::{self, Vm};
 use crate::web;
 
-/// How long a VM stays attached after its last client left.
+/// How long a VM stays attached after its last client was cut off (no clean close): it may
+/// well come back.
 const DETACH_AFTER: Duration = Duration::from_secs(60);
+/// How long after its last client left with a clean close: it meant to, but may be reloading
+/// its page.
+const DETACH_AFTER_LEAVING: Duration = Duration::from_secs(5);
 /// How often the VMs without clients are looked at.
 const REAP_INTERVAL: Duration = Duration::from_secs(10);
 /// How long a VM just started has for its display to come up.
@@ -30,13 +34,15 @@ struct Attached {
     /// Wakes the reaper: the VM stopped, or its last client left one that did.
     reap: Arc<tokio::sync::Notify>,
     clients: AtomicUsize,
-    /// When its last client left; `None` while it has some.
-    idle_since: std::sync::Mutex<Option<Instant>>,
+    /// When to detach from it, its last client gone; `None` while it has some.
+    detach_at: std::sync::Mutex<Option<Instant>>,
 }
 
 /// A client's hold on a VM: the VM stays attached while it lasts.
 pub struct Client {
     attached: Arc<Attached>,
+    /// It left with a clean close.
+    left: bool,
 }
 
 impl Client {
@@ -49,15 +55,31 @@ impl Client {
     pub fn span(&self) -> &tracing::Span {
         &self.attached.vm.span
     }
+
+    /// The client left with a clean close: if it was the last, the VM need not wait for it.
+    pub fn leaves(&mut self) {
+        self.left = true;
+    }
 }
 
 impl Drop for Client {
     fn drop(&mut self) {
         if self.attached.clients.fetch_sub(1, Ordering::AcqRel) == 1 {
-            *self.attached.idle_since.lock().unwrap() = Some(Instant::now());
-            // A VM that stopped goes as soon as its clients have.
+            let wait = if self.left {
+                DETACH_AFTER_LEAVING
+            } else {
+                DETACH_AFTER
+            };
+            *self.attached.detach_at.lock().unwrap() = Some(Instant::now() + wait);
+            let reap = self.attached.reap.clone();
             if self.attached.vm.ended() {
-                self.attached.reap.notify_one();
+                // A VM that stopped goes as soon as its clients have.
+                reap.notify_one();
+            } else if self.left {
+                tokio::spawn(async move {
+                    tokio::time::sleep(DETACH_AFTER_LEAVING).await;
+                    reap.notify_one();
+                });
             }
         }
     }
@@ -141,15 +163,18 @@ impl Vms {
                     vm,
                     reap: self.reap.clone(),
                     clients: AtomicUsize::new(0),
-                    idle_since: Default::default(),
+                    detach_at: Default::default(),
                 });
                 attached.insert(uuid, entry.clone());
                 entry
             }
         };
         entry.clients.fetch_add(1, Ordering::AcqRel);
-        *entry.idle_since.lock().unwrap() = None;
-        Ok(Some(Client { attached: entry }))
+        *entry.detach_at.lock().unwrap() = None;
+        Ok(Some(Client {
+            attached: entry,
+            left: false,
+        }))
     }
 }
 
@@ -193,7 +218,8 @@ pub fn normalize(uuid: &str) -> Option<String> {
     well_formed.then(|| uuid.to_ascii_lowercase())
 }
 
-/// Detach from the VMs without clients for `DETACH_AFTER`, and from the VMs gone, until the
+/// Detach from the VMs without clients since their time (`DETACH_AFTER`, or
+/// `DETACH_AFTER_LEAVING` after a clean close), and from the VMs gone, until the
 /// server ends.
 async fn reap(vms: std::sync::Weak<Vms>, woken: Arc<tokio::sync::Notify>) {
     let mut interval = tokio::time::interval(REAP_INTERVAL);
@@ -209,10 +235,10 @@ async fn reap(vms: std::sync::Weak<Vms>, woken: Arc<tokio::sync::Notify>) {
                 return true;
             }
             let idle = entry
-                .idle_since
+                .detach_at
                 .lock()
                 .unwrap()
-                .is_none_or(|since| since.elapsed() >= DETACH_AFTER);
+                .is_none_or(|at| Instant::now() >= at);
             if entry.vm.ended() {
                 warn!(uuid, name = %entry.vm.name, "VM gone");
                 false
