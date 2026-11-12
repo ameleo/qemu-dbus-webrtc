@@ -607,13 +607,39 @@ async function cameraMessage(bytes) {
     const f = camera.formats[uint(start, 2)];
     const transceiver = pc.getTransceivers().find((t) => t.mid === str(start, 3));
     if (!f || !transceiver) return;
+    // How long each step takes, in the console: from the server's start.
+    const t0 = performance.now();
+    const at = (step) => console.info(`camera: ${step} after ${Math.round(performance.now() - t0)} ms`);
+    at(`start ${f.width}x${f.height}@${f.fps} on ${transceiver.mid}`);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: {
         width: { ideal: f.width }, height: { ideal: f.height }, frameRate: { ideal: f.fps } } });
+      at("camera open");
       camera.track?.stop();
       camera.track = stream.getVideoTracks()[0];
       camera.sender = transceiver.sender;
+      // The size the guest asked for, from the first frame: by default WebRTC sends smaller
+      // pictures while its bandwidth estimate ramps up, which the guest's decoder, set for
+      // the format, does not take (it asks for keyframes until the size is right).
+      const parameters = camera.sender.getParameters();
+      parameters.degradationPreference = "maintain-resolution";
+      await camera.sender.setParameters(parameters).catch((e) => console.warn("camera parameters:", e));
       await camera.sender.replaceTrack(camera.track);
+      at("track on the sender");
+      (async () => {
+        for (let i = 0; i < 300; i++) {
+          let encoded = 0, sent = 0, size = "";
+          (await camera.sender.getStats()).forEach((x) => {
+            if (x.type === "outbound-rtp") {
+              encoded = x.framesEncoded || 0; sent = x.keyFramesEncoded || 0;
+              size = `${x.frameWidth}x${x.frameHeight}`;
+            }
+          });
+          if (encoded > 0) { at(`first frame encoded, ${size} (${sent} keyframes)`); return; }
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        at("no frame encoded in 15 s");
+      })();
       for (const c of camera.controls) await cameraApply(c);
       camButton.className = "on";
     } catch (e) { console.warn("camera:", e); }

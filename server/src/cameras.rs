@@ -133,14 +133,15 @@ impl Cameras {
                 tokio::select! {
                     Some(signal) = requested.next() => if let Ok(args) = signal.args() {
                         let format = args.format;
-                        debug!(id = args.id, format, "guest camera opened");
+                        info!(id = args.id, format, "guest camera opened");
                         cameras.route(args.id, |client_id| CameraCall::Start { client_id, format });
                     },
                     Some(signal) = stopped.next() => if let Ok(args) = signal.args() {
-                        debug!(id = args.id, "guest camera closed");
+                        info!(id = args.id, "guest camera closed");
                         cameras.route(args.id, |client_id| CameraCall::Stop { client_id });
                     },
                     Some(signal) = keyframes.next() => if let Ok(args) = signal.args() {
+                        info!(id = args.id, "guest camera needs a keyframe");
                         cameras.route(args.id, |client_id| CameraCall::Keyframe { client_id });
                     },
                     Some(signal) = controls.next() => if let Ok(args) = signal.args() {
@@ -189,6 +190,7 @@ impl Cameras {
             calls_tx,
             outgoing: outgoing_tx,
             streams: HashMap::new(),
+            waiting: HashMap::new(),
         };
         (viewer, CamerasFollow { calls, outgoing })
     }
@@ -210,6 +212,8 @@ pub struct ViewerCameras {
     outgoing: mpsc::UnboundedSender<Vec<u8>>,
     /// The camera tracks in use: by mid, the guest's id of the camera streaming on it.
     streams: HashMap<String, u32>,
+    /// The tracks that have not brought a frame since their camera started: when it started.
+    waiting: HashMap<String, std::time::Instant>,
 }
 
 /// A client's format as the agent takes it, if it does: even sizes, within the agent's limits.
@@ -272,8 +276,9 @@ impl ViewerCameras {
                         mid
                     }
                 };
-                info!(id, format, mid, "client camera streaming");
+                info!(id, format, mid, "client camera asked to stream");
                 self.streams.insert(mid.clone(), id);
+                self.waiting.insert(mid.clone(), std::time::Instant::now());
                 vec![encode(Message::Start(CameraStart {
                     id: client_id,
                     format,
@@ -311,8 +316,22 @@ impl ViewerCameras {
     }
 
     /// An access unit came on the camera track of `mid`: to the guest's camera streaming on it.
-    pub fn frame(&self, mid: &str, timestamp_us: u64, data: Vec<u8>) {
+    pub fn frame(&mut self, mid: &str, timestamp_us: u64, data: Vec<u8>) {
         tracing::trace!(mid, timestamp_us, bytes = data.len(), "camera frame");
+        if let Some(asked) = self.waiting.remove(mid) {
+            // A keyframe starts with an SPS (NAL type 7) after its start code.
+            let keyframe = data
+                .windows(5)
+                .take(64)
+                .any(|w| w[..4] == [0, 0, 0, 1] && w[4] & 0x1f == 7);
+            info!(
+                mid,
+                after_ms = asked.elapsed().as_millis() as u64,
+                keyframe,
+                bytes = data.len(),
+                "first camera frame"
+            );
+        }
         let (Some(&id), Some(agent)) = (self.streams.get(mid), self.cameras.agent()) else {
             return;
         };
