@@ -185,7 +185,7 @@ impl Session {
 rtcp-fb-nack-pli=(boolean)true \
              ! capsfilter name=rtp \
              appsrc name=audio is-live=true format=time caps={audio_caps} \
-             ! queue \
+             ! queue leaky=downstream max-size-time=40000000 max-size-buffers=0 max-size-bytes=0 \
              ! rtpopuspay pt={AUDIO_PT} \
              ! application/x-rtp,media=audio,encoding-name=OPUS,payload={AUDIO_PT},clock-rate=48000 \
              ! capsfilter name=audiortp",
