@@ -35,6 +35,15 @@ pub async fn run(
             Ok(mut agent) => {
                 let connection = agent.connection.clone();
                 info!("guest agent connected");
+                // Detached however this ends, this task aborted included (the server detaches
+                // from the VM): what holds the connection lets it go, and QEMU takes the next.
+                let _attached = Attached {
+                    mouse: mouse.clone(),
+                    clipboard: clipboard.clone(),
+                    drives: drives.clone(),
+                    printers: printers.clone(),
+                    cameras: cameras.clone(),
+                };
                 if let Err(e) = mouse.attach(&connection).await {
                     warn!(error = %format!("{e:#}"), "guest agent pointer: the QEMU tablet instead");
                 }
@@ -59,11 +68,6 @@ pub async fn run(
                 }
                 drop(agent);
                 info!("guest agent gone");
-                clipboard.detach();
-                drives.detach();
-                printers.detach();
-                cameras.detach();
-                mouse.detach();
             }
             Err(e) => {
                 let e = format!("{e:#}");
@@ -77,5 +81,24 @@ pub async fn run(
                 tokio::time::sleep(RETRY).await;
             }
         }
+    }
+}
+
+/// What uses the agent's connection, detached from it when dropped.
+struct Attached {
+    mouse: AgentMouse,
+    clipboard: Arc<Clipboard>,
+    drives: Arc<Drives>,
+    printers: Arc<Printers>,
+    cameras: Arc<Cameras>,
+}
+
+impl Drop for Attached {
+    fn drop(&mut self) {
+        self.clipboard.detach();
+        self.drives.detach();
+        self.printers.detach();
+        self.cameras.detach();
+        self.mouse.detach();
     }
 }
