@@ -92,7 +92,8 @@ target/release/qemu-dbus-webrtc --listen 0.0.0.0:8090 --tls cert.pem key.pem
 
 A VM's page is `https://<host>:8090/vm/<uuid>/`; its name in place of the UUID (a libvirt
 domain, a Proxmox VM id or name) redirects there. The server attaches to a VM when its first
-client comes, and detaches a minute after the last one left. It serves in HTTPS only: it needs
+client comes, and detaches when the last one left (a minute after a client cut off, which may
+come back). It serves in HTTPS only: it needs
 a certificate and its key, for a test a self-signed one,
 `openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj /CN=localhost -keyout key.pem -out cert.pem`
 (the browser asks to accept it once).

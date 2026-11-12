@@ -19,8 +19,16 @@ libvirt, plain QEMU) starts and stops it.
   off, when `[libvirt] start` allows it), Proxmox VE (QMP sockets and VM configurations), and
   VMs given by hand. A VM's page is `/vm/<uuid>/`, its signalling `/vm/<uuid>/signal`; a name
   redirects to the UUID. The server attaches to a VM when its first client comes, after
-  checking the VM's UUID, and detaches a minute after the last one left: a VM nobody watches
-  costs nothing. The server does not otherwise manage the VMs.
+  checking the VM's UUID, and detaches when the last one left: five seconds after a clean
+  close (time to reload a page), a minute after a client cut off, which may come back; at once
+  when the VM stops, which it sees by asking it every second whether it runs. A VM nobody
+  watches costs nothing. Stopped, the server ends every session and detaches from every VM
+  before it exits. The server does not otherwise manage the VMs.
+- **Sessions' end:** the server always ends a session by closing the WebSocket cleanly, so that
+  a client takes a clean close for an end (a native client closes its windows) and a connection
+  lost without one for a failure to recover from. `Ended` says why when there is more to say:
+  another client took the session over, or the server stops (it may come back). A client
+  leaving closes cleanly too.
 - **QEMU attachment:** the D-Bus display (a libvirt bus, or peer to peer through QMP) for
   scanouts (DMA-BUF, `ScanoutDMABUF2`), cursor, keyboard, mouse, audio and clipboard.
 - **Video:** GStreamer, VA-API hardware encoding. The guest framebuffer is a linear DMA-BUF
@@ -77,8 +85,9 @@ hardware, and the royalty-free codecs cover it.
 One client uses the session at a time, as with RDP: its keyboard and pointer, clipboard,
 microphone, drives and printers go to the guest, and the guest's screen takes the size of its
 window. A new client takes the session over, and the last one's ends with a reason. Shadow
-clients (`shadow` in their hello) only watch and listen, as many as wanted; handing them the
-keyboard and pointer on request comes later.
+clients (`shadow` in their hello) only watch and listen, as many as wanted, and go when the user
+leaves (not when another takes the session over); handing them the keyboard and pointer on
+request comes later.
 
 The size follows the user's window: once a size has settled (300 ms), the server asks the guest
 for it (`SetUIInfo`, even and within 200 to 8192 pixels). A request sent while the guest boots

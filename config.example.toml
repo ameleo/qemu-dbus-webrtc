@@ -3,8 +3,8 @@
 # line's options override the file's.
 #
 # One server serves every VM of the host. A VM's page is https://<host>:<port>/vm/<uuid>/: the
-# server attaches to the VM when its first client comes, and detaches a minute after the last
-# one left.
+# server attaches to the VM when its first client comes, and detaches when the last one left (a
+# minute after a client cut off, which may come back).
 
 [listen]
 # The pages and their signalling. Default: 127.0.0.1:8090, this host only.
