@@ -474,7 +474,7 @@ async fn start_in(
                     warn!(console, error = %format!("{e:#}"), "not encoded");
                     copies.remove(&console);
                     if let Some(encoder) = encoders.remove(&console) {
-                        encoder.finish();
+                        tokio::task::spawn_blocking(move || encoder.finish());
                     }
                 }
             }
@@ -518,7 +518,7 @@ async fn start_in(
                 ) {
                     warn!(console, error = %format!("{e:#}"), "not encoded");
                     if let Some(encoder) = encoders.remove(&console) {
-                        encoder.finish();
+                        tokio::task::spawn_blocking(move || encoder.finish());
                     }
                 }
             }
@@ -565,7 +565,7 @@ async fn start_in(
                 ) {
                     warn!(console, error = %format!("{e:#}"), "not encoded");
                     if let Some(encoder) = encoders.remove(&console) {
-                        encoder.finish();
+                        tokio::task::spawn_blocking(move || encoder.finish());
                     }
                 }
             }
@@ -679,8 +679,14 @@ async fn start_in(
         }
     }
     stopped_tx.send_replace(true);
-    for (_, encoder) in encoders.drain() {
-        encoder.finish();
+    // Finishing an encoder waits for its stream's end, up to seconds: off the async threads,
+    // where it would hold the sessions just told the VM stopped; all at once.
+    let finished: Vec<_> = encoders
+        .drain()
+        .map(|(_, encoder)| tokio::task::spawn_blocking(move || encoder.finish()))
+        .collect();
+    for finished in finished {
+        let _ = finished.await;
     }
     drop(listeners);
     drop(audio);
