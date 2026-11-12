@@ -15,11 +15,11 @@ use crate::drives::Drives;
 use crate::input::AgentMouse;
 use crate::printers::Printers;
 
-/// How long before trying the agent again, when it went away.
+/// How long before trying the agent again, when it could not be reached.
 const RETRY: Duration = Duration::from_secs(3);
 
-/// Keep a connection to the guest agent: when the guest restarts, connect again and bring the
-/// drives and printers back. Runs until the program ends; without an agent device on the VM,
+/// Keep a connection to the guest agent: when the agent or the guest restarts, connect again
+/// once the guest opens the agent's port, and bring the drives and printers back. Runs until the program ends; without an agent device on the VM,
 /// there is no clipboard, no drives and no printers.
 pub async fn run(
     vm: zbus::Connection,
@@ -32,7 +32,8 @@ pub async fn run(
     loop {
         let host = |builder| printers.serve(drives.serve(clipboard.serve(builder)?)?);
         match agent::connect(&vm, host).await {
-            Ok(connection) => {
+            Ok(mut agent) => {
+                let connection = agent.connection.clone();
                 info!("guest agent connected");
                 if let Err(e) = mouse.attach(&connection).await {
                     warn!(error = %format!("{e:#}"), "guest agent pointer: the QEMU tablet instead");
@@ -46,9 +47,17 @@ pub async fn run(
                 if let Err(e) = cameras.attach(&connection).await {
                     warn!(error = %format!("{e:#}"), "guest agent cameras");
                 }
-                if let Err(e) = clipboard.follow(&connection).await {
-                    warn!(error = %format!("{e:#}"), "guest agent");
+                // Gone when its connection fails, or when the guest closes its port (the
+                // agent restarted): nothing fails on the connection then.
+                tokio::select! {
+                    result = clipboard.follow(&connection) => {
+                        if let Err(e) = result {
+                            warn!(error = %format!("{e:#}"), "guest agent");
+                        }
+                    }
+                    () = agent.closed() => info!("guest agent port closed"),
                 }
+                drop(agent);
                 info!("guest agent gone");
                 clipboard.detach();
                 drives.detach();
@@ -65,8 +74,8 @@ pub async fn run(
                     return;
                 }
                 warn!(error = %e, "guest agent not reachable");
+                tokio::time::sleep(RETRY).await;
             }
         }
-        tokio::time::sleep(RETRY).await;
     }
 }

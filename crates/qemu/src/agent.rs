@@ -13,6 +13,7 @@
 use std::os::unix::net::UnixStream as StdUnixStream;
 
 use anyhow::{Context, Result};
+use futures_util::StreamExt;
 use zbus::zvariant::OwnedFd;
 
 /// The name of the agent's character device (`-chardev dbus,name=...`).
@@ -45,6 +46,10 @@ trait Chardev {
     fn register(&self, stream: OwnedFd) -> zbus::Result<()>;
     #[zbus(property)]
     fn name(&self) -> zbus::Result<String>;
+    /// Whether the guest has the port open: the agent opens it when it starts, and closes it
+    /// when it stops.
+    #[zbus(property, name = "FEOpened")]
+    fn fe_opened(&self) -> zbus::Result<bool>;
 }
 
 #[zbus::proxy(
@@ -264,16 +269,54 @@ pub mod camera {
     pub type Control = (u8, u8, u8, i32, i32, i32, i32, u8, i32);
 }
 
+/// A connection to the guest agent, and the guest's side of its port.
+pub struct Agent {
+    pub connection: zbus::Connection,
+    /// The changes of the port's properties, followed from before the handshake.
+    port: zbus::fdo::PropertiesChangedStream,
+}
+
+impl Agent {
+    /// Wait until the guest closes the agent's port: the agent stopped. Its connection then
+    /// is over, though QEMU keeps our end of the stream open and nothing fails on it: a new
+    /// agent waits for a new handshake.
+    pub async fn closed(&mut self) {
+        wait_port(&mut self.port, false).await;
+    }
+}
+
+/// Wait until the port's `FEOpened` changes to `open`, or the VM's connection ends.
+async fn wait_port(port: &mut zbus::fdo::PropertiesChangedStream, open: bool) {
+    while let Some(signal) = port.next().await {
+        let Ok(args) = signal.args() else { continue };
+        if let Some(value) = args.changed_properties().get("FEOpened")
+            && bool::try_from(value).ok() == Some(open)
+        {
+            return;
+        }
+    }
+}
+
 /// Connect to the guest agent. `host` adds our interfaces (the calls the guest makes) to the
-/// connection, at [`HOST_PATH`]. Returns once the agent answered the handshake, so not before
-/// the guest runs it.
+/// connection, at [`HOST_PATH`]. Returns once the guest has opened the agent's port and the
+/// agent answered the handshake, so not before the guest runs it.
 pub async fn connect(
     vm: &zbus::Connection,
     host: impl FnOnce(
         zbus::connection::Builder<'static>,
     ) -> zbus::Result<zbus::connection::Builder<'static>>,
-) -> Result<zbus::Connection> {
+) -> Result<Agent> {
     let chardev = find_chardev(vm).await?;
+    let mut port = zbus::fdo::PropertiesProxy::builder(vm)
+        .destination("org.qemu")?
+        .path(chardev.inner().path().to_owned())?
+        .build()
+        .await?
+        .receive_properties_changed()
+        .await?;
+    if !chardev.fe_opened().await? {
+        wait_port(&mut port, true).await;
+    }
     let (ours, theirs) = StdUnixStream::pair()?;
     ours.set_nonblocking(true)?;
     let stream = tokio::net::UnixStream::from_std(ours)?;
@@ -287,7 +330,8 @@ pub async fn connect(
     let theirs: std::os::fd::OwnedFd = theirs.into();
     let (connection, registered) = tokio::join!(connection, chardev.register(theirs.into()));
     registered.context("handing the agent's character device a stream")?;
-    connection.context("D-Bus handshake with the guest agent")
+    let connection = connection.context("D-Bus handshake with the guest agent")?;
+    Ok(Agent { connection, port })
 }
 
 /// The character device of the agent: QEMU names its object after the device's label, so
@@ -305,7 +349,12 @@ async fn find_chardev(vm: &zbus::Connection) -> Result<ChardevProxy<'static>> {
         {
             continue;
         }
-        let chardev = ChardevProxy::builder(vm).path(path)?.build().await?;
+        // Not cached: whether the port is open is asked when needed, never remembered.
+        let chardev = ChardevProxy::builder(vm)
+            .path(path)?
+            .cache_properties(zbus::proxy::CacheProperties::No)
+            .build()
+            .await?;
         if chardev.name().await? == PORT_NAME {
             return Ok(chardev);
         }
