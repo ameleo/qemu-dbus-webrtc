@@ -52,6 +52,11 @@ const OUTPUT_WINDOW: Duration = Duration::from_secs(1);
 const MAX_FPS: u32 = 30;
 const FRAME_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / MAX_FPS as u64);
 
+/// How often the VM is asked whether it still runs, and how long it has to answer: QEMU's
+/// listeners do not say when it goes.
+const ALIVE_INTERVAL: Duration = Duration::from_secs(2);
+const ALIVE_TIME: Duration = Duration::from_secs(5);
+
 /// How often the rates of each console are reported.
 const RATE_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -257,6 +262,12 @@ async fn start_in(
         depths: Default::default(),
     };
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
+    // Whether the VM still answers: its listeners do not say when QEMU goes.
+    let peer = zbus::fdo::PeerProxy::builder(&vm_connection)
+        .destination("org.qemu")?
+        .path("/org/qemu/Display1/VM")?
+        .build()
+        .await?;
     let display_task = tokio::spawn(
         async move {
             let mut stop = stop_rx;
@@ -295,6 +306,8 @@ async fn start_in(
     let mut updates: HashMap<u32, u32> = HashMap::new();
     let mut since = Instant::now();
     let mut report = tokio::time::interval(RATE_INTERVAL);
+    let mut alive = tokio::time::interval(ALIVE_INTERVAL);
+    alive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut still = tokio::time::interval(STILL_FRAME_INTERVAL);
     still.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -398,6 +411,14 @@ async fn start_in(
                 continue;
             }
             _ = &mut stop => break,
+            _ = alive.tick() => {
+                match tokio::time::timeout(ALIVE_TIME, peer.ping()).await {
+                    Ok(Ok(())) => continue,
+                    Ok(Err(e)) => warn!(error = %e, "the VM stopped"),
+                    Err(_) => warn!("the VM stopped answering"),
+                }
+                break;
+            }
         };
         let Some(event) = event else {
             warn!("the display listeners are gone");
