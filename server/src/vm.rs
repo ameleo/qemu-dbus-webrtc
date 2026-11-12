@@ -688,6 +688,11 @@ async fn start_in(
     }
     stopped_tx.send_replace(true);
     stopped.notify_one();
+    // What hangs on the VM goes first: its listeners, its sound, and the layout task, which
+    // would ask a VM gone for its screen sizes for as long as it is held.
+    drop(listeners);
+    drop(audio);
+    drop(layout);
     // Finishing an encoder waits for its stream's end, up to seconds: off the async threads,
     // where it would hold the sessions just told the VM stopped; all at once.
     let finished: Vec<_> = encoders
@@ -697,8 +702,6 @@ async fn start_in(
     for finished in finished {
         let _ = finished.await;
     }
-    drop(listeners);
-    drop(audio);
 
         }
         .instrument(span.clone()),
