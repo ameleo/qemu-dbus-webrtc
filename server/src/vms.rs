@@ -27,6 +27,8 @@ const START_TIME: Duration = Duration::from_secs(15);
 /// A VM attached, and who uses it.
 struct Attached {
     vm: Vm,
+    /// Wakes the reaper: the VM stopped, or its last client left one that did.
+    reap: Arc<tokio::sync::Notify>,
     clients: AtomicUsize,
     /// When its last client left; `None` while it has some.
     idle_since: std::sync::Mutex<Option<Instant>>,
@@ -53,6 +55,10 @@ impl Drop for Client {
     fn drop(&mut self) {
         if self.attached.clients.fetch_sub(1, Ordering::AcqRel) == 1 {
             *self.attached.idle_since.lock().unwrap() = Some(Instant::now());
+            // A VM that stopped goes as soon as its clients have.
+            if self.attached.vm.ended() {
+                self.attached.reap.notify_one();
+            }
         }
     }
 }
@@ -65,6 +71,8 @@ pub struct Vms {
     attached: tokio::sync::Mutex<HashMap<String, Arc<Attached>>>,
     /// Turns true when the server stops: every session ends.
     stopping: tokio::sync::watch::Sender<bool>,
+    /// Wakes the reaper before its time.
+    reap: Arc<tokio::sync::Notify>,
 }
 
 impl Vms {
@@ -74,8 +82,9 @@ impl Vms {
             config,
             attached: Default::default(),
             stopping: tokio::sync::watch::Sender::new(false),
+            reap: Default::default(),
         });
-        tokio::spawn(reap(Arc::downgrade(&vms)));
+        tokio::spawn(reap(Arc::downgrade(&vms), vms.reap.clone()));
         vms
     }
 
@@ -120,7 +129,7 @@ impl Vms {
                 let Some(how) = self.attach_to(&uuid).await? else {
                     return Ok(None);
                 };
-                let vm = match vm::start(&how, &uuid, &self.config).await {
+                let vm = match vm::start(&how, &uuid, &self.config, self.reap.clone()).await {
                     Ok(vm) => vm,
                     Err(e) => {
                         // What the provider remembered of it may be stale.
@@ -130,6 +139,7 @@ impl Vms {
                 };
                 let entry = Arc::new(Attached {
                     vm,
+                    reap: self.reap.clone(),
                     clients: AtomicUsize::new(0),
                     idle_since: Default::default(),
                 });
@@ -185,10 +195,13 @@ pub fn normalize(uuid: &str) -> Option<String> {
 
 /// Detach from the VMs without clients for `DETACH_AFTER`, and from the VMs gone, until the
 /// server ends.
-async fn reap(vms: std::sync::Weak<Vms>) {
+async fn reap(vms: std::sync::Weak<Vms>, woken: Arc<tokio::sync::Notify>) {
     let mut interval = tokio::time::interval(REAP_INTERVAL);
     loop {
-        interval.tick().await;
+        tokio::select! {
+            _ = interval.tick() => {}
+            () = woken.notified() => {}
+        }
         let Some(vms) = vms.upgrade() else { return };
         let mut attached = vms.attached.lock().await;
         attached.retain(|uuid, entry| {

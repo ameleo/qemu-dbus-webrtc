@@ -4,6 +4,7 @@
 //! watch it, its sound, its guest agent, and what its viewers share.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -120,7 +121,7 @@ pub struct Vm {
 impl Vm {
     /// The VM is gone (QEMU stopped), or its display loop ended.
     pub fn ended(&self) -> bool {
-        self.display.is_finished()
+        *self.shared.vm_stopped.borrow() || self.display.is_finished()
     }
 }
 
@@ -135,9 +136,15 @@ impl Drop for Vm {
 
 /// Attach to the VM behind `attach`, which must be `uuid`, and encode it as `config` says.
 /// What it logs, its tasks included, names the VM.
-pub async fn start(attach: &Attach, uuid: &str, config: &VmConfig) -> Result<Vm> {
+/// `stopped` is notified when the VM stops.
+pub async fn start(
+    attach: &Attach,
+    uuid: &str,
+    config: &VmConfig,
+    stopped: Arc<tokio::sync::Notify>,
+) -> Result<Vm> {
     let span = info_span!("vm", name = tracing::field::Empty);
-    start_in(attach, uuid, config, span.clone())
+    start_in(attach, uuid, config, stopped, span.clone())
         .instrument(span)
         .await
 }
@@ -146,6 +153,7 @@ async fn start_in(
     attach: &Attach,
     uuid: &str,
     config: &VmConfig,
+    stopped: Arc<tokio::sync::Notify>,
     span: tracing::Span,
 ) -> Result<Vm> {
     let vm_connection = display::attach(attach).await?;
@@ -679,6 +687,7 @@ async fn start_in(
         }
     }
     stopped_tx.send_replace(true);
+    stopped.notify_one();
     // Finishing an encoder waits for its stream's end, up to seconds: off the async threads,
     // where it would hold the sessions just told the VM stopped; all at once.
     let finished: Vec<_> = encoders
