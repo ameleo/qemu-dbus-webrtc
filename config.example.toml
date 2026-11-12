@@ -7,12 +7,12 @@
 # minute after a client cut off, which may come back).
 
 [auth]
-# Who may open a VM's console: "accounts" (the default), an account of the VM's, set with
-# `qemu-dbus-webrtc password <vm> <user>`; "none", anyone who reaches the server (a test).
-method = "accounts"
-# Where the accounts of the VMs that are not libvirt domains are (a libvirt domain keeps its
-# own in its definition). Readable by root only.
-# accounts = "/etc/qemu-dbus-webrtc/accounts.toml"
+# Who may open the consoles: "password" (the default), the user and password below, checked
+# before the server starts a VM or attaches to it; "none", anyone who reaches the server (a
+# test). The password is an Argon2id hash, never in clear: `qemu-dbus-webrtc hash-password`.
+method = "password"
+user = "admin"
+password = "$argon2id$v=19$m=19456,t=2,p=1$..."
 
 [listen]
 # The pages and their signalling. Default: 127.0.0.1:8090, this host only.

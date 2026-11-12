@@ -50,7 +50,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if tools::run(&args).await? {
+    if tools::run(&args)? {
         return Ok(());
     }
     let mut config = config::parse_args()?;
@@ -69,14 +69,15 @@ async fn main() -> Result<()> {
     gpus::check(&found, &vm.settings)?;
 
     let tls = config.tls()?;
+    let auth = config.auth()?;
     let vms = vms::Vms::new(config.providers, config.vm);
     info!(providers = ?vms.providers(), "finding the VMs");
-    if matches!(config.auth, config::Auth::None) && !config.listen.ip().is_loopback() {
+    if matches!(auth, config::Auth::None) && !config.listen.ip().is_loopback() {
         warn!(listen = %config.listen, "[auth] method is none: anyone who reaches this address sees the VMs");
     }
     let served = vms.clone();
     tokio::spawn(async move {
-        if let Err(e) = web::serve(config.listen, tls, served, config.auth).await {
+        if let Err(e) = web::serve(config.listen, tls, served, auth).await {
             warn!(error = %format!("{e:#}"), "the viewer pages are down");
         }
     });

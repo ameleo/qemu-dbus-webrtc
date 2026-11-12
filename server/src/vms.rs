@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, bail};
 use tracing::{info, warn};
 
-use crate::access::Accounts;
 use crate::config::VmConfig;
 use crate::providers::{Found, Providers};
 use crate::vm::{self, Vm};
@@ -121,15 +120,6 @@ impl Vms {
         let attached: Vec<_> = self.attached.lock().await.drain().collect();
         let shut_down = attached.iter().map(|(_, entry)| entry.vm.shut_down());
         futures_util::future::join_all(shut_down).await;
-    }
-
-    /// The accounts of the VM `uuid`: kept with the VM by its manager (libvirt), or in the
-    /// server's accounts `file` for the other VMs.
-    pub async fn accounts(&self, uuid: &str, file: &std::path::Path) -> Result<Accounts> {
-        match self.providers.accounts(uuid).await? {
-            Some(accounts) => Ok(accounts),
-            None => Accounts::read(file),
-        }
     }
 
     /// Turns true when the server stops.

@@ -17,7 +17,6 @@ use futures_util::future::BoxFuture;
 use qdw_qemu::display::{self, Attach, VmProxy};
 use tracing::{debug, warn};
 
-use crate::access::Accounts;
 use crate::libvirt::Libvirt;
 
 /// How long the UUID of a VM may take to read, when a provider does not know it.
@@ -45,21 +44,6 @@ pub trait Provider: Send + Sync {
     fn start<'a>(&'a self, uuid: &'a str) -> BoxFuture<'a, Result<()>> {
         let _ = uuid;
         async move { bail!("{} does not start VMs", self.name()) }.boxed()
-    }
-    /// The accounts of the VM `uuid`, if this VM manager keeps them with the VM: `None` when it
-    /// does not, and the server's accounts file holds them.
-    fn accounts<'a>(&'a self, uuid: &'a str) -> BoxFuture<'a, Result<Option<Accounts>>> {
-        let _ = uuid;
-        async move { Ok(None) }.boxed()
-    }
-    /// Keep the accounts of the VM `uuid` with it.
-    fn set_accounts<'a>(
-        &'a self,
-        uuid: &'a str,
-        accounts: &'a Accounts,
-    ) -> BoxFuture<'a, Result<()>> {
-        let _ = (uuid, accounts);
-        async move { bail!("{} does not keep accounts", self.name()) }.boxed()
     }
 }
 
@@ -286,41 +270,6 @@ impl Providers {
             }
         }
         Ok(None)
-    }
-
-    /// The provider of the VM `uuid`, when it knows the VM's UUID without attaching.
-    async fn provider_of(&self, uuid: &str) -> Result<Option<&dyn Provider>> {
-        for provider in self.all() {
-            let candidates = provider.candidates().await?;
-            if candidates.iter().any(|c| {
-                c.uuid
-                    .as_deref()
-                    .is_some_and(|u| u.eq_ignore_ascii_case(uuid))
-            }) {
-                return Ok(Some(provider));
-            }
-        }
-        Ok(None)
-    }
-
-    /// The accounts of the VM `uuid`, if its manager keeps them with the VM; `None` when the
-    /// server's accounts file holds them.
-    pub async fn accounts(&self, uuid: &str) -> Result<Option<Accounts>> {
-        match self.provider_of(uuid).await? {
-            Some(provider) => provider.accounts(uuid).await,
-            None => Ok(None),
-        }
-    }
-
-    /// Keep the accounts of the VM `uuid` with it, if its manager does: whether it did.
-    pub async fn set_accounts(&self, uuid: &str, accounts: &Accounts) -> Result<bool> {
-        match self.provider_of(uuid).await? {
-            Some(provider) if provider.accounts(uuid).await?.is_some() => {
-                provider.set_accounts(uuid, accounts).await?;
-                Ok(true)
-            }
-            _ => Ok(false),
-        }
     }
 
     /// The UUID of the VM named `name`, if a provider runs one by that name; an error when

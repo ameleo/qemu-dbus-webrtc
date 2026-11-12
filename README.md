@@ -6,7 +6,7 @@ client, with keyboard, mouse and sound, without any software in the guest; an op
 agent adds the clipboard, files, drives and printers.
 
 Status: **early development**. It works day to day on its developers' setup (Windows 11 guest,
-Intel Arc A380). A VM's console takes an account of the VM's; single sign-on (OIDC) and the
+Intel Arc A380). The consoles take the server's user and password; single sign-on and the
 automatic logon to Windows are to come. Design discussions and contributions are welcome, see
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -71,7 +71,7 @@ Clients: the page served by the program itself; a native client built on libwebr
 works. All messages are Protocol Buffers ([qdw.proto](crates/protocol/proto/qdw.proto)), so
 other clients can be written from it.
 
-Coming next: automatic logon (with the account checked by Windows), and single sign-on (OIDC).
+Coming next: automatic logon to the guest, and single sign-on (OpenBao, OIDC).
 
 ## Running it
 
@@ -98,12 +98,10 @@ a certificate and its key, for a test a self-signed one,
 `openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj /CN=localhost -keyout key.pem -out cert.pem`
 (the browser asks to accept it once).
 
-A VM's console takes an account of the VM's: a user and a password, asked by the page.
-`qemu-dbus-webrtc password <vm> <user>` sets one (asking for the password; `--shadow-only` for
-an account that only watches, `--remove` to remove it). A libvirt domain keeps its accounts in
-its definition (`<metadata>`), as Argon2id hashes, never the passwords; the other VMs, in the
-server's accounts file (`/etc/qemu-dbus-webrtc/accounts.toml`, root's only). The account is
-checked before the server starts the VM or attaches to it.
+The consoles take the server's user and password, asked by the page, and checked before the
+server starts a VM or attaches to it: `[auth] user` and `password` in the configuration, the
+password as an Argon2id hash, never in clear, which `qemu-dbus-webrtc hash-password` makes.
+They open the server's door; the guest's own logon still guards the guest.
 
 The settings can live in a TOML file, one per host, `qemu-dbus-webrtc --config <file>`:
 [config.example.toml](config.example.toml) describes them all. The command line's options

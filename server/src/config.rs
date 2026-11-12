@@ -33,9 +33,6 @@ const MIN_BITRATE: u32 = 4_000;
 const START_BITRATE: u32 = 10_000;
 const MAX_BITRATE: u32 = 30_000;
 
-/// The accounts file, by default.
-pub const DEFAULT_ACCOUNTS: &str = "/etc/qemu-dbus-webrtc/accounts.toml";
-
 /// Where libvirt puts the D-Bus bus of a domain's display.
 const LIBVIRT_DBUS_DIR: &str = "/run/libvirt/qemu/dbus";
 /// Where Proxmox VE puts the VMs' QMP sockets and their configurations.
@@ -60,10 +57,12 @@ struct File {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct AuthFile {
-    /// "accounts" (the default): an account of the VM's; "none": anyone who reaches the server.
+    /// "password" (the default): the server's user and password; "none": anyone who reaches
+    /// the server.
     method: Option<String>,
-    /// The accounts file.
-    accounts: Option<PathBuf>,
+    user: Option<String>,
+    /// Its Argon2id hash: `qemu-dbus-webrtc hash-password`.
+    password: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -134,13 +133,21 @@ pub struct VmConfig {
 /// Who may open a VM's console.
 #[derive(Debug, Clone)]
 pub enum Auth {
-    /// An account of the VM's, in this file (see `access.rs`).
-    Accounts(PathBuf),
+    /// The server's user and password (see `access.rs`).
+    Password(crate::access::Password),
     /// Anyone who reaches the server: for a test, on a trusted network.
     None,
 }
 
 impl Config {
+    /// Who may open a VM's console.
+    pub fn auth(&self) -> Result<Auth> {
+        self.auth.clone().context(
+            "[auth] takes a user and its password's hash (`qemu-dbus-webrtc hash-password`), \
+             or method = \"none\" for a test",
+        )
+    }
+
     /// The certificate to serve with.
     pub fn tls(&self) -> Result<web::Tls> {
         // Plain HTTP would carry the session in clear.
@@ -152,7 +159,8 @@ impl Config {
 }
 
 pub struct Config {
-    pub auth: Auth,
+    /// Who may open a VM's console: required to serve (see `Config::auth`).
+    auth: Option<Auth>,
     pub vm: VmConfig,
     /// The address of the viewer pages and their signalling.
     pub listen: SocketAddr,
@@ -289,14 +297,16 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
         None => DEFAULT_LISTEN.parse()?,
     };
 
-    let accounts = file
-        .auth
-        .accounts
-        .unwrap_or_else(|| DEFAULT_ACCOUNTS.into());
     let auth = match file.auth.method.as_deref() {
-        None | Some("accounts") => Auth::Accounts(accounts),
-        Some("none") => Auth::None,
-        Some(other) => bail!("[auth] method {other}: accounts or none"),
+        None | Some("password") => match (file.auth.user, file.auth.password) {
+            (Some(user), Some(hash)) => Some(Auth::Password(
+                crate::access::Password::new(user, hash).context("in [auth]")?,
+            )),
+            (None, None) => None,
+            _ => bail!("[auth] takes both a user and its password's hash"),
+        },
+        Some("none") => Some(Auth::None),
+        Some(other) => bail!("[auth] method {other}: password or none"),
     };
 
     Ok(Config {

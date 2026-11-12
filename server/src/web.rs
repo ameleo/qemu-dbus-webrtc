@@ -274,10 +274,10 @@ async fn open(
         Ok(Err(e)) => return Err(e),
         Ok(Ok(Some(_))) | Err(_) => anyhow::bail!("no hello"),
     };
-    let mut shadow = hello.shadow;
+    let shadow = hello.shadow;
     match auth {
         Auth::None => {}
-        Auth::Accounts(path) => {
+        Auth::Password(expected) => {
             // No account given: the client asks for one, with no delay (nothing is guessed).
             if hello.user.is_empty() {
                 let message = ACCOUNT_REQUIRED.to_string();
@@ -289,13 +289,12 @@ async fn open(
                 let _ = socket.send(WsMessage::Close(None)).await;
                 return Ok(());
             }
-            let accounts = vms.accounts(uuid, path).await?;
-            let (vm, user, password) =
-                (uuid.to_owned(), hello.user.clone(), hello.password.clone());
+            let (expected, user, password) =
+                (expected.clone(), hello.user.clone(), hello.password.clone());
             // Argon2 takes its time: off the async threads.
             let granted =
-                tokio::task::spawn_blocking(move || accounts.check(&vm, &user, &password)).await?;
-            let Some(granted) = granted else {
+                tokio::task::spawn_blocking(move || expected.check(&user, &password)).await?;
+            if !granted {
                 info!(uuid, user = hello.user, "wrong user or password");
                 tokio::time::sleep(REFUSAL_DELAY).await;
                 let message = "wrong user or password".to_string();
@@ -306,14 +305,8 @@ async fn open(
                 .await?;
                 let _ = socket.send(WsMessage::Close(None)).await;
                 return Ok(());
-            };
-            info!(
-                uuid,
-                user = granted.user,
-                shadow_only = granted.shadow_only,
-                "logged in"
-            );
-            shadow |= granted.shadow_only;
+            }
+            info!(uuid, user = hello.user, "logged in");
         }
     }
     // The VM now: started if it is off and its manager may, attached if need be.
