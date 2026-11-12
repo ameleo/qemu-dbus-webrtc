@@ -69,8 +69,9 @@ message Hello {
   // Watch only: a shadow client sees and hears the guest, and nothing more. Without it, the
   // client is the user of the session: its keyboard and pointer, clipboard, microphone, drives
   // and printers go to the guest, and the guest takes the size of its window. There is one user
-  // at a time: a new one takes the session over, and the server ends the last one's with an
-  // error. Shadow clients come and go as they like.
+  // at a time: a new one takes the session over, and the server ends the last one's
+  // (Ended TAKEN_OVER). Shadow clients watch the user: they stay when another user takes the
+  // session over, and their sessions end (a clean close) when the user leaves.
   bool shadow = 2;
 }
 

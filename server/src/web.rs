@@ -132,6 +132,9 @@ pub struct User {
     /// Its id, and how to end its session when another takes it over.
     current: std::sync::Mutex<Option<(u64, oneshot::Sender<()>)>>,
     next: std::sync::atomic::AtomicU64,
+    /// Counts the users that left (not those taken over): the shadow clients, who watch the
+    /// user, go with it.
+    left: watch::Sender<u64>,
 }
 
 impl User {
@@ -152,7 +155,13 @@ impl User {
         let mut current = self.current.lock().unwrap();
         if current.as_ref().is_some_and(|(user, _)| *user == id) {
             *current = None;
+            self.left.send_modify(|left| *left += 1);
         }
+    }
+
+    /// Changes when the user leaves: the shadow sessions end.
+    fn left(&self) -> watch::Receiver<u64> {
+        self.left.subscribe()
     }
 }
 
@@ -346,6 +355,8 @@ async fn viewer(
     // goes, seconds later. The session ends as soon as the display loop sees the VM stop,
     // whatever it waits on.
     let mut vm_stopped = shared.vm_stopped.clone();
+    // A shadow client watches the user: it goes when the user does.
+    let mut user_left = user_id.is_none().then(|| shared.user.left());
     let ended = tokio::select! {
         ended = run(
             &mut socket,
@@ -365,6 +376,17 @@ async fn viewer(
         ) => ended,
         true = async { vm_stopped.wait_for(|stopped| *stopped).await.is_ok() } => {
             info!("the VM stopped: the session ends");
+            Ok(())
+        }
+        () = async {
+            match &mut user_left {
+                Some(left) => {
+                    let _ = left.changed().await;
+                }
+                None => std::future::pending().await,
+            }
+        } => {
+            info!("the user left: the shadow session ends");
             Ok(())
         }
     };
