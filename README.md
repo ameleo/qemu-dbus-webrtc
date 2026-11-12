@@ -56,12 +56,15 @@ With the optional Ameleo guest agent in a Windows guest:
   (native client).
 - **Printers:** the client's printers shown in the guest, with their driver's options and
   settings dialog; jobs print on the client (native client, Windows).
+- **Cameras:** the client's cameras shown in the guest, with their controls (brightness,
+  focus, zoom...); a camera streams, in H.264 as the client encodes it, only while a guest
+  application uses it (browser and native client).
 
 Clients: the page served by the program itself; a native client built on libwebrtc is in the
 works. All messages are Protocol Buffers ([qdw.proto](crates/protocol/proto/qdw.proto)), so
 other clients can be written from it.
 
-Coming next: several monitors, the camera, automatic logon, and authentication.
+Coming next: several monitors, automatic logon, and authentication.
 
 ## Running it
 

@@ -133,6 +133,7 @@ Only channels with no patent listed in Microsoft's Open Specifications patent ma
 | Clipboard | project format, modelled on MS-RDPECLIP | `clipboard` | text, images (HTTPS) | full, files later |
 | Drives | project format, modelled on MS-RDPEFS | `drive` | no | full |
 | Printers | project format, modelled on MS-RDPEPC and MS-RDPEXPS | `printer` | no | full |
+| Cameras | project format, modelled on MS-RDPECAM; video on WebRTC tracks | `camera` | yes | full |
 | Monitor layout, resize | MS-RDPEDISP | `disp` | yes | yes |
 | Smart cards | MS-RDPESC | `rdpdr` | no | yes |
 | USB | MS-RDPEUSB | `urbdrc` | no | yes |
@@ -169,6 +170,15 @@ OpenXPS with its PrintTicket inside, for the client's own driver, sent a window 
 of the client's acknowledgements; the guest learns whether the client could print it. The
 driver's own settings dialog opens on the client, and the guest keeps what the user chose
 there. Capabilities, tickets and pieces of a job go in fragments, as drive reads do.
+
+Cameras follow RDP's camera redirection: the user's client announces its cameras, with their
+H.264 formats and controls (numbered as in MS-RDPECAM), and the Ameleo guest agent shows each in
+the guest. The pictures themselves go as WebRTC video: the offer keeps four receive-only H.264
+tracks for the cameras, which the client sets to send when it answers; when a guest application
+opens a camera, the server names the track and the format, and relays the H.264 as it comes,
+with no transcoding. The client keeps the camera's resolution from the first frame (WebRTC's
+default lowers it while its bandwidth estimate ramps up, which the guest's decoder, set for the
+format, refuses).
 
 Only the channel crates of IronRDP are used: `ironrdp-displaycontrol` (and `ironrdp-rdpeusb`
 later), with their base crates. They do no I/O:
