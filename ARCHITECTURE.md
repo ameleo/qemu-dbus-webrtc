@@ -172,7 +172,7 @@ The clipboard follows RDP's model: whoever copied last owns it and announces the
 and the data move only when someone pastes. In the guest, the Ameleo guest agent holds the
 Windows clipboard. A browser page cannot watch the local clipboard: it reads it when it gets the
 focus, and offers it to the guest if it changed; and browsers give the clipboard only to pages
-served in HTTPS (`--tls`) or from localhost.
+served in HTTPS, which the server always is.
 
 Drives follow RDP's drive redirection: a client announces its drives, the Ameleo guest agent
 mounts each on a drive letter (with Dokany), and every file operation of a guest application

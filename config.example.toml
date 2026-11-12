@@ -14,7 +14,8 @@ domain = "daas-win-dbus"
 [listen]
 # The viewer page and its signalling. Default: 127.0.0.1:8090, this host only.
 address = "0.0.0.0:8090"
-# HTTPS, with both (browsers give the microphone, the camera and the clipboard only in HTTPS).
+# Required: the page is served in HTTPS only (plain HTTP would carry the session in clear, and
+# browsers give the microphone, the camera and the clipboard only in HTTPS).
 certificate = "/etc/qemu-dbus-webrtc/tls/cert.pem"
 key = "/etc/qemu-dbus-webrtc/tls/key.pem"
 

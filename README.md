@@ -39,7 +39,9 @@ Without anything in the guest:
 - **Sound** (Opus) and the client's **microphone**, open only while an application in the guest
   records.
 - **Pause:** a hidden window gets no video, and costs no encoding; the sound goes on.
-- **HTTPS** (`--tls`): browsers give the clipboard to pages served in HTTPS only.
+- **HTTPS only:** the page and its signalling are never served in plain HTTP, which would carry
+  the session in clear; browsers also give the clipboard, the microphone and the camera to pages
+  served in HTTPS only.
 
 | Codec | Option | Chroma | Royalties | Best for | Decoded by |
 |---|---|---|---|---|---|
@@ -83,15 +85,18 @@ libvirt runs for it, or its QMP socket (peer to peer):
 
 ```
 cargo build --release
-target/release/qemu-dbus-webrtc --domain <vm> --listen 127.0.0.1:8090
+target/release/qemu-dbus-webrtc --domain <vm> --listen 127.0.0.1:8090 --tls cert.pem key.pem
 ```
 
-and open `http://127.0.0.1:8090/`. The settings can live in a TOML file,
+and open `https://127.0.0.1:8090/`. It serves in HTTPS only: it needs a certificate and its key,
+for a test a self-signed one,
+`openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj /CN=localhost -keyout key.pem -out cert.pem`
+(the browser asks to accept it once). The settings can live in a TOML file,
 `qemu-dbus-webrtc --config <vm>.toml`, one per VM: [config.example.toml](config.example.toml)
 describes them all. The command line's options override the file's: `--domain <name>`,
 `--dbus <address>` or `--qmp <socket>`, `--codec av1|vp9|hevc`, `--chroma 420|444`,
 `--software`, `--bitrate <max kbit/s>`, `--listen <address:port>`,
-`--tls <certificate.pem> <key.pem>`, `--record <path prefix>` (to keep each screen's stream in a
+`--tls <certificate.pem> <key.pem>` (required, unless in the file), `--record <path prefix>` (to keep each screen's stream in a
 file). `qemu-dbus-webrtc --codecs` lists what the host encodes.
 
 ## Goals

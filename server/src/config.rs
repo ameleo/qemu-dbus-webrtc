@@ -17,7 +17,7 @@ pub const USAGE: &str = "usage: qemu-dbus-webrtc [--config <file.toml>] \
                          (--qmp <QMP socket> | --dbus <D-Bus address> | --domain <libvirt domain>) \
                          [--codec av1|vp9|hevc] [--chroma 420|444] [--software] [--bitrate <max kbit/s>] \
                          [--record <path prefix>] [--listen <address:port>] \
-                         [--tls <certificate.pem> <key.pem>]\n       \
+                         --tls <certificate.pem> <key.pem>\n       \
                          qemu-dbus-webrtc --codecs   (what the GPUs encode)";
 
 /// Where the viewer page is served by default: this host only, since there is no
@@ -96,8 +96,8 @@ pub struct Args {
     pub record: Option<String>,
     /// The address of the viewer page and its signalling.
     pub listen: SocketAddr,
-    /// Serve in HTTPS.
-    pub tls: Option<web::Tls>,
+    /// The certificate of the page and its signalling, always in HTTPS.
+    pub tls: web::Tls,
 }
 
 /// The settings from the configuration file, if `--config` names one, then from the other
@@ -187,9 +187,12 @@ fn parse(args: Vec<String>) -> Result<Args> {
     let bitrates = session::Bitrates { min, start, max };
 
     let tls = match (listen.certificate, listen.key) {
-        (Some(certificate), Some(key)) => Some(web::Tls { certificate, key }),
-        (None, None) => None,
-        _ => bail!("HTTPS needs both a certificate and a key"),
+        (Some(certificate), Some(key)) => web::Tls { certificate, key },
+        // Plain HTTP would carry the session in clear.
+        _ => bail!(
+            "a certificate and its key are required, the page being served in HTTPS only: \
+             certificate and key in [listen], or --tls <certificate.pem> <key.pem>"
+        ),
     };
     let listen = match listen.address {
         Some(address) => address,
@@ -269,7 +272,8 @@ mod tests {
         let path = dir.join("vm.toml");
         std::fs::write(
             &path,
-            "[vm]\nqmp = \"/run/vm.qmp\"\n[video]\ncodec = \"hevc\"\n[bitrate]\nmax = 20000\n",
+            "[vm]\nqmp = \"/run/vm.qmp\"\n[listen]\ncertificate = \"c.pem\"\nkey = \"k.pem\"\n\
+             [video]\ncodec = \"hevc\"\n[bitrate]\nmax = 20000\n",
         )
         .unwrap();
         let config = path.to_str().unwrap();
@@ -284,13 +288,19 @@ mod tests {
     }
 
     #[test]
+    fn https_only() {
+        let error = parse(args("--qmp /q")).err().unwrap();
+        assert!(error.to_string().contains("HTTPS only"), "{error}");
+    }
+
+    #[test]
     fn bitrates_stay_in_order() {
-        let a = parse(args("--qmp /q --bitrate 2000")).unwrap();
+        let a = parse(args("--qmp /q --tls c.pem k.pem --bitrate 2000")).unwrap();
         assert_eq!(
             (a.bitrates.min, a.bitrates.start, a.bitrates.max),
             (4000, 4000, 4000)
         );
-        let a = parse(args("--qmp /q")).unwrap();
+        let a = parse(args("--qmp /q --tls c.pem k.pem")).unwrap();
         assert_eq!(
             (a.bitrates.min, a.bitrates.start, a.bitrates.max),
             (4000, 10_000, 30_000)

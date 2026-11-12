@@ -159,37 +159,28 @@ pub struct Tls {
     pub key: PathBuf,
 }
 
-/// Serve the page and the signalling on `listen` until the program ends, in HTTPS with `tls`.
-/// Browsers give the clipboard to pages served in HTTPS (or from localhost) only.
-pub async fn serve(listen: SocketAddr, tls: Option<Tls>, shared: Shared) -> Result<()> {
+/// Serve the page and the signalling on `listen` until the program ends, in HTTPS with `tls`:
+/// never in plain HTTP, which would carry the session in clear (and browsers give the
+/// clipboard, the microphone and the camera to pages served in HTTPS only).
+pub async fn serve(listen: SocketAddr, tls: Tls, shared: Shared) -> Result<()> {
     let app = axum::Router::new()
         .route("/", get(|| async { Html(PAGE) }))
         .route(SIGNALLING_PATH, get(upgrade))
         .with_state(shared)
         .into_make_service_with_connect_info::<SocketAddr>();
-    match tls {
-        Some(tls) => {
-            // One crypto provider for the process: ring.
-            let _ = rustls::crypto::ring::default_provider().install_default();
-            let config =
-                axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.certificate, &tls.key)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "loading {} and {}",
-                            tls.certificate.display(),
-                            tls.key.display()
-                        )
-                    })?;
-            info!(%listen, "serving the viewer page in HTTPS");
-            axum_server::bind_rustls(listen, config).serve(app).await?;
-        }
-        None => {
-            let listener = tokio::net::TcpListener::bind(listen).await?;
-            info!(%listen, "serving the viewer page");
-            axum::serve(listener, app).await?;
-        }
-    }
+    // One crypto provider for the process: ring.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.certificate, &tls.key)
+        .await
+        .with_context(|| {
+            format!(
+                "loading {} and {}",
+                tls.certificate.display(),
+                tls.key.display()
+            )
+        })?;
+    info!(%listen, "serving the viewer page in HTTPS");
+    axum_server::bind_rustls(listen, config).serve(app).await?;
     Ok(())
 }
 
