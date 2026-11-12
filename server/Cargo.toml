@@ -13,6 +13,7 @@ qdw-audio.workspace = true
 qdw-protocol.workspace = true
 qdw-qemu.workspace = true
 qdw-video.workspace = true
+rustix = { workspace = true, features = ["fs"] }
 rustls.workspace = true
 anyhow.workspace = true
 futures-util.workspace = true

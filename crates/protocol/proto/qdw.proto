@@ -38,7 +38,11 @@ message Hello {
   // The video codecs the client decodes, as media types ("video/AV1", "video/VP9",
   // "video/H265"), as RTCRtpReceiver.getCapabilities("video") lists them, each with its fmtp
   // parameters when it has any: "video/VP9;profile-id=1" for VP9 in 4:4:4. A type without
-  // parameters stands for the codec's default profile.
+  // parameters stands for the codec's default profile. One more parameter, not an SDP one:
+  // "video/AV1;bit-depth=10", "video/H265;bit-depth=10" from a client whose decoder takes the
+  // codec in 10 bits (AV1's Main profile has both depths, and the offer gives no HEVC profile,
+  // so SDP does not say it); the server encodes in 10 bits when every client says so. Browsers
+  // do not tell it: the page does not send it.
   repeated string codecs = 1;
   // Watch only: a shadow client sees and hears the guest, and nothing more. Without it, the
   // client is the user of the session: its keyboard and pointer, clipboard, microphone, drives

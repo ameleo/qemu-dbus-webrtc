@@ -1388,6 +1388,7 @@ dependencies = [
  "qdw-protocol",
  "qdw-qemu",
  "qdw-video",
+ "rustix",
  "rustls",
  "tokio",
  "tracing",

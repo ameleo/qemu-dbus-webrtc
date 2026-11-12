@@ -99,7 +99,8 @@ pub async fn attach(how: &Attach) -> Result<zbus::Connection> {
 /// What the guest display does, per console.
 #[derive(Debug)]
 pub enum DisplayEvent {
-    /// A new framebuffer in shared memory (no GPU sharing): its full content.
+    /// A new framebuffer, copied in the call (no shared memory, no GPU sharing): its full
+    /// content.
     Scanout {
         console: u32,
         width: u32,
@@ -108,9 +109,30 @@ pub enum DisplayEvent {
         pixman_format: u32,
         data: Vec<u8>,
     },
-    /// Part of the shared-memory framebuffer changed.
-    /// Its pixels are not kept: only DMA-BUF scanouts are encoded.
+    /// Part of the copied framebuffer changed: the pixels of the rectangle.
     Update {
+        console: u32,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        stride: u32,
+        pixman_format: u32,
+        data: Vec<u8>,
+    },
+    /// A new framebuffer in memory shared with QEMU (a guest without GPU acceleration): QEMU
+    /// draws in it, and says which part changed with `UpdateMap`.
+    ScanoutMap {
+        console: u32,
+        fd: std::os::fd::OwnedFd,
+        offset: u32,
+        width: u32,
+        height: u32,
+        stride: u32,
+        pixman_format: u32,
+    },
+    /// Part of the shared framebuffer changed.
+    UpdateMap {
         console: u32,
         x: i32,
         y: i32,
@@ -204,9 +226,9 @@ impl Listener {
         y: i32,
         width: i32,
         height: i32,
-        _stride: u32,
-        _pixman_format: u32,
-        _data: Vec<u8>,
+        stride: u32,
+        pixman_format: u32,
+        data: Vec<u8>,
     ) {
         self.send(DisplayEvent::Update {
             console: self.console,
@@ -214,6 +236,9 @@ impl Listener {
             y,
             width,
             height,
+            stride,
+            pixman_format,
+            data,
         });
     }
 
@@ -283,10 +308,15 @@ impl Listener {
     }
 
     /// The optional interfaces served next to this one. ScanoutDMABUF2 describes buffers that
-    /// ScanoutDMABUF cannot (several planes, offsets), so QEMU uses it when we announce it.
+    /// ScanoutDMABUF cannot (several planes, offsets), so QEMU uses it when we announce it; with
+    /// Map, QEMU shares its framebuffer when it is in memory instead of copying its pixels in
+    /// each call.
     #[zbus(property)]
     fn interfaces(&self) -> Vec<String> {
-        vec!["org.qemu.Display1.Listener.Unix.ScanoutDMABUF2".to_owned()]
+        vec![
+            "org.qemu.Display1.Listener.Unix.ScanoutDMABUF2".to_owned(),
+            "org.qemu.Display1.Listener.Unix.Map".to_owned(),
+        ]
     }
 }
 
@@ -339,6 +369,45 @@ impl ScanoutDmabuf2 {
     }
 }
 
+/// `org.qemu.Display1.Listener.Unix.Map` for one console.
+struct Map {
+    console: u32,
+    events: mpsc::UnboundedSender<DisplayEvent>,
+}
+
+#[zbus::interface(name = "org.qemu.Display1.Listener.Unix.Map", spawn = false)]
+impl Map {
+    async fn scanout_map(
+        &self,
+        handle: OwnedFd,
+        offset: u32,
+        width: u32,
+        height: u32,
+        stride: u32,
+        pixman_format: u32,
+    ) {
+        let _ = self.events.send(DisplayEvent::ScanoutMap {
+            console: self.console,
+            fd: handle.into(),
+            offset,
+            width,
+            height,
+            stride,
+            pixman_format,
+        });
+    }
+
+    async fn update_map(&self, x: i32, y: i32, width: i32, height: i32) {
+        let _ = self.events.send(DisplayEvent::UpdateMap {
+            console: self.console,
+            x,
+            y,
+            width,
+            height,
+        });
+    }
+}
+
 const LISTENER_PATH: &str = "/org/qemu/Display1/Listener";
 
 /// Register a listener on console `id`. The returned connection carries the display updates:
@@ -367,6 +436,13 @@ pub async fn listen(
         .serve_at(
             LISTENER_PATH,
             ScanoutDmabuf2 {
+                console: id,
+                events: events.clone(),
+            },
+        )?
+        .serve_at(
+            LISTENER_PATH,
+            Map {
                 console: id,
                 events,
             },

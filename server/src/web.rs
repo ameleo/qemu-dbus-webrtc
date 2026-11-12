@@ -5,6 +5,7 @@
 //! The signalling messages are those of `qdw-protocol`, in Protocol Buffers, one per binary
 //! WebSocket message.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use std::path::PathBuf;
@@ -45,6 +46,8 @@ pub enum Request {
     Keyframe { console: u32 },
     /// The user's connection takes this video bitrate, in kbit/s.
     Bitrate { console: u32, bitrate: u32 },
+    /// Whether every viewer decodes the video in 10 bits.
+    TenBits(bool),
 }
 
 #[derive(Clone)]
@@ -73,6 +76,38 @@ pub struct Shared {
     pub user: Arc<User>,
     /// The bounds of the bandwidth estimation.
     pub bitrates: Bitrates,
+    /// Which viewers decode the video in 10 bits.
+    pub depths: Arc<Depths>,
+}
+
+/// Which viewers decode the video in 10 bits. The video is shared: it is in 10 bits only when
+/// they all do.
+#[derive(Default)]
+pub struct Depths {
+    viewers: std::sync::Mutex<HashMap<u64, bool>>,
+    next: std::sync::atomic::AtomicU64,
+}
+
+impl Depths {
+    /// Every viewer decodes 10 bits, and there is one at least.
+    fn all_deep(viewers: &HashMap<u64, bool>) -> bool {
+        !viewers.is_empty() && viewers.values().all(|&deep| deep)
+    }
+
+    /// A viewer comes: its id, and whether the video may be in 10 bits now.
+    fn join(&self, deep: bool) -> (u64, bool) {
+        let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut viewers = self.viewers.lock().unwrap();
+        viewers.insert(id, deep);
+        (id, Self::all_deep(&viewers))
+    }
+
+    /// A viewer goes: whether the video may be in 10 bits now.
+    fn leave(&self, id: u64) -> bool {
+        let mut viewers = self.viewers.lock().unwrap();
+        viewers.remove(&id);
+        Self::all_deep(&viewers)
+    }
 }
 
 /// The one client that uses the session; the others are shadow clients, which only watch.
@@ -216,6 +251,10 @@ async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
         anyhow::bail!(message);
     }
 
+    // The video in 10 bits if this viewer and all the others decode it.
+    let deep = codecs.iter().any(|c| shared.codec.deep_by(c));
+    let (depth_id, ten_bits) = shared.depths.join(deep);
+    let _ = shared.requests.send(Request::TenBits(ten_bits));
     let (signals_tx, mut signals) = mpsc::unbounded_channel();
     let (requests, console) = (shared.requests.clone(), shared.console);
     let session = Session::start(
@@ -266,6 +305,9 @@ async fn viewer(mut socket: WebSocket, shared: Shared) -> Result<()> {
     if let Some(id) = user_id {
         shared.user.leave(id);
     }
+    let _ = shared
+        .requests
+        .send(Request::TenBits(shared.depths.leave(depth_id)));
     ended
 }
 
@@ -455,5 +497,21 @@ async fn run(
                 None => return Ok(()),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ten_bits_when_every_viewer_decodes_them() {
+        let depths = Depths::default();
+        let (deep, ten_bits) = depths.join(true);
+        assert!(ten_bits);
+        let (shallow, ten_bits) = depths.join(false);
+        assert!(!ten_bits);
+        assert!(depths.leave(shallow));
+        assert!(!depths.leave(deep));
     }
 }

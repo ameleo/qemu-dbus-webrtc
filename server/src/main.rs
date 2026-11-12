@@ -8,6 +8,7 @@
 mod agent;
 mod audio;
 mod clipboard;
+mod copied;
 mod drives;
 mod input;
 mod layout;
@@ -28,14 +29,15 @@ use tracing::{debug, info, warn};
 use gstreamer as gst;
 use qdw_qemu::display::{self, Attach, DisplayEvent, VmProxy};
 use qdw_video::encode::{Codec, Encoder, Settings};
-use qdw_video::record;
+use qdw_video::{gpus, record};
 use session::Viewers;
 use web::Request;
 
 const USAGE: &str = "usage: qemu-dbus-webrtc (--qmp <QMP socket> | --dbus <D-Bus address>) \
-                     [--codec av1|vp9|hevc] [--chroma 420|444] [--bitrate <max kbit/s>] \
+                     [--codec av1|vp9|hevc] [--chroma 420|444] [--software] [--bitrate <max kbit/s>] \
                      [--record <path prefix>] [--listen <address:port>] \
-                     [--tls <certificate.pem> <key.pem>]";
+                     [--tls <certificate.pem> <key.pem>]\n       \
+                     qemu-dbus-webrtc --codecs   (what the GPUs encode)";
 
 /// Where the viewer page is served by default: this host only, since there is no
 /// authentication yet.
@@ -47,8 +49,10 @@ const DEFAULT_LISTEN: &str = "127.0.0.1:8090";
 /// does, about every 3 seconds). Congestion control will feed on these frames too.
 const STILL_FRAME_INTERVAL: Duration = Duration::from_millis(250);
 
-/// At most one keyframe per console in this interval, whatever the viewers ask.
-const KEYFRAME_INTERVAL: Duration = Duration::from_millis(300);
+/// At most one keyframe per console in this interval, whatever the viewers ask. A keyframe is
+/// large: on a congested connection, it brings more losses, and more requests for keyframes;
+/// lost packets are asked again (NACK) and sent again (RTX) in the meantime.
+const KEYFRAME_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The bandwidth estimation, in kbit/s: never below `MIN_BITRATE` (a desktop below 4 Mbit/s is
 /// not usable, so the session rather fails visibly), starting at `START_BITRATE` (sharp at
@@ -65,6 +69,19 @@ const BITRATE_STEP: f64 = 0.05;
 /// frames to settle.
 const BITRATE_INTERVAL: Duration = Duration::from_millis(500);
 const BITRATE_DROP: f64 = 0.15;
+/// The bitrate never goes beyond this many times what the encoder produced over the last
+/// `OUTPUT_WINDOW`: on a quiet screen, the encoder sends less than the estimate, and the
+/// estimate rises with no evidence of the bandwidth (GCC sees no delay on a link that is never
+/// full); at the first large motion, the encoder would send far more than the link takes.
+/// From a quiet screen, the bitrate climbs back by this ratio at each step.
+const OUTPUT_HEADROOM: f64 = 1.25;
+const OUTPUT_WINDOW: Duration = Duration::from_secs(1);
+
+/// At most this many frames a second per console. The VA encoders take a variable frame rate
+/// for 30 frames a second and give each frame a thirtieth of their bitrate: more frames would
+/// send more than the bitrate, beyond the bandwidth estimate.
+const MAX_FPS: u32 = 30;
+const FRAME_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / MAX_FPS as u64);
 
 /// How often the rates of each console are reported.
 const RATE_INTERVAL: Duration = Duration::from_secs(5);
@@ -72,6 +89,8 @@ const RATE_INTERVAL: Duration = Duration::from_secs(5);
 struct Args {
     attach: Attach,
     settings: Settings,
+    /// `--codec` was given: no other codec in its place.
+    codec_given: bool,
     bitrates: session::Bitrates,
     /// Record each console's stream to `<prefix>-<console>.<extension>`.
     record: Option<String>,
@@ -87,13 +106,21 @@ fn parse_args() -> Result<Args> {
         codec: Codec::Av1,
         full_chroma: false,
         bitrate: START_BITRATE,
+        ten_bits: false,
+        software: false,
     };
+    let mut codec_given = false;
     let mut max_bitrate = MAX_BITRATE;
     let mut record = None;
     let mut listen: SocketAddr = DEFAULT_LISTEN.parse()?;
     let mut tls = None;
     let mut args = std::env::args().skip(1);
     while let Some(option) = args.next() {
+        // Options without a value.
+        if option == "--software" {
+            settings.software = true;
+            continue;
+        }
         let Some(value) = args.next() else {
             bail!(USAGE)
         };
@@ -104,7 +131,10 @@ fn parse_args() -> Result<Args> {
                 })
             }
             "--dbus" if attach.is_none() => attach = Some(Attach::Bus { address: value }),
-            "--codec" => settings.codec = Codec::parse(&value).context(USAGE)?,
+            "--codec" => {
+                settings.codec = Codec::parse(&value).context(USAGE)?;
+                codec_given = true;
+            }
             "--chroma" => {
                 settings.full_chroma = match value.as_str() {
                     "420" => false,
@@ -126,6 +156,10 @@ fn parse_args() -> Result<Args> {
         }
     }
     let Some(attach) = attach else { bail!(USAGE) };
+    // On the CPU, VP9 unless another codec was asked for.
+    if settings.software && !codec_given {
+        settings.codec = Codec::Vp9;
+    }
     if settings.full_chroma && !settings.codec.has_full_chroma() {
         bail!("{:?} has no 4:4:4 on the hardware encoders", settings.codec);
     }
@@ -139,6 +173,7 @@ fn parse_args() -> Result<Args> {
     Ok(Args {
         attach,
         settings,
+        codec_given,
         bitrates,
         record,
         listen,
@@ -196,8 +231,25 @@ async fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
-    let args = parse_args()?;
+    if std::env::args().nth(1).as_deref() == Some("--codecs") {
+        gstreamer::init()?;
+        print!("{}", gpus::report(&gpus::gpus(), gpus::software()));
+        return Ok(());
+    }
+    let mut args = parse_args()?;
     gstreamer::init()?;
+    let found = gpus::gpus();
+    // Without a GPU, encode on the CPU: VP9, unless another codec was asked for.
+    if found.is_empty() && !args.settings.software {
+        info!("no GPU encoder: encoding on the CPU");
+        args.settings.software = true;
+    }
+    // On the CPU, VP9 unless another codec was asked for.
+    if args.settings.software && !args.codec_given {
+        args.settings.codec = Codec::Vp9;
+    }
+    // Fail now, saying why, rather than at the first frame.
+    gpus::check(&found, &args.settings)?;
 
     let vm_connection = display::attach(&args.attach).await?;
     let vm = VmProxy::new(&vm_connection).await?;
@@ -270,6 +322,7 @@ async fn main() -> Result<()> {
         layout: layout.clone(),
         user: Default::default(),
         bitrates: args.bitrates,
+        depths: Default::default(),
     };
     if !args.listen.ip().is_loopback() {
         warn!(listen = %args.listen, "no authentication yet: anyone who reaches this address sees the VM");
@@ -284,6 +337,8 @@ async fn main() -> Result<()> {
     // The video bitrate, and when it last changed: new encoders start at it.
     let mut settings = args.settings.clone();
     let mut bitrate_changed = Instant::now();
+    // What each encoder produced, sampled at each still frame tick, over `OUTPUT_WINDOW`.
+    let mut output: HashMap<u32, std::collections::VecDeque<(Instant, u64)>> = HashMap::new();
     // A console is encoded when someone watches it (a paused viewer does not) or records it:
     // otherwise its updates cost nothing. A viewer that comes or resumes asks for a keyframe,
     // which encodes the screen as it is.
@@ -296,6 +351,12 @@ async fn main() -> Result<()> {
     };
 
     let mut encoders: HashMap<u32, Encoder> = HashMap::new();
+    // The framebuffers QEMU copies in its calls rather than share, by console.
+    let mut copies: HashMap<u32, copied::Copied> = HashMap::new();
+    // An update that comes sooner than `FRAME_INTERVAL` after the last frame is not dropped:
+    // the console waits in `due`, and its latest framebuffer is encoded as soon as the frame
+    // rate allows, so the last picture always goes out.
+    let mut due: std::collections::HashSet<u32> = std::collections::HashSet::new();
     // Consoles with a new framebuffer not encoded yet. A scanout comes with its full content,
     // so it is encoded on its own, but only once no other event is waiting: when a listener
     // registers, QEMU sends the console's 2D surface, possibly stale, right before the real
@@ -308,12 +369,37 @@ async fn main() -> Result<()> {
     let mut still = tokio::time::interval(STILL_FRAME_INTERVAL);
     still.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
+        // When the first console waiting for its frame rate may be encoded.
+        let next_due = due
+            .iter()
+            .map(|console| {
+                encoders.get(console).map_or(Duration::ZERO, |encoder| {
+                    FRAME_INTERVAL.saturating_sub(encoder.since_last_frame())
+                })
+            })
+            .min();
         let event = tokio::select! {
             event = events.recv() => event,
+            () = tokio::time::sleep(next_due.unwrap_or_default()), if next_due.is_some() => {
+                for console in std::mem::take(&mut due) {
+                    if wanted(console)
+                        && let Some(encoder) = encoders.get(&console)
+                        && let Err(e) = encoder.frame()
+                    {
+                        warn!(console, error = %e, "frame not encoded");
+                    }
+                }
+                continue;
+            }
             _ = still.tick() => {
                 // A frame pushed just after a tick is a bit less than one interval old at the
                 // next one: hence the margin, or every other tick would be skipped.
                 for (console, encoder) in &encoders {
+                    let samples = output.entry(*console).or_default();
+                    samples.push_back((Instant::now(), encoder.output()));
+                    while samples.front().is_some_and(|(at, _)| at.elapsed() > OUTPUT_WINDOW) {
+                        samples.pop_front();
+                    }
                     let watched = viewers.get(console).is_some_and(|v| !v.lock().unwrap().is_empty());
                     if watched && encoder.since_last_frame() >= STILL_FRAME_INTERVAL.mul_f32(0.8)
                         && let Err(e) = encoder.frame()
@@ -331,6 +417,18 @@ async fn main() -> Result<()> {
             Some(request) = requests.recv() => {
                 match request {
                     Request::Bitrate { console, bitrate } => {
+                        // Within reach of what the encoder produced lately.
+                        let bitrate = match output.get(&console).and_then(|samples| {
+                            let (&(first, from), &(last, to)) = (samples.front()?, samples.back()?);
+                            let span = last.duration_since(first).as_secs_f64();
+                            (span >= OUTPUT_WINDOW.as_secs_f64() / 2.)
+                                .then(|| to.saturating_sub(from) as f64 * 8. / 1000. / span)
+                        }) {
+                            Some(produced) => bitrate
+                                .min((produced * OUTPUT_HEADROOM) as u32)
+                                .max(args.bitrates.min),
+                            None => bitrate,
+                        };
                         let current = f64::from(settings.bitrate);
                         let change = (f64::from(bitrate) - current).abs() / current;
                         let congested = f64::from(bitrate) <= current * (1.0 - BITRATE_DROP);
@@ -342,6 +440,17 @@ async fn main() -> Result<()> {
                             bitrate_changed = Instant::now();
                             if let Some(encoder) = encoders.get(&console) {
                                 encoder.set_bitrate(bitrate);
+                            }
+                        }
+                    }
+                    Request::TenBits(ten_bits) => {
+                        if settings.codec.has_ten_bits() && settings.ten_bits != ten_bits {
+                            info!(ten_bits, "video depth");
+                            settings.ten_bits = ten_bits;
+                            for (console, encoder) in encoders.iter_mut() {
+                                if let Err(e) = encoder.restart(&settings) {
+                                    warn!(console, error = %format!("{e:#}"), "encoder not restarted");
+                                }
                             }
                         }
                     }
@@ -363,6 +472,8 @@ async fn main() -> Result<()> {
             warn!("the display listeners are gone");
             break;
         };
+        // The console the guest drew on, if it did.
+        let mut drawn = None;
         match event {
             DisplayEvent::Scanout {
                 console,
@@ -377,14 +488,80 @@ async fn main() -> Result<()> {
                     size = %format!("{width}x{height}"),
                     stride,
                     format = %format!("{pixman_format:#x}"),
-                    bytes = data.len(),
-                    "scanout (shared memory), not encoded"
+                    "scanout (copied)"
                 );
+                fresh.insert(console);
                 if console == shown {
                     layout.shown(width, height);
                 }
-                if let Some(encoder) = encoders.remove(&console) {
-                    encoder.finish();
+                let result = copied::Copied::new(width, height, stride, &data).and_then(|copy| {
+                    let fd = copy.fd()?;
+                    scanout(
+                        viewers.get(&console).cloned(),
+                        &args,
+                        &settings,
+                        &mut encoders,
+                        console,
+                        width,
+                        height,
+                        Source::Shared {
+                            fd: &fd,
+                            offset: 0,
+                            stride: copy.stride(),
+                            pixman_format,
+                        },
+                    )?;
+                    copies.insert(console, copy);
+                    Ok(())
+                });
+                if let Err(e) = result {
+                    warn!(console, error = %format!("{e:#}"), "not encoded");
+                    copies.remove(&console);
+                    if let Some(encoder) = encoders.remove(&console) {
+                        encoder.finish();
+                    }
+                }
+            }
+            DisplayEvent::ScanoutMap {
+                console,
+                fd,
+                offset,
+                width,
+                height,
+                stride,
+                pixman_format,
+            } => {
+                info!(
+                    console,
+                    size = %format!("{width}x{height}"),
+                    stride,
+                    format = %format!("{pixman_format:#x}"),
+                    "scanout (shared memory)"
+                );
+                fresh.insert(console);
+                copies.remove(&console);
+                if console == shown {
+                    layout.shown(width, height);
+                }
+                if let Err(e) = scanout(
+                    viewers.get(&console).cloned(),
+                    &args,
+                    &settings,
+                    &mut encoders,
+                    console,
+                    width,
+                    height,
+                    Source::Shared {
+                        fd: &fd,
+                        offset,
+                        stride,
+                        pixman_format,
+                    },
+                ) {
+                    warn!(console, error = %format!("{e:#}"), "not encoded");
+                    if let Some(encoder) = encoders.remove(&console) {
+                        encoder.finish();
+                    }
                 }
             }
             DisplayEvent::ScanoutDmabuf {
@@ -408,6 +585,7 @@ async fn main() -> Result<()> {
                     "scanout (DMA-BUF)"
                 );
                 fresh.insert(console);
+                copies.remove(&console);
                 if console == shown {
                     layout.shown(width, height);
                 }
@@ -417,11 +595,13 @@ async fn main() -> Result<()> {
                     &settings,
                     &mut encoders,
                     console,
-                    &planes,
                     width,
                     height,
-                    code,
-                    modifier,
+                    Source::Dmabuf {
+                        planes: &planes,
+                        fourcc: code,
+                        modifier,
+                    },
                 ) {
                     warn!(console, error = %format!("{e:#}"), "not encoded");
                     if let Some(encoder) = encoders.remove(&console) {
@@ -435,9 +615,18 @@ async fn main() -> Result<()> {
                 y,
                 width,
                 height,
+                stride,
+                data,
+                ..
             } => {
-                debug!(console, x, y, size = %format!("{width}x{height}"), "update");
-                *updates.entry(console).or_default() += 1;
+                debug!(console, x, y, size = %format!("{width}x{height}"), "update (copied)");
+                match copies.get(&console) {
+                    Some(copy) => match copy.update(x, y, width, height, stride, &data) {
+                        Ok(()) => drawn = Some(console),
+                        Err(e) => warn!(console, error = %format!("{e:#}"), "update not applied"),
+                    },
+                    None => debug!(console, "update without a copied framebuffer"),
+                }
             }
             DisplayEvent::UpdateDmabuf {
                 console,
@@ -445,16 +634,16 @@ async fn main() -> Result<()> {
                 y,
                 width,
                 height,
+            }
+            | DisplayEvent::UpdateMap {
+                console,
+                x,
+                y,
+                width,
+                height,
             } => {
                 debug!(console, x, y, size = %format!("{width}x{height}"), "update");
-                *updates.entry(console).or_default() += 1;
-                fresh.remove(&console);
-                if wanted(console)
-                    && let Some(encoder) = encoders.get(&console)
-                    && let Err(e) = encoder.frame()
-                {
-                    warn!(console, error = %e, "frame not encoded");
-                }
+                drawn = Some(console);
             }
             DisplayEvent::Disable { console } => {
                 info!(console, "disabled");
@@ -500,6 +689,19 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        if let Some(console) = drawn {
+            *updates.entry(console).or_default() += 1;
+            fresh.remove(&console);
+            if wanted(console)
+                && let Some(encoder) = encoders.get(&console)
+            {
+                if encoder.since_last_frame() < FRAME_INTERVAL {
+                    due.insert(console);
+                } else if let Err(e) = encoder.frame() {
+                    warn!(console, error = %e, "frame not encoded");
+                }
+            }
+        }
         if events.is_empty() {
             for console in fresh.drain() {
                 if wanted(console)
@@ -522,23 +724,52 @@ async fn main() -> Result<()> {
 /// A new DMA-BUF framebuffer on `console`: point its encoder at it, creating the encoder first
 /// if needed.
 #[allow(clippy::too_many_arguments)]
+/// Where a console's new framebuffer is.
+enum Source<'a> {
+    /// GPU memory: a single linear plane.
+    Dmabuf {
+        planes: &'a [display::Plane],
+        fourcc: u32,
+        modifier: u64,
+    },
+    /// Memory shared with QEMU, or our copy of it.
+    Shared {
+        fd: &'a std::os::fd::OwnedFd,
+        offset: u32,
+        stride: u32,
+        pixman_format: u32,
+    },
+}
+
+/// A console has a new framebuffer: encode it from now on, with a new encoder if it has none.
+#[allow(clippy::too_many_arguments)]
 fn scanout(
     viewers: Option<Viewers>,
     args: &Args,
     settings: &Settings,
     encoders: &mut HashMap<u32, Encoder>,
     console: u32,
-    planes: &[display::Plane],
     width: u32,
     height: u32,
-    code: u32,
-    modifier: u64,
+    source: Source,
 ) -> Result<()> {
-    let [plane] = planes else {
-        bail!("{} planes, one expected", planes.len())
-    };
-    if modifier != 0 {
-        bail!("modifier {modifier:#x}, only linear buffers are handled");
+    // Check the framebuffer before making an encoder for it.
+    match &source {
+        Source::Dmabuf {
+            planes, modifier, ..
+        } => {
+            if planes.len() != 1 {
+                bail!("{} planes, one expected", planes.len())
+            }
+            if *modifier != 0 {
+                bail!("modifier {modifier:#x}, only linear buffers are handled");
+            }
+        }
+        Source::Shared { pixman_format, .. } => {
+            if qdw_video::encode::pixman_format(*pixman_format).is_none() {
+                bail!("pixman format {pixman_format:#x} not handled");
+            }
+        }
     }
     let encoder = match encoders.entry(console) {
         std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
@@ -547,7 +778,22 @@ fn scanout(
             stream_sink(args, console, viewers)?,
         )?),
     };
-    encoder.set_framebuffer(&plane.fd, width, height, code, plane.offset, plane.stride)
+    match source {
+        Source::Dmabuf { planes, fourcc, .. } => {
+            let plane = &planes[0];
+            encoder.set_framebuffer(&plane.fd, width, height, fourcc, plane.offset, plane.stride)
+        }
+        Source::Shared {
+            fd,
+            offset,
+            stride,
+            pixman_format,
+        } => {
+            let format = qdw_video::encode::pixman_format(pixman_format)
+                .ok_or_else(|| anyhow::anyhow!("pixman format {pixman_format:#x}"))?;
+            encoder.set_shared_framebuffer(fd, width, height, format, offset, stride)
+        }
+    }
 }
 
 /// Log the rates of each active console over the last `elapsed`.

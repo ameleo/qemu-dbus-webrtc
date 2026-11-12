@@ -12,14 +12,14 @@
 //! appsrc ! queue ! vapostproc ! video/x-raw(memory:VAMemory) ! encoder ! parser ! appsink
 //! ```
 
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, IntoRawFd, OwnedFd};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, anyhow, bail};
 use gstreamer as gst;
 use gstreamer::prelude::*;
-use gstreamer_allocators::{DmaBufAllocator, prelude::*};
+use gstreamer_allocators::{DmaBufAllocator, FdAllocator, FdMemoryFlags, prelude::*};
 use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
 use tracing::warn;
@@ -92,6 +92,41 @@ impl Codec {
                 "video/x-h265,profile=(string)main-444",
             ),
         })
+    }
+
+    /// Whether the encoder takes 10 bits per component, when the clients decode them: AV1 and
+    /// HEVC (Main 10, Main 4:4:4 10). In 10 bits, the guest's 8-bit RGB loses no precision on its way to YUV, where 8
+    /// bits round each pixel and band smooth gradients (measured on the A380: an 8-bit encode
+    /// of a gradient stops at 43.8 dB in RGB whatever the bitrate, a 10-bit one reaches 56 dB
+    /// with fewer bits; 3 % fewer bits on text). AV1 in 10 bits is still its Main profile,
+    /// so SDP does not tell it apart: a client says it decodes it in its hello (see
+    /// [`Codec::deep_by`]); HEVC likewise, for the server's offer leaves its profile out. VP9 in
+    /// 10 bits is profile 2 or 3, which far fewer clients decode.
+    pub fn has_ten_bits(self) -> bool {
+        matches!(self, Self::Av1 | Self::Hevc)
+    }
+
+    /// The raw format the encoder takes.
+    fn raw_format(self, full_chroma: bool, ten_bits: bool) -> &'static str {
+        match (full_chroma, ten_bits && self.has_ten_bits()) {
+            (true, true) => "Y410",
+            (true, false) => "VUYA",
+            (false, true) => "P010_10LE",
+            (false, false) => "NV12",
+        }
+    }
+
+    /// Whether a client that announces `codec`, as for [`Codec::decoded_by`], decodes this
+    /// stream in 10 bits: `video/AV1;bit-depth=10`, `video/H265;bit-depth=10`. Not an SDP
+    /// parameter: it only goes between
+    /// this server and its clients.
+    pub fn deep_by(self, codec: &str) -> bool {
+        let mut parts = codec.split(';').map(str::trim);
+        self.has_ten_bits()
+            && parts
+                .next()
+                .is_some_and(|mime| mime.eq_ignore_ascii_case(self.mime_type()))
+            && parts.any(|p| p.eq_ignore_ascii_case("bit-depth=10"))
     }
 
     /// The parser, and the caps of the encoded stream as it leaves the encoder.
@@ -183,6 +218,47 @@ pub struct Settings {
     pub full_chroma: bool,
     /// Target bitrate, in kbit/s.
     pub bitrate: u32,
+    /// 10 bits per component, for codecs that have it (see [`Codec::has_ten_bits`]).
+    pub ten_bits: bool,
+    /// Encode on the CPU (VP9 only) rather than on the GPU.
+    pub software: bool,
+}
+
+/// The software encoder: libvpx's VP9, for hosts without a GPU. Real time (deadline=1,
+/// cpu-used=6: measured at 3440x1440, 69 frames a second on about 7 cores, 48.8 dB at 5 Mbit/s;
+/// cpu-used=8 is faster but blurs the picture), no frame held back (lag-in-frames=0), keyframes
+/// only when asked, constant bitrate with half a second of buffer, as on the GPU.
+fn software_encoder(full_chroma: bool, bitrate: u32) -> (String, &'static str) {
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
+    let (raw, profile) = if full_chroma {
+        ("Y444", "video/x-vp9,profile=(string)1")
+    } else {
+        ("I420", "video/x-vp9,profile=(string)0")
+    };
+    (
+        format!(
+            "videoconvert ! video/x-raw,format={raw},colorimetry=bt601 \
+             ! vp9enc name=encoder deadline=1 cpu-used=6 row-mt=true tile-columns=2 \
+             threads={threads} lag-in-frames=0 end-usage=cbr keyframe-mode=disabled \
+             buffer-size=500 buffer-initial-size=250 buffer-optimal-size=400 \
+             target-bitrate={bps}",
+            bps = u64::from(bitrate) * 1000,
+        ),
+        profile,
+    )
+}
+
+/// Our own copy of `fd`, and its size, which must hold `height` rows of `stride` bytes from
+/// `offset`.
+fn own(fd: &OwnedFd, offset: u32, stride: u32, height: u32) -> Result<(OwnedFd, usize)> {
+    // Our own descriptor: GStreamer closes it with the memory.
+    let fd = fd.as_fd().try_clone_to_owned()?;
+    let size = rustix::fs::seek(&fd, rustix::fs::SeekFrom::End(0)).context("framebuffer size")?;
+    let needed = u64::from(offset) + u64::from(stride) * u64::from(height);
+    if size < needed {
+        bail!("framebuffer of {size} bytes, {needed} needed");
+    }
+    Ok((fd, size as usize))
 }
 
 /// The GStreamer raw format of a DRM fourcc (DRM names the bytes from the most significant
@@ -194,6 +270,147 @@ fn video_format(fourcc: u32) -> Option<gst_video::VideoFormat> {
         b"AB24" => Some(F::Rgba),
         b"XR24" => Some(F::Bgrx),
         b"AR24" => Some(F::Bgra),
+        _ => None,
+    }
+}
+
+/// Where the encoded frames go.
+type Sink = Arc<std::sync::Mutex<Box<dyn FnMut(&gst::Buffer) + Send>>>;
+
+/// What an encoder produced, across its pipelines.
+#[derive(Default, Clone)]
+struct Counters {
+    /// Frames out of the encoder.
+    encoded: Arc<AtomicU64>,
+    /// Bytes out of the encoder.
+    bytes: Arc<AtomicU64>,
+    /// Bytes out of the encoder since it started.
+    output: Arc<AtomicU64>,
+}
+
+/// Build and start an encoding pipeline for `settings`, its output to `sink`.
+fn build(
+    settings: &Settings,
+    sink: &Sink,
+    counters: &Counters,
+) -> Result<(gst::Pipeline, gst_app::AppSrc)> {
+    if settings.software {
+        if settings.codec != Codec::Vp9 {
+            bail!("encoding on the CPU is VP9 only");
+        }
+        let (encoder, profile) = software_encoder(settings.full_chroma, settings.bitrate);
+        let description = format!(
+            "appsrc name=src is-live=true format=time do-timestamp=true \
+             ! queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 \
+             ! {encoder} ! {profile} \
+             ! {parser} ! {stream_caps} \
+             ! appsink name=sink sync=false",
+            parser = settings.codec.parser().0,
+            stream_caps = settings.codec.stream_caps(),
+        );
+        return start(&description, sink, counters);
+    }
+    let (encoder, profile) = settings.codec.encoder(settings.full_chroma)?;
+    // BT.601, limited range: the VA encoders do not write the colour space into the stream,
+    // and decoders then assume BT.601. Converting with BT.709 shifts the colours.
+    let raw = settings
+        .codec
+        .raw_format(settings.full_chroma, settings.ten_bits);
+    let profile = profile_caps(
+        settings.codec,
+        profile,
+        settings.ten_bits && settings.codec.has_ten_bits(),
+    );
+    let description = format!(
+        "appsrc name=src is-live=true format=time do-timestamp=true \
+         ! queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 \
+         ! vapostproc \
+         ! video/x-raw(memory:VAMemory),format={raw},colorimetry=bt601 \
+         ! {encoder} name=encoder rate-control=cbr bitrate={bitrate} cpb-size={cpb} \
+         ! {profile} \
+         ! {parser} ! {stream_caps} \
+         ! appsink name=sink sync=false",
+        bitrate = settings.bitrate,
+        cpb = cpb_size(settings.bitrate),
+        parser = settings.codec.parser().0,
+        stream_caps = settings.codec.stream_caps(),
+    );
+    start(&description, sink, counters)
+}
+
+/// Build and start the pipeline of `description`, its output to `sink`.
+fn start(
+    description: &str,
+    sink: &Sink,
+    counters: &Counters,
+) -> Result<(gst::Pipeline, gst_app::AppSrc)> {
+    let pipeline = gst::parse::launch(description)?
+        .downcast::<gst::Pipeline>()
+        .map_err(|_| anyhow!("not a pipeline"))?;
+    let src = pipeline
+        .by_name("src")
+        .and_then(|e| e.downcast::<gst_app::AppSrc>().ok())
+        .ok_or_else(|| anyhow!("no appsrc"))?;
+    let appsink = pipeline
+        .by_name("sink")
+        .and_then(|e| e.downcast::<gst_app::AppSink>().ok())
+        .ok_or_else(|| anyhow!("no appsink"))?;
+
+    let counters = counters.clone();
+    let sink = sink.clone();
+    appsink.set_callbacks(
+        gst_app::AppSinkCallbacks::builder()
+            .new_sample(move |appsink| {
+                let sample = appsink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                let buffer = sample.buffer_owned().ok_or(gst::FlowError::Error)?;
+                let size = buffer.size() as u64;
+                counters.encoded.fetch_add(1, Ordering::Relaxed);
+                counters.bytes.fetch_add(size, Ordering::Relaxed);
+                counters.output.fetch_add(size, Ordering::Relaxed);
+                (sink.lock().unwrap())(&buffer);
+                Ok(gst::FlowSuccess::Ok)
+            })
+            .build(),
+    );
+
+    // Report pipeline errors; they end the stream, not the program.
+    let bus = pipeline.bus().ok_or_else(|| anyhow!("no bus"))?;
+    bus.set_sync_handler(|_, message| {
+        if let gst::MessageView::Error(error) = message.view() {
+            warn!(
+                source = ?error.src().map(|s| s.path_string()),
+                error = %error.error(),
+                debug = ?error.debug(),
+                "encoder pipeline error"
+            );
+        }
+        gst::BusSyncReply::Drop
+    });
+
+    pipeline.set_state(gst::State::Playing)?;
+    Ok((pipeline, src))
+}
+
+/// The output caps of the encoder, which pick its profile: in 10 bits, HEVC's 10-bit
+/// counterpart (`main-10`, `main-444-10`); AV1's Main profile has both depths.
+fn profile_caps(codec: Codec, profile: &str, ten_bits: bool) -> String {
+    if ten_bits && codec == Codec::Hevc {
+        format!("{profile}-10")
+    } else {
+        profile.to_string()
+    }
+}
+
+/// The GStreamer raw format of a pixman format, as QEMU names the formats of the framebuffers
+/// it keeps in memory (in a 32-bit word, from the most significant end: `x8r8g8b8` is
+/// B, G, R, X in memory on a little-endian host).
+pub fn pixman_format(code: u32) -> Option<gst_video::VideoFormat> {
+    use gst_video::VideoFormat as F;
+    match code {
+        0x2002_0888 => Some(F::Bgrx), // x8r8g8b8
+        0x2002_8888 => Some(F::Bgra), // a8r8g8b8
+        0x2003_0888 => Some(F::Rgbx), // x8b8g8r8
+        0x2003_8888 => Some(F::Rgba), // a8b8g8r8
         _ => None,
     }
 }
@@ -213,11 +430,9 @@ struct Framebuffer {
 pub struct Encoder {
     pipeline: gst::Pipeline,
     src: gst_app::AppSrc,
+    sink: Sink,
     framebuffer: Option<Framebuffer>,
-    /// Frames out of the encoder.
-    encoded: Arc<AtomicU64>,
-    /// Bytes out of the encoder.
-    bytes: Arc<AtomicU64>,
+    counters: Counters,
     /// When the last frame went into the encoder.
     last_frame: std::cell::Cell<std::time::Instant>,
 }
@@ -230,76 +445,30 @@ impl Encoder {
         settings: &Settings,
         sink: impl FnMut(&gst::Buffer) + Send + 'static,
     ) -> Result<Self> {
-        let (encoder, profile) = settings.codec.encoder(settings.full_chroma)?;
-        // BT.601, limited range: the VA encoders do not write the colour space into the stream,
-        // and decoders then assume BT.601. Converting with BT.709 shifts the colours.
-        let raw = if settings.full_chroma { "VUYA" } else { "NV12" };
-        let description = format!(
-            "appsrc name=src is-live=true format=time do-timestamp=true \
-             ! queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 \
-             ! vapostproc \
-             ! video/x-raw(memory:VAMemory),format={raw},colorimetry=bt601 \
-             ! {encoder} name=encoder rate-control=cbr bitrate={bitrate} cpb-size={cpb} \
-             ! {profile} \
-             ! {parser} ! {stream_caps} \
-             ! appsink name=sink sync=false",
-            bitrate = settings.bitrate,
-            cpb = cpb_size(settings.bitrate),
-            parser = settings.codec.parser().0,
-            stream_caps = settings.codec.stream_caps(),
-        );
-        let pipeline = gst::parse::launch(&description)?
-            .downcast::<gst::Pipeline>()
-            .map_err(|_| anyhow!("not a pipeline"))?;
-        let src = pipeline
-            .by_name("src")
-            .and_then(|e| e.downcast::<gst_app::AppSrc>().ok())
-            .ok_or_else(|| anyhow!("no appsrc"))?;
-        let appsink = pipeline
-            .by_name("sink")
-            .and_then(|e| e.downcast::<gst_app::AppSink>().ok())
-            .ok_or_else(|| anyhow!("no appsink"))?;
-
-        let encoded = Arc::new(AtomicU64::new(0));
-        let bytes = Arc::new(AtomicU64::new(0));
-        let (counted, sized) = (encoded.clone(), bytes.clone());
-        let sink = std::sync::Mutex::new(sink);
-        appsink.set_callbacks(
-            gst_app::AppSinkCallbacks::builder()
-                .new_sample(move |appsink| {
-                    let sample = appsink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
-                    let buffer = sample.buffer_owned().ok_or(gst::FlowError::Error)?;
-                    counted.fetch_add(1, Ordering::Relaxed);
-                    sized.fetch_add(buffer.size() as u64, Ordering::Relaxed);
-                    (sink.lock().unwrap())(&buffer);
-                    Ok(gst::FlowSuccess::Ok)
-                })
-                .build(),
-        );
-
-        // Report pipeline errors; they end the stream, not the program.
-        let bus = pipeline.bus().ok_or_else(|| anyhow!("no bus"))?;
-        bus.set_sync_handler(|_, message| {
-            if let gst::MessageView::Error(error) = message.view() {
-                warn!(
-                    source = ?error.src().map(|s| s.path_string()),
-                    error = %error.error(),
-                    debug = ?error.debug(),
-                    "encoder pipeline error"
-                );
-            }
-            gst::BusSyncReply::Drop
-        });
-
-        pipeline.set_state(gst::State::Playing)?;
+        let counters = Counters::default();
+        let sink: Sink = Arc::new(std::sync::Mutex::new(Box::new(sink)));
+        let (pipeline, src) = build(settings, &sink, &counters)?;
         Ok(Self {
             pipeline,
             src,
+            sink,
             framebuffer: None,
-            encoded,
-            bytes,
+            counters,
             last_frame: std::cell::Cell::new(std::time::Instant::now()),
         })
+    }
+
+    /// Encode with new `settings`, from the next frame on: a new pipeline, whose first frame,
+    /// encoded now from the current framebuffer, is a keyframe. Some encoders cannot change
+    /// their input format once started (the HEVC one keeps the format it started with), so a
+    /// change of depth needs a new one. The old pipeline stops first: none of its frames comes
+    /// after the new keyframe.
+    pub fn restart(&mut self, settings: &Settings) -> Result<()> {
+        let (pipeline, src) = build(settings, &self.sink, &self.counters)?;
+        let _ = self.pipeline.set_state(gst::State::Null);
+        self.pipeline = pipeline;
+        self.src = src;
+        self.frame()
     }
 
     /// A new framebuffer: `fd` is a single-plane DMA-BUF of `width`x`height` pixels in DRM
@@ -315,15 +484,41 @@ impl Encoder {
     ) -> Result<()> {
         let format =
             video_format(fourcc).ok_or_else(|| anyhow!("unsupported fourcc {fourcc:#x}"))?;
-        // Our own descriptor: GStreamer closes it with the memory.
-        let fd = fd.as_fd().try_clone_to_owned()?;
-        let size = rustix::fs::seek(&fd, rustix::fs::SeekFrom::End(0)).context("DMA-BUF size")?;
-        let needed = u64::from(offset) + u64::from(stride) * u64::from(height);
-        if size < needed {
-            bail!("DMA-BUF of {size} bytes, {needed} needed");
-        }
+        let (fd, size) = own(fd, offset, stride, height)?;
         // SAFETY: the descriptor is a DMA-BUF, and owned by the memory from now on.
-        let memory = unsafe { DmaBufAllocator::new().alloc_dmabuf(fd, size as usize)? };
+        let memory = unsafe { DmaBufAllocator::new().alloc_dmabuf(fd, size)? };
+        self.install(memory, format, width, height, offset, stride)
+    }
+
+    /// A new framebuffer in memory shared with QEMU: `fd` holds `width`x`height` pixels in
+    /// `format`, from `offset`. The encoder reads it in place, and uploads it to the GPU when
+    /// it encodes there.
+    pub fn set_shared_framebuffer(
+        &mut self,
+        fd: &OwnedFd,
+        width: u32,
+        height: u32,
+        format: gst_video::VideoFormat,
+        offset: u32,
+        stride: u32,
+    ) -> Result<()> {
+        let (fd, size) = own(fd, offset, stride, height)?;
+        // SAFETY: the descriptor is a mappable file (a memfd), and owned by the memory from now
+        // on.
+        let memory =
+            unsafe { FdAllocator::new().alloc_fd(fd.into_raw_fd(), size, FdMemoryFlags::NONE)? };
+        self.install(memory, format, width, height, offset, stride)
+    }
+
+    fn install(
+        &mut self,
+        memory: gst::Memory,
+        format: gst_video::VideoFormat,
+        width: u32,
+        height: u32,
+        offset: u32,
+        stride: u32,
+    ) -> Result<()> {
         let caps = gst_video::VideoInfo::builder(format, width, height)
             .fps(gst::Fraction::new(0, 1))
             .build()?
@@ -391,8 +586,13 @@ impl Encoder {
     /// keyframe; patched (the `.daas` build), they take it with the next frame.
     pub fn set_bitrate(&self, bitrate: u32) {
         if let Some(encoder) = self.pipeline.by_name("encoder") {
-            encoder.set_property("cpb-size", cpb_size(bitrate));
-            encoder.set_property("bitrate", bitrate);
+            if encoder.find_property("target-bitrate").is_some() {
+                // libvpx, which takes it with the next frame.
+                encoder.set_property("target-bitrate", (bitrate as i32).saturating_mul(1000));
+            } else {
+                encoder.set_property("cpb-size", cpb_size(bitrate));
+                encoder.set_property("bitrate", bitrate);
+            }
         }
     }
 
@@ -401,11 +601,16 @@ impl Encoder {
         self.framebuffer = None;
     }
 
+    /// Bytes encoded since the encoder started.
+    pub fn output(&self) -> u64 {
+        self.counters.output.load(Ordering::Relaxed)
+    }
+
     /// Frames and bytes encoded since the last call.
     pub fn take_counters(&self) -> (u64, u64) {
         (
-            self.encoded.swap(0, Ordering::Relaxed),
-            self.bytes.swap(0, Ordering::Relaxed),
+            self.counters.encoded.swap(0, Ordering::Relaxed),
+            self.counters.bytes.swap(0, Ordering::Relaxed),
         )
     }
 
@@ -423,6 +628,22 @@ impl Encoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ten_bits_are_announced() {
+        assert!(Codec::Av1.deep_by("video/AV1;bit-depth=10"));
+        assert!(Codec::Av1.deep_by("video/av1; bit-depth=10"));
+        assert!(!Codec::Av1.deep_by("video/AV1"));
+        assert!(!Codec::Vp9.deep_by("video/VP9;bit-depth=10"));
+        assert!(Codec::Hevc.deep_by("video/H265;bit-depth=10"));
+        assert!(!Codec::Hevc.deep_by("video/AV1;bit-depth=10"));
+        assert_eq!(
+            profile_caps(Codec::Hevc, "video/x-h265,profile=(string)main-444", true),
+            "video/x-h265,profile=(string)main-444-10"
+        );
+        assert_eq!(profile_caps(Codec::Av1, "video/x-av1", true), "video/x-av1");
+        assert!(Codec::Av1.decoded_by(false, "video/AV1;bit-depth=10"));
+    }
 
     #[test]
     fn decoded_by() {
