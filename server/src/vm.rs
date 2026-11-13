@@ -269,6 +269,13 @@ async fn start_in(
         )
         .instrument(span.clone()),
     );
+    // How the guest takes the pointer: relative without its agent nor a tablet.
+    let input = qdw_qemu::input::Input::new(&vm_connection, first).await?;
+    let (mode_tx, pointer_mode) = tokio::sync::watch::channel(false);
+    let mode = tokio::spawn(
+        input::follow_mode(input.mouse.clone(), agent_mouse.present(), mode_tx)
+            .instrument(span.clone()),
+    );
     // Turns true when the display loop ends: the VM stopped, unless the server detached.
     let (stopped_tx, stopped_rx) = tokio::sync::watch::channel(false);
     let shared = web::Shared {
@@ -279,9 +286,10 @@ async fn start_in(
         audio_viewers: audio_viewers.clone(),
         mic: audio.mic.clone(),
         requests: requests_tx,
-        input: qdw_qemu::input::Input::new(&vm_connection, first).await?,
+        input,
         agent_mouse,
         pointer: pointer_rx,
+        pointer_mode: pointer_mode.clone(),
         clipboard: clipboard.clone(),
         drives: drives.clone(),
         printers: printers.clone(),
@@ -649,8 +657,14 @@ async fn start_in(
             } => {
                 debug!(console, x, y, visible, "pointer");
                 if let Some(&screen) = screen_of.get(&console) {
+                    // Its moves wake the viewers only when they draw it: while it is relative.
+                    let relative = *pointer_mode.borrow();
+                    let position = u32::try_from(x).ok().zip(u32::try_from(y).ok());
                     pointer_tx.send_if_modified(|pointers| {
-                        std::mem::replace(&mut pointers[screen].visible, visible) != visible
+                        let pointer = &mut pointers[screen];
+                        let shown = std::mem::replace(&mut pointer.visible, visible) != visible;
+                        let moved = std::mem::replace(&mut pointer.position, position) != position;
+                        shown || (relative && moved)
                     });
                 }
             }
@@ -704,8 +718,9 @@ async fn start_in(
             }
         }
     }
-    // The watch on the VM goes with the loop: it holds the VM's connection.
+    // The watches on the VM go with the loop: they hold the VM's connection.
     gone.abort();
+    mode.abort();
     stopped_tx.send_replace(true);
     stopped.notify_one();
     // What hangs on the VM goes first: its listeners, its sound, and the layout task, which

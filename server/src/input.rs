@@ -12,10 +12,12 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
+use futures_util::StreamExt;
 use qdw_protocol::v1::{Button, Input, InputEvent, Key, LockKeys, input_event::Event};
 use qdw_qemu::agent::MouseProxy;
 use qdw_qemu::input::{self as qemu, CAPS_LOCK, NUM_LOCK, SCROLL_LOCK};
-use tracing::debug;
+use tokio::sync::watch;
+use tracing::{debug, info};
 
 /// A wheel notch, in the units of `Wheel` messages.
 const NOTCH: i32 = 120;
@@ -30,25 +32,71 @@ const SCROLL_LOCK_KEY: u32 = 0x46;
 /// QEMU's number for Pause, which PC keyboards send as E1 1D 45.
 const PAUSE: u32 = 0xC6;
 
-/// The guest agent's pointer, while the agent is connected.
-#[derive(Clone, Default)]
-pub struct AgentMouse(Arc<Mutex<Option<MouseProxy<'static>>>>);
+/// The largest relative move taken from a message, in guest pixels each way: the widest screen.
+const MAX_MOTION: i32 = 8192;
+
+/// The guest agent's pointer, while the agent is connected, and whether it is.
+#[derive(Clone)]
+pub struct AgentMouse {
+    mouse: Arc<Mutex<Option<MouseProxy<'static>>>>,
+    present: watch::Sender<bool>,
+}
+
+impl Default for AgentMouse {
+    fn default() -> Self {
+        Self {
+            mouse: Arc::default(),
+            present: watch::Sender::new(false),
+        }
+    }
+}
 
 impl AgentMouse {
     /// The agent is connected.
     pub async fn attach(&self, connection: &zbus::Connection) -> zbus::Result<()> {
         let mouse = MouseProxy::new(connection).await?;
-        *self.0.lock().unwrap() = Some(mouse);
+        *self.mouse.lock().unwrap() = Some(mouse);
+        self.present.send_replace(true);
         Ok(())
     }
 
     /// The agent went away.
     pub fn detach(&self) {
-        *self.0.lock().unwrap() = None;
+        *self.mouse.lock().unwrap() = None;
+        self.present.send_replace(false);
     }
 
     fn get(&self) -> Option<MouseProxy<'static>> {
-        self.0.lock().unwrap().clone()
+        self.mouse.lock().unwrap().clone()
+    }
+
+    /// Whether the agent's pointer is there, and its changes.
+    pub fn present(&self) -> watch::Receiver<bool> {
+        self.present.subscribe()
+    }
+}
+
+/// Follow how the guest takes the pointer, into `relative`, until the VM's connection ends:
+/// relative when neither the guest agent nor QEMU's pointing device (a tablet) places it, only a
+/// mouse moving by steps.
+pub async fn follow_mode(
+    mouse: qemu::MouseProxy<'static>,
+    mut agent: watch::Receiver<bool>,
+    relative: watch::Sender<bool>,
+) {
+    let mut changes = mouse.receive_is_absolute_changed().await;
+    loop {
+        // Cached, and kept up to date by QEMU's signals: an absolute pointer when unknown.
+        let absolute = mouse.is_absolute().await.unwrap_or(true);
+        let now = !*agent.borrow_and_update() && !absolute;
+        if relative.send_if_modified(|r| std::mem::replace(r, now) != now) {
+            info!(relative = now, "pointer mode");
+        }
+        tokio::select! {
+            Some(_) = changes.next() => {}
+            Ok(()) = agent.changed() => {}
+            else => return,
+        }
     }
 }
 
@@ -108,6 +156,13 @@ impl ViewerInput {
                         self.buttons.remove(&button);
                     }
                 }
+                // Only for the QEMU mouse moving by steps: QEMU refuses it from a tablet, and the
+                // agent places the pointer.
+                Some(Event::PointerMotion(m)) if self.agent.get().is_none() => {
+                    let clamp = |d: i32| d.clamp(-MAX_MOTION, MAX_MOTION);
+                    self.qemu.move_by(clamp(m.dx), clamp(m.dy)).await?;
+                }
+                Some(Event::PointerMotion(_)) => {}
                 Some(Event::Wheel(w)) => self.wheel(w.dx, w.dy).await?,
                 Some(Event::LockKeys(locks)) => self.lock_keys(&locks).await?,
                 // An event of a newer client.
@@ -216,5 +271,86 @@ impl ViewerInput {
             }
         }
         first
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// QEMU's `org.qemu.Display1.Mouse`, as far as the mode goes.
+    struct FakeMouse {
+        absolute: bool,
+    }
+
+    #[zbus::interface(name = "org.qemu.Display1.Mouse")]
+    impl FakeMouse {
+        #[zbus(property)]
+        fn is_absolute(&self) -> bool {
+            self.absolute
+        }
+    }
+
+    const PATH: &str = "/org/qemu/Display1/Console_0";
+
+    /// The pointer is relative when neither the agent nor QEMU's device places it, and follows
+    /// their changes.
+    #[tokio::test]
+    async fn the_mode_follows_the_guest() {
+        let (ours, theirs) = tokio::net::UnixStream::pair().unwrap();
+        let guid = zbus::Guid::generate();
+        let (qemu, connection) = tokio::join!(
+            zbus::connection::Builder::unix_stream(theirs)
+                .server(guid)
+                .unwrap()
+                .p2p()
+                .serve_at(PATH, FakeMouse { absolute: true })
+                .unwrap()
+                .build(),
+            zbus::connection::Builder::unix_stream(ours).p2p().build(),
+        );
+        let (qemu, connection) = (qemu.unwrap(), connection.unwrap());
+        let mouse = qemu::MouseProxy::builder(&connection)
+            .path(PATH)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let agent = AgentMouse::default();
+        let (tx, mut relative) = watch::channel(false);
+        let task = tokio::spawn(follow_mode(mouse, agent.present(), tx));
+        let settled = |relative: &mut watch::Receiver<bool>, wanted: bool| {
+            let mut relative = relative.clone();
+            async move {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    relative.wait_for(|r| *r == wanted),
+                )
+                .await
+                .expect("the mode did not follow")
+                .unwrap();
+            }
+        };
+        settled(&mut relative, false).await;
+        // The guest's tablet goes: QEMU's mouse moves by steps.
+        let iface = qemu
+            .object_server()
+            .interface::<_, FakeMouse>(PATH)
+            .await
+            .unwrap();
+        iface.get_mut().await.absolute = false;
+        iface
+            .get()
+            .await
+            .is_absolute_changed(iface.signal_emitter())
+            .await
+            .unwrap();
+        settled(&mut relative, true).await;
+        // The agent comes: it places the pointer.
+        agent.present.send_replace(true);
+        settled(&mut relative, false).await;
+        agent.present.send_replace(false);
+        settled(&mut relative, true).await;
+        task.abort();
     }
 }

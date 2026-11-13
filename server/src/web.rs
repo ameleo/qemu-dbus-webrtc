@@ -22,8 +22,8 @@ use tracing::{Instrument, debug, info, warn};
 use qdw_protocol::Message;
 use qdw_protocol::v1::{
     BandwidthEstimate, ClientMessage, ControlMessage, Ended, Error, IceCandidate, Input,
-    Microphone, MonitorLayout, ServerMessage, SessionDescription, VideoPause, client_message,
-    control_message, ended, server_message,
+    Microphone, MonitorLayout, PointerMode, ServerMessage, SessionDescription, VideoPause,
+    client_message, control_message, ended, server_message,
 };
 use qdw_video::encode::Codec;
 
@@ -74,6 +74,8 @@ pub struct Shared {
     pub agent_mouse: AgentMouse,
     /// The guest pointer on each screen.
     pub pointer: watch::Receiver<Vec<Pointer>>,
+    /// Whether the guest takes the pointer by relative moves (see `PointerMode`).
+    pub pointer_mode: watch::Receiver<bool>,
     pub clipboard: Arc<Clipboard>,
     pub drives: Arc<Drives>,
     pub printers: Arc<Printers>,
@@ -544,6 +546,7 @@ async fn viewer(
             &mut state,
             Follow {
                 pointer: shared.pointer.clone(),
+                pointer_mode: shared.pointer_mode.clone(),
                 clip,
                 drives: drives_follow,
                 printers: printers_follow,
@@ -632,6 +635,7 @@ struct ViewerState {
 /// What a viewer follows besides its connection.
 struct Follow {
     pointer: watch::Receiver<Vec<Pointer>>,
+    pointer_mode: watch::Receiver<bool>,
     clip: ViewerFollow,
     drives: DrivesFollow,
     printers: PrintersFollow,
@@ -694,6 +698,14 @@ async fn run(
     let send_microphone = |wanted: bool| {
         let message = ControlMessage {
             message: Some(control_message::Message::Microphone(Microphone { wanted })),
+        };
+        session.send(Channel::Control, message.encode_to_vec());
+    };
+    let send_pointer_mode = |relative: bool| {
+        let message = ControlMessage {
+            message: Some(control_message::Message::PointerMode(PointerMode {
+                relative,
+            })),
         };
         session.send(Channel::Control, message.encode_to_vec());
     };
@@ -771,7 +783,8 @@ async fn run(
                 Some(Signal::Message(Channel::Pointer, _)) => {}
                 Some(Signal::Open(Channel::Pointer)) => {
                     let mut fresh = pointer::Sent::default();
-                    send_all(session, Channel::Pointer, fresh.update(&follow.pointer.borrow_and_update()));
+                    let relative = *follow.pointer_mode.borrow();
+                    send_all(session, Channel::Pointer, fresh.update(&follow.pointer.borrow_and_update(), relative));
                     sent = Some(fresh);
                 }
                 Some(Signal::Open(Channel::Clipboard)) if !user => {}
@@ -781,6 +794,7 @@ async fn run(
                 }
                 Some(Signal::Open(Channel::Control)) => {
                     control_open = true;
+                    send_pointer_mode(*follow.pointer_mode.borrow_and_update());
                     if user {
                         send_microphone(*mic_wanted.borrow_and_update());
                     }
@@ -811,7 +825,18 @@ async fn run(
             },
             Ok(()) = follow.pointer.changed() => {
                 if let Some(sent) = &mut sent {
-                    send_all(session, Channel::Pointer, sent.update(&follow.pointer.borrow_and_update()));
+                    let relative = *follow.pointer_mode.borrow();
+                    send_all(session, Channel::Pointer, sent.update(&follow.pointer.borrow_and_update(), relative));
+                }
+            }
+            Ok(()) = follow.pointer_mode.changed() => {
+                let relative = *follow.pointer_mode.borrow_and_update();
+                if control_open {
+                    send_pointer_mode(relative);
+                }
+                // The positions go, or stop, with the mode.
+                if let Some(sent) = &mut sent {
+                    send_all(session, Channel::Pointer, sent.update(&follow.pointer.borrow(), relative));
                 }
             }
             Ok(()) = mic_wanted.changed(), if user && control_open => {

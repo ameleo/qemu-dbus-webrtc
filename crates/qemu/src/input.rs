@@ -25,8 +25,15 @@ pub trait Mouse {
     fn press(&self, button: u32) -> zbus::Result<()>;
     #[zbus(no_reply)]
     fn release(&self, button: u32) -> zbus::Result<()>;
+    /// Absolute pointing only (a tablet): QEMU refuses it otherwise.
     #[zbus(no_reply)]
     fn set_abs_position(&self, x: u32, y: u32) -> zbus::Result<()>;
+    /// Relative pointing only (a mouse that moves by steps): QEMU refuses it otherwise.
+    #[zbus(no_reply)]
+    fn rel_motion(&self, dx: i32, dy: i32) -> zbus::Result<()>;
+    /// Whether the guest's pointing device takes absolute positions; QEMU tells its changes.
+    #[zbus(property)]
+    fn is_absolute(&self) -> zbus::Result<bool>;
 }
 
 /// Bits of [`KeyboardProxy::modifiers`].
@@ -99,6 +106,11 @@ impl Input {
 
     pub async fn move_to(&self, x: u32, y: u32) -> Result<()> {
         self.mouse.set_abs_position(x, y).await?;
+        Ok(())
+    }
+
+    pub async fn move_by(&self, dx: i32, dy: i32) -> Result<()> {
+        self.mouse.rel_motion(dx, dy).await?;
         Ok(())
     }
 }

@@ -21,6 +21,10 @@
                                 background: #111; color: #eee; }
   #login button { background: #2a5db0; border: 0; cursor: pointer; }
   #login-message { color: #f08a8a; min-height: 1.4em; }
+  #cursor { position: fixed; pointer-events: none; display: none; }
+  #hint { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%); padding: 6px 10px;
+          background: rgba(0, 0, 0, .65); border-radius: 4px; pointer-events: none; }
+  #hint[hidden] { display: none; }
   #cam { position: fixed; top: 8px; right: 84px; padding: 6px 10px; border: 0; border-radius: 4px;
          background: rgba(0, 0, 0, .65); color: #eee; font: inherit; cursor: pointer; }
 </style>
@@ -28,6 +32,8 @@
 <body>
 <video id="video" autoplay muted playsinline></video>
 <div id="stats">connecting…</div>
+<img id="cursor" alt="">
+<div id="hint" hidden>Click the screen to use the guest's mouse; Esc gives it back.</div>
 <button id="mic" type="button" title="Let the guest use this computer's microphone: it opens while an application in the guest records">Mic off</button>
 <button id="cam" type="button" title="Show this computer's camera in the guest">Cam off</button>
 <form id="login" hidden>
@@ -137,11 +143,12 @@ pc.ondatachannel = ({ channel }) => {
   if (channel.label === "control") {
     control.channel = channel;
     channel.onopen = () => { control.videoPause(); control.layout(); };
-    // ControlMessage: bandwidth_estimate = 3, microphone = 4; BandwidthEstimate: kbps = 1;
-    // Microphone: wanted = 1.
+    // ControlMessage: bandwidth_estimate = 3, microphone = 4, pointer_mode = 5;
+    // BandwidthEstimate: kbps = 1; Microphone: wanted = 1; PointerMode: relative = 1.
     channel.onmessage = (event) => {
       const message = pb.parse(new Uint8Array(event.data));
       if (message.has(3)) control.estimate = uint(pb.parse(message.get(3)[0]), 1);
+      if (message.has(5)) pointer.setRelative(uint(pb.parse(message.get(5)[0]), 1) === 1);
       if (message.has(4)) {
         mic.wanted = uint(pb.parse(message.get(4)[0]), 1) === 1;
         mic.apply();
@@ -309,6 +316,7 @@ const ev = {
   move: (x, y) => pb.message((e) => pb.bytes(e, 2, pb.message((m) => { pb.uint(m, 1, 0); pb.uint(m, 2, x); pb.uint(m, 3, y); }))),
   button: (button, down) => pb.message((e) => pb.bytes(e, 3, pb.message((b) => { pb.uint(b, 1, button); pb.uint(b, 2, down ? 1 : 0); }))),
   wheel: (dx, dy) => pb.message((e) => pb.bytes(e, 4, pb.message((w) => { pb.int(w, 1, dx); pb.int(w, 2, dy); }))),
+  motion: (dx, dy) => pb.message((e) => pb.bytes(e, 6, pb.message((m) => { pb.int(m, 1, dx); pb.int(m, 2, dy); }))),
   locks: (e) => pb.message((o) => pb.bytes(o, 5, pb.message((l) => {
     pb.uint(l, 1, e.getModifierState("CapsLock") ? 1 : 0);
     pb.uint(l, 2, e.getModifierState("NumLock") ? 1 : 0);
@@ -322,6 +330,8 @@ const input = {
   buttons: new Set(),     // buttons held down
   syncLocks: true,        // send the lock keys with the next event
   move: null,             // the latest pointer position, sent once per frame
+  motion: [0, 0],         // relative moves not sent yet, in guest pixels, sent once per frame
+  motionDue: false,       // a frame will send them
   send(events) {
     if (this.channel?.readyState !== "open" || events.length === 0) return;
     this.channel.send(new Uint8Array(pb.message((o) => events.forEach((e) => pb.bytes(o, 1, e)))));
@@ -374,7 +384,30 @@ function guestPixel(e) {
 
 // Button: left = 1, middle = 2, right = 3, back = 4, forward = 5; DOM numbers them from 0.
 const BUTTONS = [1, 2, 3, 4, 5];
+// Client pixels to guest pixels, for relative moves: the guest's own scale on the page.
+function guestScale() {
+  const w = video.videoWidth, h = video.videoHeight, r = video.getBoundingClientRect();
+  return w && h && r.width && r.height ? 1 / Math.min(r.width / w, r.height / h) : 1;
+}
 video.addEventListener("pointermove", (e) => {
+  if (pointer.relative) {
+    if (!pointer.locked()) return;
+    const scale = guestScale();
+    input.motion[0] += e.movementX * scale;
+    input.motion[1] += e.movementY * scale;
+    if (!input.motionDue) {
+      input.motionDue = true;
+      requestAnimationFrame(() => {
+        input.motionDue = false;
+        // Whole pixels; the rest waits for the next moves.
+        const [dx, dy] = input.motion.map(Math.trunc);
+        input.motion[0] -= dx;
+        input.motion[1] -= dy;
+        if (dx || dy) input.send(input.withLocks(e, [ev.motion(dx, dy)]));
+      });
+    }
+    return;
+  }
   const p = guestPixel(e);
   if (!p) return;
   if (input.syncLocks) input.send(input.withLocks(e, []));
@@ -382,7 +415,17 @@ video.addEventListener("pointermove", (e) => {
   input.move = p;
 });
 video.addEventListener("pointerdown", (e) => {
-  const button = BUTTONS[e.button], p = guestPixel(e);
+  const button = BUTTONS[e.button];
+  if (pointer.relative) {
+    e.preventDefault();
+    // The first click takes the pointer, and goes no further.
+    if (!pointer.locked()) { video.requestPointerLock(); return; }
+    if (!button) return;
+    input.buttons.add(button);
+    input.send(input.withLocks(e, [ev.button(button, true)]));
+    return;
+  }
+  const p = guestPixel(e);
   if (!button || !p) return;
   e.preventDefault();
   video.setPointerCapture(e.pointerId);
@@ -405,12 +448,43 @@ video.addEventListener("wheel", (e) => {
   input.send([ev.wheel(Math.round(e.deltaX * unit), Math.round(-e.deltaY * unit))]);
 }, { passive: false });
 
-// The guest pointer, drawn by the browser as its own cursor over the video.
-// PointerUpdate: shape = 1, visible = 2; PointerShape: width, height, hot_x, hot_y, rgba.
-const pointer = { css: "default", visible: true };
+// The guest pointer. Absolute (the guest places it where the user points): drawn by the browser
+// as its own cursor over the video. Relative (the guest only takes moves: no tablet, no guest
+// agent): the page holds the system pointer (Pointer Lock) once the user clicks the screen,
+// sends its moves, and draws the guest pointer where the guest puts it.
+// PointerUpdate: shape = 1, visible = 2, screen = 3, position = 4; PointerShape: width, height,
+// hot_x, hot_y, rgba; PointerPosition: x, y.
+const cursor = document.getElementById("cursor");
+const hint = document.getElementById("hint");
+const pointer = {
+  css: "default", image: "", hot: [0, 0], visible: true, relative: false, position: null,
+  locked: () => document.pointerLockElement === video,
+  setRelative(relative) {
+    this.relative = relative;
+    if (!relative && this.locked()) document.exitPointerLock();
+    this.draw();
+  },
+  // The guest pixel (x, y) on the page, the video being scaled to fit (object-fit: contain).
+  draw() {
+    hint.hidden = !this.relative || this.locked() || !input.channel;
+    video.style.cursor = this.relative ? "default" : this.visible ? this.css : "none";
+    const w = video.videoWidth, h = video.videoHeight;
+    if (!this.relative || !this.visible || !this.position || !this.image || !w || !h) {
+      cursor.style.display = "none";
+      return;
+    }
+    const r = video.getBoundingClientRect();
+    const scale = Math.min(r.width / w, r.height / h);
+    const [x, y] = this.position;
+    cursor.src = this.image;
+    cursor.style.left = `${r.left + (r.width - w * scale) / 2 + x * scale - this.hot[0]}px`;
+    cursor.style.top = `${r.top + (r.height - h * scale) / 2 + y * scale - this.hot[1]}px`;
+    cursor.style.display = "block";
+  },
+};
 function pointerUpdate(bytes) {
   const update = pb.parse(bytes);
-  // PointerUpdate: screen = 3. The page shows the first screen only.
+  // The page shows the first screen only.
   if (uint(update, 3) !== 0) return;
   if (update.has(1)) {
     const s = pb.parse(update.get(1)[0]);
@@ -418,11 +492,24 @@ function pointerUpdate(bytes) {
     const canvas = document.createElement("canvas");
     canvas.width = w; canvas.height = h;
     if (w && h) canvas.getContext("2d").putImageData(new ImageData(new Uint8ClampedArray(s.get(5)[0]), w, h), 0, 0);
-    pointer.css = `url(${canvas.toDataURL()}) ${uint(s, 3)} ${uint(s, 4)}, default`;
+    pointer.image = canvas.toDataURL();
+    pointer.hot = [uint(s, 3), uint(s, 4)];
+    pointer.css = `url(${pointer.image}) ${pointer.hot[0]} ${pointer.hot[1]}, default`;
   }
   if (update.has(2)) pointer.visible = update.get(2)[0] !== 0;
-  video.style.cursor = pointer.visible ? pointer.css : "none";
+  if (update.has(4)) {
+    const p = pb.parse(update.get(4)[0]);
+    pointer.position = [uint(p, 1), uint(p, 2)];
+  }
+  pointer.draw();
 }
+document.addEventListener("pointerlockchange", () => {
+  // The guest keeps no button pressed that the page no longer sees released.
+  if (!pointer.locked()) input.releaseAll();
+  pointer.draw();
+});
+window.addEventListener("resize", () => pointer.draw());
+video.addEventListener("resize", () => pointer.draw());
 
 // ---------------------------------------------------------------------------------------------
 // Clipboard, modelled on RDP: whoever copied last owns it, and the data move when someone

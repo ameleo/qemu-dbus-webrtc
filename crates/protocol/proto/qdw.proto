@@ -120,6 +120,7 @@ message InputEvent {
     PointerButton pointer_button = 3;
     Wheel wheel = 4;
     LockKeys lock_keys = 5;
+    PointerMotion pointer_motion = 6;
   }
 }
 
@@ -142,6 +143,16 @@ message PointerMove {
   uint32 screen = 1;
   uint32 x = 2;
   uint32 y = 3;
+}
+
+// The pointer moved by this much, in guest pixels, while it is relative (PointerMode): the
+// guest has no absolute pointing device (no tablet, no guest agent), only a mouse that moves by
+// steps. The client then holds the system pointer (a browser's Pointer Lock), sends its moves
+// as these, scaled from its pixels to the guest's, and draws the guest pointer where
+// PointerUpdate.position says. Ignored while the pointer is absolute.
+message PointerMotion {
+  int32 dx = 1;
+  int32 dy = 2;
 }
 
 enum Button {
@@ -185,10 +196,19 @@ message PointerUpdate {
     PointerShape shape = 1;
     // Whether the guest shows its pointer on this screen.
     bool visible = 2;
+    // Where the guest pointer is on this screen, its hot spot, in guest pixels: sent only while
+    // the pointer is relative (PointerMode), when the client draws it there, and again whenever
+    // the pointer becomes relative.
+    PointerPosition position = 4;
   }
   // The guest screen the update is about, as in PointerMove: 0 the first. The guest shows its
   // pointer on the screen it is on, and hides it on the others.
   uint32 screen = 3;
+}
+
+message PointerPosition {
+  uint32 x = 1;
+  uint32 y = 2;
 }
 
 message PointerShape {
@@ -317,7 +337,18 @@ message ControlMessage {
     // Server to client.
     BandwidthEstimate bandwidth_estimate = 3;
     Microphone microphone = 4;
+    PointerMode pointer_mode = 5;
   }
+}
+
+// How the guest takes the pointer. Sent to every client when its control channel opens, then
+// whenever it changes. Absolute (the default): the client sends where the pointer is
+// (PointerMove), and the system draws the guest's pointer shape. Relative: the guest only takes
+// moves by steps (a PS/2 or USB mouse, without tablet nor guest agent); the user's client sends
+// them (PointerMotion) while it holds the system pointer, and every client draws the guest
+// pointer where the guest puts it (PointerUpdate.position).
+message PointerMode {
+  bool relative = 1;
 }
 
 // Whether the guest records: an application in the guest has the microphone open. Sent to the
