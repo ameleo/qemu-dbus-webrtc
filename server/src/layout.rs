@@ -26,9 +26,12 @@ const SETTLE: Duration = Duration::from_millis(300);
 const APPLY_TIME: Duration = Duration::from_secs(3);
 /// Requests sent again for one layout, when the guest misses it.
 const RETRIES: u8 = 3;
-/// The sizes a guest screen may have (those of RDP's display control, MS-RDPEDISP).
+/// The sizes a guest screen may have (those of RDP's display control, MS-RDPEDISP 2.2.2.2.1:
+/// 200 to 8192 pixels, the width even; the height is made even too, for the video's 4:2:0).
 const MIN_SIZE: u32 = 200;
 const MAX_SIZE: u32 = 8192;
+/// The physical sizes taken, in millimetres (MS-RDPEDISP 2.2.2.2.1): 10 to 10,000.
+const PHYSICAL_SIZE: std::ops::RangeInclusive<u32> = 10..=10_000;
 
 /// A guest screen's size and place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,7 +52,11 @@ impl Size {
             return None;
         }
         let bounded = |v: u32| v.clamp(MIN_SIZE, MAX_SIZE) & !1;
-        let mm = |v: u32| u16::try_from(v).unwrap_or(0);
+        // MS-RDPEDISP 2.2.2.2.1: the physical size is ignored when either dimension is out of
+        // its bounds; 0 tells QEMU it is unknown.
+        let physical =
+            PHYSICAL_SIZE.contains(&monitor.width_mm) && PHYSICAL_SIZE.contains(&monitor.height_mm);
+        let mm = |v: u32| if physical { v as u16 } else { 0 };
         Some(Self {
             x: monitor.x,
             y: monitor.y,
@@ -184,19 +191,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn physical_sizes_out_of_bounds_are_ignored() {
+        let monitor = |width_mm, height_mm| Monitor {
+            width: 1920,
+            height: 1080,
+            width_mm,
+            height_mm,
+            ..Default::default()
+        };
+        let mm = |m: Monitor| {
+            let size = Size::of(&m).unwrap();
+            (size.width_mm, size.height_mm)
+        };
+        assert_eq!(mm(monitor(600, 340)), (600, 340));
+        assert_eq!(mm(monitor(10, 10_000)), (10, 10_000));
+        // Either out of bounds: both ignored.
+        assert_eq!(mm(monitor(9, 340)), (0, 0));
+        assert_eq!(mm(monitor(600, 10_001)), (0, 0));
+        assert_eq!(mm(monitor(70_000, 340)), (0, 0));
+        assert_eq!(mm(monitor(0, 0)), (0, 0));
+    }
+
+    #[test]
     fn sizes_the_guest_takes() {
         let monitor = |width, height| Monitor {
             width,
             height,
-            width_mm: 600,
+            width_mm: 800,
+            height_mm: 340,
             x: 1920,
             ..Default::default()
         };
         let size = Size::of(&monitor(3441, 1439)).unwrap();
-        assert_eq!(
-            (size.x, size.width, size.height, size.width_mm),
-            (1920, 3440, 1438, 600)
-        );
+        assert_eq!((size.x, size.width, size.height), (1920, 3440, 1438));
+        assert_eq!((size.width_mm, size.height_mm), (800, 340));
         let size = Size::of(&monitor(100, 9000)).unwrap();
         assert_eq!((size.width, size.height), (200, 8192));
         assert_eq!(Size::of(&monitor(0, 1080)), None);

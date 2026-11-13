@@ -286,7 +286,7 @@ async fn open(
                     server_message::Message::Error(Error { message }),
                 )
                 .await?;
-                let _ = socket.send(WsMessage::Close(None)).await;
+                close(&mut socket).await;
                 return Ok(());
             }
             let (expected, user, password) =
@@ -303,7 +303,7 @@ async fn open(
                     server_message::Message::Error(Error { message }),
                 )
                 .await?;
-                let _ = socket.send(WsMessage::Close(None)).await;
+                close(&mut socket).await;
                 return Ok(());
             }
             info!(uuid, user = hello.user, "logged in");
@@ -324,7 +324,7 @@ async fn open(
                 server_message::Message::Error(Error { message }),
             )
             .await?;
-            let _ = socket.send(WsMessage::Close(None)).await;
+            close(&mut socket).await;
             return Ok(());
         }
     };
@@ -342,6 +342,17 @@ async fn open(
         Err(e) => warn!(error = %format!("{e:#}"), "viewer session ended"),
     }
     Ok(())
+}
+
+/// Close the WebSocket cleanly, with the status of a normal closure (RFC 6455 7.4.1, 1000):
+/// the client takes the end of the session for one, not for a failure. Whether the close
+/// frame went or not, the session is over.
+async fn close(socket: &mut WebSocket) {
+    let frame = axum::extract::ws::CloseFrame {
+        code: axum::extract::ws::close_code::NORMAL,
+        reason: "".into(),
+    };
+    let _ = socket.send(WsMessage::Close(Some(frame))).await;
 }
 
 /// One message to the client, as a binary WebSocket message.
@@ -481,7 +492,7 @@ async fn viewer(
         }
     };
     // Whatever ended the session, the WebSocket closes cleanly: the client takes the end as one.
-    let _ = socket.send(WsMessage::Close(None)).await;
+    close(&mut socket).await;
     // Leave no key or button pressed in the guest, and the clipboard to the guest; of a VM that
     // stopped, there is nothing left to release, and calls to it would wait in vain.
     if !*shared.vm_stopped.borrow() {

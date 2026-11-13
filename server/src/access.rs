@@ -5,9 +5,9 @@
 //! clear: `qemu-dbus-webrtc hash-password` makes it.
 
 use anyhow::{Result, bail};
-use argon2::Argon2;
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::{Algorithm, Argon2, Params, Version};
 
 /// The server's user, and its password's Argon2id hash in the PHC format.
 #[derive(Debug, Clone)]
@@ -51,7 +51,12 @@ pub fn hash(password: &str) -> Result<String> {
         bail!("an empty password");
     }
     let salt = SaltString::generate(&mut OsRng);
-    Ok(Argon2::default()
+    // RFC 9106 section 4, the second recommended option, for when 2 GiB per hash is too much:
+    // Argon2id, t=3 iterations, p=4 lanes, m=2^16 KiB (64 MiB). Checking a password takes the
+    // parameters from its hash: hashes made with others still check.
+    let params = Params::new(64 * 1024, 3, 4, None)
+        .map_err(|e| anyhow::anyhow!("the Argon2 parameters: {e}"))?;
+    Ok(Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
         .hash_password(password.as_bytes(), &salt)
         .map_err(|e| anyhow::anyhow!("hashing the password: {e}"))?
         .to_string())
@@ -64,11 +69,27 @@ mod tests {
     #[test]
     fn passwords_are_checked() {
         let password = Password::new("alice".into(), hash("secret").unwrap()).unwrap();
-        assert!(password.hash.starts_with("$argon2id$"));
+        // RFC 9106's parameters, in the hash.
+        assert!(password.hash.starts_with("$argon2id$v=19$m=65536,t=3,p=4$"));
         assert!(password.check("alice", "secret"));
         assert!(!password.check("alice", "wrong"));
         assert!(!password.check("bob", "secret"));
         assert!(Password::new("alice".into(), "secret".into()).is_err());
         assert!(Password::new(String::new(), hash("secret").unwrap()).is_err());
+        // A hash made with other parameters still checks.
+        let older = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$"; // salt "somesalt"
+        let older = format!(
+            "{older}{}",
+            Argon2::default()
+                .hash_password(b"secret", &SaltString::from_b64("c29tZXNhbHQ").unwrap())
+                .unwrap()
+                .hash
+                .unwrap()
+        );
+        assert!(
+            Password::new("alice".into(), older)
+                .unwrap()
+                .check("alice", "secret")
+        );
     }
 }
