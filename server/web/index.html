@@ -390,6 +390,7 @@ function guestScale() {
   return w && h && r.width && r.height ? 1 / Math.min(r.width / w, r.height / h) : 1;
 }
 video.addEventListener("pointermove", (e) => {
+  if (shadow) return;
   if (pointer.relative) {
     if (!pointer.locked()) return;
     const scale = guestScale();
@@ -416,6 +417,7 @@ video.addEventListener("pointermove", (e) => {
 });
 video.addEventListener("pointerdown", (e) => {
   const button = BUTTONS[e.button];
+  if (shadow) return;
   if (pointer.relative) {
     e.preventDefault();
     // The first click takes the pointer, and goes no further.
@@ -466,7 +468,8 @@ const pointer = {
   },
   // The guest pixel (x, y) on the page, the video being scaled to fit (object-fit: contain).
   draw() {
-    hint.hidden = !this.relative || this.locked() || !input.channel;
+    // A shadow client only watches: it sees the guest pointer, and takes none.
+    hint.hidden = !this.relative || this.locked() || !input.channel || shadow;
     video.style.cursor = this.relative ? "default" : this.visible ? this.css : "none";
     const w = video.videoWidth, h = video.videoHeight;
     if (!this.relative || !this.visible || !this.position || !this.image || !w || !h) {
