@@ -250,7 +250,18 @@ fn software_encoder(full_chroma: bool, bitrate: u32) -> (String, &'static str) {
 
 /// Our own copy of `fd`, and its size, which must hold `height` rows of `stride` bytes from
 /// `offset`.
-fn own(fd: &OwnedFd, offset: u32, stride: u32, height: u32) -> Result<(OwnedFd, usize)> {
+fn own(
+    fd: &OwnedFd,
+    offset: u32,
+    width: u32,
+    stride: u32,
+    height: u32,
+) -> Result<(OwnedFd, usize)> {
+    // Rows at least as long as their pixels, 4 bytes each in every format taken: shorter, the
+    // last row would be read past what is checked below.
+    if u64::from(stride) < u64::from(width) * 4 {
+        bail!("rows of {stride} bytes for {width} pixels");
+    }
     // Our own descriptor: GStreamer closes it with the memory.
     let fd = fd.as_fd().try_clone_to_owned()?;
     let size = rustix::fs::seek(&fd, rustix::fs::SeekFrom::End(0)).context("framebuffer size")?;
@@ -484,7 +495,7 @@ impl Encoder {
     ) -> Result<()> {
         let format =
             video_format(fourcc).ok_or_else(|| anyhow!("unsupported fourcc {fourcc:#x}"))?;
-        let (fd, size) = own(fd, offset, stride, height)?;
+        let (fd, size) = own(fd, offset, width, stride, height)?;
         // SAFETY: the descriptor is a DMA-BUF, and owned by the memory from now on.
         let memory = unsafe { DmaBufAllocator::new().alloc_dmabuf(fd, size)? };
         self.install(memory, format, width, height, offset, stride)
@@ -502,7 +513,7 @@ impl Encoder {
         offset: u32,
         stride: u32,
     ) -> Result<()> {
-        let (fd, size) = own(fd, offset, stride, height)?;
+        let (fd, size) = own(fd, offset, width, stride, height)?;
         // SAFETY: the descriptor is a mappable file (a memfd), and owned by the memory from now
         // on.
         let memory =
@@ -635,6 +646,19 @@ impl Drop for Encoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn framebuffers_fit_their_file() {
+        let file = rustix::fs::memfd_create("test", rustix::fs::MemfdFlags::CLOEXEC).unwrap();
+        rustix::fs::ftruncate(&file, 64 * 4 * 8).unwrap();
+        // 64x8 pixels, 256-byte rows: the whole file.
+        assert!(own(&file, 0, 64, 256, 8).is_ok());
+        // One row more than the file holds.
+        assert!(own(&file, 0, 64, 256, 9).is_err());
+        assert!(own(&file, 4, 64, 256, 8).is_err());
+        // Rows shorter than their pixels.
+        assert!(own(&file, 0, 64, 255, 8).is_err());
+    }
 
     #[test]
     fn ten_bits_are_announced() {
