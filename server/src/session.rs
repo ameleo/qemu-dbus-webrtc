@@ -200,6 +200,25 @@ pub struct Session {
     paused: Arc<AtomicBool>,
     audio_src: gst_app::AppSrc,
     audio_viewers: AudioViewers,
+    /// Ends the session: an answer webrtcbin refuses.
+    closed: mpsc::UnboundedSender<Signal>,
+}
+
+/// Stops a pipeline when dropped, unless disarmed.
+struct StopOnDrop(Option<gst::Pipeline>);
+
+impl StopOnDrop {
+    fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        if let Some(pipeline) = self.0.take() {
+            let _ = pipeline.set_state(gst::State::Null);
+        }
+    }
 }
 
 impl Session {
@@ -247,6 +266,9 @@ rtcp-fb-transport-cc=(boolean)true,extmap-1=(string){TWCC_URI} \
         let pipeline = gst::parse::launch(&description)?
             .downcast::<gst::Pipeline>()
             .map_err(|_| anyhow!("not a pipeline"))?;
+        // Stopped if the session does not get started: GStreamer wants a pipeline stopped
+        // before it goes, and the session's own drop stops it once it is one.
+        let stop_on_failure = StopOnDrop(Some(pipeline.clone()));
         let rtps = (0..screens)
             .map(|i| {
                 pipeline
@@ -402,6 +424,7 @@ rtcp-fb-transport-cc=(boolean)true,extmap-1=(string){TWCC_URI} \
             None
         });
 
+        let closed_on_answer = signals.clone();
         let closed_on_error = signals.clone();
         let closed_on_input = signals.clone();
         let frames = signals.clone();
@@ -563,6 +586,7 @@ rtcp-fb-transport-cc=(boolean)true,extmap-1=(string){TWCC_URI} \
             src: audio_src.clone(),
             offset: None,
         });
+        stop_on_failure.disarm();
         Ok(Self {
             pipeline,
             webrtc,
@@ -573,6 +597,7 @@ rtcp-fb-transport-cc=(boolean)true,extmap-1=(string){TWCC_URI} \
             paused,
             audio_src,
             audio_viewers,
+            closed: closed_on_answer,
         })
     }
 
@@ -773,8 +798,24 @@ rtcp-fb-transport-cc=(boolean)true,extmap-1=(string){TWCC_URI} \
             gst_sdp::SDPMessage::parse_buffer(sdp.as_bytes()).context("parsing the answer")?;
         let answer =
             gst_webrtc::WebRTCSessionDescription::new(gst_webrtc::WebRTCSDPType::Answer, sdp);
+        // An answer webrtcbin refuses ends the session, rather than leave it waiting.
+        let closed = self.closed.clone();
+        let promise = gst::Promise::with_change_func(move |reply| {
+            let error = match reply {
+                Ok(Some(reply)) => reply.get::<gst::glib::Error>("error").ok(),
+                Ok(None) => None,
+                Err(e) => Some(gst::glib::Error::new(
+                    gst::CoreError::Failed,
+                    &format!("{e:?}"),
+                )),
+            };
+            if let Some(error) = error {
+                warn!(%error, "the client's answer is refused");
+                let _ = closed.send(Signal::Closed);
+            }
+        });
         self.webrtc
-            .emit_by_name::<()>("set-remote-description", &[&answer, &None::<gst::Promise>]);
+            .emit_by_name::<()>("set-remote-description", &[&answer, &promise]);
         Ok(())
     }
 
