@@ -102,6 +102,16 @@ fn fourcc(code: u32) -> String {
         .collect()
 }
 
+/// A task aborted when this is dropped: one that follows the VM, whose connection it holds, ends
+/// with what started it, an attachment that fails part way included.
+struct Aborted(tokio::task::JoinHandle<()>);
+
+impl Drop for Aborted {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// A VM the server is attached to. Dropping it detaches from it: its encoders stop, and QEMU
 /// forgets its listeners.
 pub struct Vm {
@@ -115,7 +125,7 @@ pub struct Vm {
     display: tokio::task::JoinHandle<()>,
     /// Turns true once the display loop is over, its encoders finished.
     finished: tokio::sync::watch::Receiver<bool>,
-    agent: tokio::task::JoinHandle<()>,
+    agent: Aborted,
 }
 
 impl Vm {
@@ -129,7 +139,7 @@ impl Vm {
         if let Some(stop) = self.stop.lock().unwrap().take() {
             let _ = stop.send(());
         }
-        self.agent.abort();
+        self.agent.0.abort();
     }
 
     /// Detach from the VM now, and wait until its encoders are finished: when the server
@@ -258,7 +268,7 @@ async fn start_in(
     // The guest's screens at the size and place of the user's monitors.
     let layout = layout::Layout::start(graphic.into_iter().map(|(_, _, c)| c).collect());
     let agent_mouse = input::AgentMouse::default();
-    let agent_task = tokio::spawn(
+    let agent_task = Aborted(tokio::spawn(
         agent::run(
             vm_connection.clone(),
             agent_mouse.clone(),
@@ -268,14 +278,14 @@ async fn start_in(
             cameras.clone(),
         )
         .instrument(span.clone()),
-    );
+    ));
     // How the guest takes the pointer: relative without its agent nor a tablet.
     let input = qdw_qemu::input::Input::new(&vm_connection, first).await?;
     let (mode_tx, pointer_mode) = tokio::sync::watch::channel(false);
-    let mode = tokio::spawn(
+    let mode = Aborted(tokio::spawn(
         input::follow_mode(input.mouse.clone(), agent_mouse.present(), mode_tx)
             .instrument(span.clone()),
-    );
+    ));
     // Turns true when the display loop ends: the VM stopped, unless the server detached.
     let (stopped_tx, stopped_rx) = tokio::sync::watch::channel(false);
     let shared = web::Shared {
@@ -307,7 +317,7 @@ async fn start_in(
         .path("/org/qemu/Display1/VM")?
         .build()
         .await?;
-    let gone = tokio::spawn(gone(peer).instrument(span.clone()));
+    let gone = Aborted(tokio::spawn(gone(peer).instrument(span.clone())));
     let display_task = tokio::spawn(
         async move {
             let mut stop = stop_rx;
@@ -452,7 +462,7 @@ async fn start_in(
                 continue;
             }
             _ = &mut stop => break,
-            _ = &mut gone => break,
+            _ = &mut gone.0 => break,
         };
         let Some(event) = event else {
             warn!("the display listeners are gone");
@@ -719,8 +729,8 @@ async fn start_in(
         }
     }
     // The watches on the VM go with the loop: they hold the VM's connection.
-    gone.abort();
-    mode.abort();
+    drop(gone);
+    drop(mode);
     stopped_tx.send_replace(true);
     stopped.notify_one();
     // What hangs on the VM goes first: its listeners, its sound, and the layout task, which
