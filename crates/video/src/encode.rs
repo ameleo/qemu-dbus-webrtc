@@ -318,12 +318,17 @@ fn video_format(fourcc: u32) -> Option<gst_video::VideoFormat> {
     }
 }
 
-/// The appsrc keeps the latest frame only, dropping older ones: without a bound, it queues
-/// every frame pushed while the encoder is behind (the GPU busy), and the picture lags more
-/// and more (measured: 35 frames, over a second, after 2 s at 30 frames a second into an
-/// encoder taking 10). Every frame shows the framebuffer as it is when encoded, so the latest
-/// loses nothing. `downstream` drops the oldest (measured too).
+/// The encoder's input keeps the latest frame only, dropping older ones: without a bound, the
+/// appsrc queues every frame pushed while the encoder is behind (the GPU busy), and the picture
+/// lags more and more (measured: 35 frames, over a second, after 2 s at 30 frames a second into
+/// an encoder taking 10). Every frame shows the framebuffer as it is when encoded, so the
+/// latest loses nothing. `downstream` drops the oldest (measured too).
 const LATEST: &str = "leaky-type=downstream max-buffers=1";
+/// The queue after it, which gives the encoder its own thread, holds one frame too and drops
+/// the same way: three frames waiting in it kept the picture half a second behind a slow
+/// encoder, encoded one after the other for nothing (measured as above: 529 ms behind with
+/// three, 128 ms with one, about the time the encoder takes for a frame).
+const QUEUE: &str = "queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream";
 
 /// Where the encoded frames go.
 type Sink = Arc<std::sync::Mutex<Box<dyn FnMut(&gst::Buffer) + Send>>>;
@@ -352,7 +357,7 @@ fn build(
         let (encoder, profile) = software_encoder(settings.full_chroma, settings.bitrate);
         let description = format!(
             "appsrc name=src is-live=true format=time do-timestamp=true {LATEST} \
-             ! queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 \
+             ! {QUEUE} \
              ! {encoder} ! {profile} \
              ! {parser} ! {stream_caps} \
              ! appsink name=sink sync=false",
@@ -374,7 +379,7 @@ fn build(
     );
     let description = format!(
         "appsrc name=src is-live=true format=time do-timestamp=true {LATEST} \
-         ! queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 \
+         ! {QUEUE} \
          ! vapostproc \
          ! video/x-raw(memory:VAMemory),format={raw},colorimetry=bt601 \
          ! {encoder} name=encoder rate-control=cbr bitrate={bitrate} cpb-size={cpb} \
