@@ -203,22 +203,34 @@ impl Vms {
                             return Err(e);
                         }
                     };
+                    // In the table with its client already counted, under one lock: the reaper
+                    // never sees it without one (it would detach a VM just attached), and a
+                    // server that stops, which empties the table under this lock, either has
+                    // it to shut down or finds it not there yet, and it is shut down here.
+                    // UNTESTED: both need a VM to attach, and the reaper or a stop in between.
                     let entry = Arc::new(Attached {
                         vm,
                         reap: self.reap.clone(),
-                        clients: AtomicUsize::new(0),
+                        clients: AtomicUsize::new(1),
                         detach_at: Default::default(),
                     });
-                    self.attached
-                        .lock()
-                        .await
-                        .insert(uuid.to_owned(), entry.clone());
-                    entry
+                    let mut attached = self.attached.lock().await;
+                    if *self.stopping.borrow() {
+                        drop(attached);
+                        entry.vm.shut_down().await;
+                        anyhow::bail!("the server stops");
+                    }
+                    attached.insert(uuid.to_owned(), entry.clone());
+                    drop(attached);
+                    return Ok(Some(Client {
+                        attached: entry,
+                        left: false,
+                    }));
                 }
             };
-            // Counted under the table's lock, as the reaper looks: a VM it sees without
-            // clients is one no client is joining. The reaper may have detached it since it was
-            // looked up: then attach again.
+            // A VM already attached: its client counted under the table's lock, as the reaper
+            // looks: a VM it sees without clients is one no client is joining. The reaper may
+            // have detached it since it was looked up: then attach again.
             let attached = self.attached.lock().await;
             if !attached.get(uuid).is_some_and(|e| Arc::ptr_eq(e, &entry)) {
                 continue;
