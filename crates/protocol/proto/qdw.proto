@@ -39,10 +39,12 @@ message ServerMessage {
 }
 
 // Why the session is over, when there is more to say than its end: the server closes the
-// WebSocket right after. The server always ends a session by closing the WebSocket cleanly
-// (a Close frame), whatever ended it, the VM stopping included: a clean close is an end the
-// client can take as such (a native client closes its windows), where a connection lost
-// without one is a failure of the network.
+// WebSocket right after. The server always ends a session with a Close frame, whose status
+// (RFC 6455 7.4.1) says how: 1000, a normal end, the client leaving, the VM stopping, or a
+// refusal its Error explains (a native client closes its windows); 1001, the server going
+// away, stopped or restarted (it may come back); 1011, a failure of the server (the client may
+// try again). A connection lost without a Close frame is a failure of the network, or a crash
+// of the server.
 message Ended {
   enum Reason {
     REASON_UNSPECIFIED = 0;

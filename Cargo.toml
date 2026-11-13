@@ -41,3 +41,11 @@ toml = { version = "0.9", default-features = false, features = ["parse", "displa
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zbus = { version = "5", default-features = false, features = ["tokio", "p2p"] }
+
+# Password hashes take RFC 9106's parameters (64 MiB, t=3): unoptimized, they take seconds, in
+# the tests and in a debug server.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

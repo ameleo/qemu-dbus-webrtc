@@ -178,7 +178,11 @@ pub struct Tls {
 /// the clipboard, the microphone and the camera to pages served in HTTPS only). A VM's page is
 /// `/vm/<uuid>/`, its signalling `/vm/<uuid>/signal` (`qdw_protocol::signalling_path`).
 pub async fn serve(listen: SocketAddr, tls: Tls, vms: Arc<Vms>, auth: Auth) -> Result<()> {
-    let state = AppState { vms, auth };
+    let state = AppState {
+        vms,
+        auth,
+        checks: Arc::new(tokio::sync::Semaphore::new(CHECKS_AT_ONCE)),
+    };
     let app =
         axum::Router::new()
             .route(
@@ -224,7 +228,13 @@ async fn page(Path(id): Path<String>, State(AppState { vms, .. }): State<AppStat
 struct AppState {
     vms: Arc<Vms>,
     auth: Auth,
+    /// Password checks at once: each takes 64 MiB and a CPU for a while (Argon2), so that many
+    /// logins at once, an attacker's, wait their turn rather than exhaust the host.
+    checks: Arc<tokio::sync::Semaphore>,
 }
+
+/// How many password checks run at once.
+const CHECKS_AT_ONCE: usize = 2;
 
 /// The error that asks a client for an account: the page shows its login form on it.
 const ACCOUNT_REQUIRED: &str = "an account is required";
@@ -238,7 +248,7 @@ async fn upgrade(
     ws: WebSocketUpgrade,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Path(id): Path<String>,
-    State(AppState { vms, auth }): State<AppState>,
+    State(AppState { vms, auth, checks }): State<AppState>,
 ) -> Response {
     // Which VM, without starting it nor attaching to it: that waits for the client's account.
     let uuid = match vms.uuid_of(&id).await {
@@ -252,7 +262,7 @@ async fn upgrade(
     let stopping = vms.stopping();
     ws.on_upgrade(move |socket| async move {
         info!(%peer, uuid, "viewer connected");
-        if let Err(e) = open(socket, &vms, &auth, &uuid, stopping).await {
+        if let Err(e) = open(socket, &vms, &auth, &checks, &uuid, stopping).await {
             warn!(%peer, uuid, error = %format!("{e:#}"), "viewer session ended");
         }
     })
@@ -265,6 +275,7 @@ async fn open(
     mut socket: WebSocket,
     vms: &Vms,
     auth: &Auth,
+    checks: &tokio::sync::Semaphore,
     uuid: &str,
     stopping: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -280,30 +291,20 @@ async fn open(
         Auth::Password(expected) => {
             // No account given: the client asks for one, with no delay (nothing is guessed).
             if hello.user.is_empty() {
-                let message = ACCOUNT_REQUIRED.to_string();
-                send(
-                    &mut socket,
-                    server_message::Message::Error(Error { message }),
-                )
-                .await?;
-                close(&mut socket).await;
+                refuse(&mut socket, ACCOUNT_REQUIRED).await;
                 return Ok(());
             }
             let (expected, user, password) =
                 (expected.clone(), hello.user.clone(), hello.password.clone());
-            // Argon2 takes its time: off the async threads.
-            let granted =
-                tokio::task::spawn_blocking(move || expected.check(&user, &password)).await?;
+            // Argon2 takes its time and memory: off the async threads, a few at once.
+            let granted = {
+                let _turn = checks.acquire().await?;
+                tokio::task::spawn_blocking(move || expected.check(&user, &password)).await?
+            };
             if !granted {
                 info!(uuid, user = hello.user, "wrong user or password");
                 tokio::time::sleep(REFUSAL_DELAY).await;
-                let message = "wrong user or password".to_string();
-                send(
-                    &mut socket,
-                    server_message::Message::Error(Error { message }),
-                )
-                .await?;
-                close(&mut socket).await;
+                refuse(&mut socket, "wrong user or password").await;
                 return Ok(());
             }
             info!(uuid, user = hello.user, "logged in");
@@ -319,12 +320,7 @@ async fn open(
         Ok(client) => client,
         Err(message) => {
             warn!(uuid, error = message, "VM not attached");
-            send(
-                &mut socket,
-                server_message::Message::Error(Error { message }),
-            )
-            .await?;
-            close(&mut socket).await;
+            refuse(&mut socket, &message).await;
             return Ok(());
         }
     };
@@ -344,15 +340,24 @@ async fn open(
     Ok(())
 }
 
-/// Close the WebSocket cleanly, with the status of a normal closure (RFC 6455 7.4.1, 1000):
-/// the client takes the end of the session for one, not for a failure. Whether the close
-/// frame went or not, the session is over.
-async fn close(socket: &mut WebSocket) {
+/// Close the WebSocket cleanly, with the status `code` (RFC 6455 7.4.1): 1000 for an end the
+/// session meant (the client leaves, the VM stops, a refusal its Error explains), 1001 when
+/// the server goes away, 1011 when it failed. Whether the close frame went or not, the
+/// session is over.
+async fn close(socket: &mut WebSocket, code: u16) {
     let frame = axum::extract::ws::CloseFrame {
-        code: axum::extract::ws::close_code::NORMAL,
+        code,
         reason: "".into(),
     };
     let _ = socket.send(WsMessage::Close(Some(frame))).await;
+}
+
+/// Refuse the client, saying why (an Error), then close: the end is a normal one (1000), the
+/// refusal its reason.
+async fn refuse(socket: &mut WebSocket, message: &str) {
+    let message = message.to_owned();
+    let _ = send(socket, server_message::Message::Error(Error { message })).await;
+    close(socket, axum::extract::ws::close_code::NORMAL).await;
 }
 
 /// One message to the client, as a binary WebSocket message.
@@ -392,6 +397,7 @@ async fn viewer(
     shadow: bool,
     server_stopping: watch::Receiver<bool>,
 ) -> Result<()> {
+    let stopping = server_stopping.clone();
     let shared = client.shared().clone();
     if !codecs
         .iter()
@@ -403,13 +409,7 @@ async fn viewer(
         } else {
             format!("this client does not decode {wanted} in WebRTC")
         };
-        send(
-            &mut socket,
-            server_message::Message::Error(Error {
-                message: message.clone(),
-            }),
-        )
-        .await?;
+        refuse(&mut socket, &message).await;
         anyhow::bail!(message);
     }
 
@@ -491,8 +491,14 @@ async fn viewer(
             Ok(())
         }
     };
-    // Whatever ended the session, the WebSocket closes cleanly: the client takes the end as one.
-    close(&mut socket).await;
+    // Whatever ended the session, the WebSocket closes with a close frame, whose status tells
+    // the client how: a normal end, the server going away (it may come back), or a failure.
+    let code = match &ended {
+        Ok(()) if *stopping.borrow() => axum::extract::ws::close_code::AWAY,
+        Ok(()) => axum::extract::ws::close_code::NORMAL,
+        Err(_) => axum::extract::ws::close_code::ERROR,
+    };
+    close(&mut socket, code).await;
     // Leave no key or button pressed in the guest, and the clipboard to the guest; of a VM that
     // stopped, there is nothing left to release, and calls to it would wait in vain.
     if !*shared.vm_stopped.borrow() {

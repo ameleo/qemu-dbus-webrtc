@@ -56,7 +56,13 @@ impl Size {
         // its bounds; 0 tells QEMU it is unknown.
         let physical =
             PHYSICAL_SIZE.contains(&monitor.width_mm) && PHYSICAL_SIZE.contains(&monitor.height_mm);
-        let mm = |v: u32| if physical { v as u16 } else { 0 };
+        let mm = |v: u32| {
+            if physical {
+                u16::try_from(v).unwrap_or(0)
+            } else {
+                0
+            }
+        };
         Some(Self {
             x: monitor.x,
             y: monitor.y,

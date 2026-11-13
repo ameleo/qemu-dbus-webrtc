@@ -179,10 +179,15 @@ function cameraTracks(sdp) {
   }
   return mids;
 }
+// The close status says how the session ended (RFC 6455 7.4.1): 1000 a normal end, 1001 the
+// server going away, 1011 a failure of the server; no close frame, the connection lost.
 const onClose = (event) => {
   if (ended) return;
   pc.close();
-  fail(event.wasClean ? "The session ended." : "Disconnected.");
+  fail(!event.wasClean ? "Disconnected."
+    : event.code === 1011 ? "The session failed on the server."
+    : event.code === 1001 ? "The server stopped."
+    : "The session ended.");
 };
 // Leaving the page (closed, reloaded, or another address) ends the session with a clean close,
 // as the native client does: the server takes it as the client leaving, not as a network failure.
