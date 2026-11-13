@@ -16,6 +16,9 @@ use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use zbus::zvariant::OwnedFd;
 
+/// How long the agent has to answer the D-Bus handshake, once the guest opened its port.
+const HANDSHAKE_TIME: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The name of the agent's character device (`-chardev dbus,name=...`).
 pub const PORT_NAME: &str = "fr.ameleo.agent.0";
 
@@ -326,9 +329,14 @@ pub async fn connect(
             .auth_mechanism(zbus::AuthMechanism::Anonymous),
     )?
     .build();
-    // The handshake goes through QEMU once it holds the other end: both at once.
+    // The handshake goes through QEMU once it holds the other end: both at once. An agent that
+    // opened its port but never answers (stuck, or of another version) is given up after
+    // `HANDSHAKE_TIME`: the caller tries again, rather than wait for ever.
     let theirs: std::os::fd::OwnedFd = theirs.into();
-    let (connection, registered) = tokio::join!(connection, chardev.register(theirs.into()));
+    let handshake = async { tokio::join!(connection, chardev.register(theirs.into())) };
+    let (connection, registered) = tokio::time::timeout(HANDSHAKE_TIME, handshake)
+        .await
+        .context("the guest agent did not answer the D-Bus handshake")?;
     registered.context("handing the agent's character device a stream")?;
     let connection = connection.context("D-Bus handshake with the guest agent")?;
     Ok(Agent { connection, port })

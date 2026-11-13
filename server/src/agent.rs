@@ -19,8 +19,9 @@ use crate::printers::Printers;
 const RETRY: Duration = Duration::from_secs(3);
 
 /// Keep a connection to the guest agent: when the agent or the guest restarts, connect again
-/// once the guest opens the agent's port, and bring the drives and printers back. Runs until the program ends; without an agent device on the VM,
-/// there is no clipboard, no drives and no printers.
+/// once the guest opens the agent's port, and bring the drives, printers and cameras back.
+/// Runs until the VM is detached; without an agent device on the VM, there is no clipboard, no
+/// drives, no printers and no cameras.
 pub async fn run(
     vm: zbus::Connection,
     mouse: AgentMouse,
