@@ -283,6 +283,10 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
     }
 
     let min = bitrate.min.unwrap_or(MIN_BITRATE);
+    // The bitrate follows the estimate by its relative changes: from 0, it never would.
+    if min == 0 {
+        bail!("[bitrate] min must be above 0 kbit/s");
+    }
     let max = max_bitrate.unwrap_or(MAX_BITRATE).max(min);
     let start = bitrate.start.unwrap_or(START_BITRATE).clamp(min, max);
     let bitrates = session::Bitrates { min, start, max };
@@ -381,6 +385,19 @@ mod tests {
         assert!(c.providers.libvirt.is_none());
         assert_eq!(c.providers.statics.0.len(), 2);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_bitrate_of_zero_is_refused() {
+        let dir = std::env::temp_dir().join(format!("qdw-config-zero-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("host.toml");
+        std::fs::write(&path, "[bitrate]\nmin = 0\n").unwrap();
+        let error = parse(args(&format!("--config {}", path.to_str().unwrap())))
+            .err()
+            .unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(error.to_string().contains("above 0"), "{error}");
     }
 
     #[test]
