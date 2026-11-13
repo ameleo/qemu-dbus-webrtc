@@ -48,6 +48,10 @@ pub struct Pcm {
 impl Pcm {
     fn info(self) -> Option<gst_audio::AudioInfo> {
         use gst_audio::AudioFormat as F;
+        // A rate divides durations, channels sizes frames: none of either is no sound.
+        if self.rate == 0 || self.channels == 0 {
+            return None;
+        }
         let format = match (self.bits, self.float, self.signed, self.big_endian) {
             (8, false, true, _) => F::S8,
             (8, false, false, _) => F::U8,
@@ -192,5 +196,29 @@ impl AudioEncoder {
 impl Drop for AudioEncoder {
     fn drop(&mut self) {
         let _ = self.pipeline.set_state(gst::State::Null);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pcm(rate: u32, channels: u8) -> Pcm {
+        Pcm {
+            bits: 16,
+            signed: true,
+            float: false,
+            big_endian: false,
+            rate,
+            channels,
+        }
+    }
+
+    #[test]
+    fn formats_without_sound_are_refused() {
+        gst::init().unwrap();
+        assert!(pcm(48_000, 2).info().is_some());
+        assert!(pcm(0, 2).info().is_none());
+        assert!(pcm(48_000, 0).info().is_none());
     }
 }
