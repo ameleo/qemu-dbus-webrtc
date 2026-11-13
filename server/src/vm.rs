@@ -53,10 +53,8 @@ const OUTPUT_WINDOW: Duration = Duration::from_secs(1);
 const MAX_FPS: u32 = 30;
 const FRAME_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / MAX_FPS as u64);
 
-/// How often the VM is asked whether it still runs, and how long it has to answer: QEMU's
-/// listeners do not say when it goes.
+/// How often the VM is asked whether it still runs: QEMU's listeners do not say when it goes.
 const ALIVE_INTERVAL: Duration = Duration::from_secs(1);
-const ALIVE_TIME: Duration = Duration::from_secs(5);
 
 /// How often the rates of each console are reported.
 const RATE_INTERVAL: Duration = Duration::from_secs(5);
@@ -292,6 +290,7 @@ async fn start_in(
         .path("/org/qemu/Display1/VM")?
         .build()
         .await?;
+    let gone = tokio::spawn(gone(peer).instrument(span.clone()));
     let display_task = tokio::spawn(
         async move {
             let mut stop = stop_rx;
@@ -330,8 +329,7 @@ async fn start_in(
     let mut updates: HashMap<u32, u32> = HashMap::new();
     let mut since = Instant::now();
     let mut report = tokio::time::interval(RATE_INTERVAL);
-    let mut alive = tokio::time::interval(ALIVE_INTERVAL);
-    alive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut gone = gone;
     let mut still = tokio::time::interval(STILL_FRAME_INTERVAL);
     still.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -435,14 +433,7 @@ async fn start_in(
                 continue;
             }
             _ = &mut stop => break,
-            _ = alive.tick() => {
-                match tokio::time::timeout(ALIVE_TIME, peer.ping()).await {
-                    Ok(Ok(())) => continue,
-                    Ok(Err(e)) => warn!(error = %e, "the VM stopped"),
-                    Err(_) => warn!("the VM stopped answering"),
-                }
-                break;
-            }
+            _ = &mut gone => break,
         };
         let Some(event) = event else {
             warn!("the display listeners are gone");
@@ -702,6 +693,8 @@ async fn start_in(
             }
         }
     }
+    // The watch on the VM goes with the loop: it holds the VM's connection.
+    gone.abort();
     stopped_tx.send_replace(true);
     stopped.notify_one();
     // What hangs on the VM goes first: its listeners, its sound, and the layout task, which
@@ -737,6 +730,20 @@ async fn start_in(
 /// A new DMA-BUF framebuffer on `console`: point its encoder at it, creating the encoder first
 /// if needed.
 #[allow(clippy::too_many_arguments)]
+/// Wait until the VM is gone: asked every `ALIVE_INTERVAL` whether it runs, it answers with an
+/// error (no `org.qemu` on its bus, the bus or the peer-to-peer connection gone). Apart from
+/// the display loop, which a slow answer does not hold; and a slow answer, QEMU's main loop
+/// busy, is not a VM gone.
+async fn gone(peer: zbus::fdo::PeerProxy<'static>) {
+    loop {
+        tokio::time::sleep(ALIVE_INTERVAL).await;
+        if let Err(e) = peer.ping().await {
+            warn!(error = %e, "the VM stopped");
+            return;
+        }
+    }
+}
+
 /// Share `total` kbit/s among the screens that are on: each gets a floor (its share of
 /// `min_total`, or of `total` when it is lower), and the rest goes by area, so that the sum
 /// stays within `total`.
