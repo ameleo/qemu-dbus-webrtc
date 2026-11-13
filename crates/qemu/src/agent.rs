@@ -26,6 +26,18 @@ const CALL_TIME: std::time::Duration = std::time::Duration::from_secs(60);
 /// The name of the agent's character device (`-chardev dbus,name=...`).
 pub const PORT_NAME: &str = "fr.ameleo.agent.0";
 
+/// The VM has no agent character device: no agent will ever come.
+#[derive(Debug)]
+pub struct NoDevice;
+
+impl std::fmt::Display for NoDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the VM has no {PORT_NAME} character device")
+    }
+}
+
+impl std::error::Error for NoDevice {}
+
 /// Where we export the interfaces the guest calls back.
 pub const HOST_PATH: &str = "/fr/ameleo/Host";
 
@@ -306,7 +318,8 @@ async fn wait_port(port: &mut zbus::fdo::PropertiesChangedStream, open: bool) {
 
 /// Connect to the guest agent. `host` adds our interfaces (the calls the guest makes) to the
 /// connection, at [`HOST_PATH`]. Returns once the guest has opened the agent's port and the
-/// agent answered the handshake, so not before the guest runs it.
+/// agent answered the handshake, so not before the guest runs it; fails with [`NoDevice`] when
+/// the VM has no agent device.
 pub async fn connect(
     vm: &zbus::Connection,
     host: impl FnOnce(
@@ -372,5 +385,5 @@ async fn find_chardev(vm: &zbus::Connection) -> Result<ChardevProxy<'static>> {
             return Ok(chardev);
         }
     }
-    anyhow::bail!("the VM has no {PORT_NAME} character device")
+    Err(NoDevice.into())
 }

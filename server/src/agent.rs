@@ -70,15 +70,14 @@ pub async fn run(
                 drop(agent);
                 info!("guest agent gone");
             }
+            Err(e) if e.is::<agent::NoDevice>() => {
+                info!(
+                    "no guest agent device on this VM: no clipboard, no drives, no printers, no cameras"
+                );
+                return;
+            }
             Err(e) => {
-                let e = format!("{e:#}");
-                if e.contains("no fr.ameleo.agent.0") {
-                    info!(
-                        "no guest agent device on this VM: no clipboard, no drives, no printers, no cameras"
-                    );
-                    return;
-                }
-                warn!(error = %e, "guest agent not reachable");
+                warn!(error = %format!("{e:#}"), "guest agent not reachable");
                 tokio::time::sleep(RETRY).await;
             }
         }
