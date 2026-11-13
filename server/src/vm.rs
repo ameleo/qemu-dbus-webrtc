@@ -659,7 +659,7 @@ async fn start_in(
                 if let Some(&screen) = screen_of.get(&console) {
                     // Its moves wake the viewers only when they draw it: while it is relative.
                     let relative = *pointer_mode.borrow();
-                    let position = u32::try_from(x).ok().zip(u32::try_from(y).ok());
+                    let position = Some((x, y));
                     pointer_tx.send_if_modified(|pointers| {
                         let pointer = &mut pointers[screen];
                         let shown = std::mem::replace(&mut pointer.visible, visible) != visible;

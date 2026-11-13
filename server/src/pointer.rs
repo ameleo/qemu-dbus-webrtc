@@ -12,8 +12,25 @@ use qdw_protocol::v1::{PointerPosition, PointerShape, PointerUpdate, pointer_upd
 pub struct Pointer {
     pub shape: Option<Arc<PointerShape>>,
     pub visible: bool,
-    /// Where the guest put it, its hot spot, in guest pixels, once it said.
-    pub position: Option<(u32, u32)>,
+    /// Where the guest put it, once it said: the top left corner of its shape, in guest pixels,
+    /// as QEMU gives it (its SPICE display adds the hot spot to it), so negative near the top
+    /// and the left of the screen.
+    pub position: Option<(i32, i32)>,
+}
+
+impl Pointer {
+    /// Where its hot spot is on the screen, as the clients take it: the corner of its shape
+    /// plus the shape's hot spot.
+    fn hot_spot(&self) -> Option<(u32, u32)> {
+        let (x, y) = self.position?;
+        let (hot_x, hot_y) = self
+            .shape
+            .as_ref()
+            .map_or((0, 0), |shape| (shape.hot_x, shape.hot_y));
+        let at =
+            |corner: i32, hot: u32| u32::try_from(i64::from(corner) + i64::from(hot)).unwrap_or(0);
+        Some((at(x, hot_x), at(y, hot_y)))
+    }
 }
 
 /// The largest pointer taken, in pixels each way.
@@ -90,11 +107,12 @@ impl Sent {
             if !relative {
                 // Sent again when the pointer becomes relative.
                 sent.position = None;
-            } else if let Some((x, y)) = pointer.position
-                && sent.position != pointer.position
+            } else if let Some(position) = pointer.hot_spot()
+                && sent.position != Some(position)
             {
+                let (x, y) = position;
                 messages.push(encode(screen, Update::Position(PointerPosition { x, y })));
-                sent.position = pointer.position;
+                sent.position = Some(position);
             }
         }
         messages
@@ -126,16 +144,24 @@ mod tests {
     /// Positions go only while the pointer is relative, and again each time it becomes so.
     #[test]
     fn positions_while_relative() {
-        let pointers = |x| {
+        // A shape whose hot spot is at 4, 6: the guest gives the corner, the clients the spot.
+        let shape = Arc::new(PointerShape {
+            width: 8,
+            height: 8,
+            hot_x: 4,
+            hot_y: 6,
+            rgba: vec![0; 8 * 8 * 4],
+        });
+        let pointers = |x: i32| {
             vec![Pointer {
-                shape: None,
+                shape: Some(shape.clone()),
                 visible: true,
-                position: Some((x, 5)),
+                position: Some((x - 4, -1)),
             }]
         };
         let mut sent = Sent::default();
-        // The visibility first, then nothing new while absolute.
-        assert_eq!(sent.update(&pointers(1), false).len(), 1);
+        // The shape and the visibility first, then nothing new while absolute.
+        assert_eq!(sent.update(&pointers(1), false).len(), 2);
         assert!(sent.update(&pointers(2), false).is_empty());
         // Relative: the position, once.
         let messages = sent.update(&pointers(2), true);
