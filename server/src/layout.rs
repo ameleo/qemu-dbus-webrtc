@@ -138,6 +138,14 @@ fn matches(screens: &[Size], shown: &[(u32, u32)]) -> bool {
         .all(|(s, &shown)| shown == (s.width, s.height))
 }
 
+/// When to look whether the guest missed `goal`: only while it shows other sizes and requests
+/// are left. Once it shows the goal, no timer: a time already past would fire at once, again and
+/// again; a later change of the guest's sizes wakes the loop anyway.
+fn check_at(goal: Option<&(Vec<Size>, Instant, u8)>, shown: &[(u32, u32)]) -> Option<Instant> {
+    goal.filter(|(screens, _, left)| *left > 0 && !matches(screens, shown))
+        .map(|(_, sent, _)| *sent + APPLY_TIME)
+}
+
 async fn run(
     consoles: Vec<ConsoleProxy<'static>>,
     mut wanted: watch::Receiver<Option<Vec<Size>>>,
@@ -146,11 +154,7 @@ async fn run(
     // The layout last asked of the guest, when, and the requests left for it.
     let mut goal: Option<(Vec<Size>, Instant, u8)> = None;
     loop {
-        // When to look whether the guest missed the goal.
-        let check = goal
-            .as_ref()
-            .filter(|(_, _, left)| *left > 0)
-            .map(|(_, sent, _)| *sent + APPLY_TIME);
+        let check = check_at(goal.as_ref(), &shown.borrow());
         tokio::select! {
             changed = wanted.changed() => {
                 if changed.is_err() {
@@ -234,6 +238,28 @@ mod tests {
         let size = Size::of(&monitor(100, 9000)).unwrap();
         assert_eq!((size.width, size.height), (200, 8192));
         assert_eq!(Size::of(&monitor(0, 1080)), None);
+    }
+
+    #[test]
+    fn a_goal_reached_sets_no_timer() {
+        let screens = vec![Size {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            width_mm: 0,
+            height_mm: 0,
+        }];
+        let sent = Instant::now();
+        let goal = (screens, sent, RETRIES);
+        assert_eq!(check_at(Some(&goal), &[(1920, 1080)]), None);
+        assert_eq!(
+            check_at(Some(&goal), &[(1024, 768)]),
+            Some(sent + APPLY_TIME)
+        );
+        let spent = (goal.0.clone(), sent, 0);
+        assert_eq!(check_at(Some(&spent), &[(1024, 768)]), None);
+        assert_eq!(check_at(None, &[(1024, 768)]), None);
     }
 
     #[test]
