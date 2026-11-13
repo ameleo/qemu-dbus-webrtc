@@ -19,6 +19,8 @@ use tracing::debug;
 
 /// A wheel notch, in the units of `Wheel` messages.
 const NOTCH: i32 = 120;
+/// The largest wheel step taken from a message, in those units: 20 notches.
+const MAX_WHEEL: i32 = 20 * NOTCH;
 
 /// The scancodes of the lock keys.
 const CAPS_LOCK_KEY: u32 = 0x3A;
@@ -146,10 +148,17 @@ impl ViewerInput {
     /// Through the agent, as it comes, in 1/120 of a notch; to the QEMU tablet, whole notches,
     /// the rest waiting for more.
     async fn wheel(&mut self, dx: i32, dy: i32) -> Result<()> {
+        // A step of at most `MAX_WHEEL` notches: a client's value is not trusted to be sane,
+        // and a huge one would have the guest scroll for ever.
+        let (dx, dy) = (
+            dx.clamp(-MAX_WHEEL, MAX_WHEEL),
+            dy.clamp(-MAX_WHEEL, MAX_WHEEL),
+        );
         if let Some(mouse) = self.agent.get() {
             mouse.scroll(dx, dy).await?;
             return Ok(());
         }
+        // The rest of the last steps is less than a notch: no overflow.
         self.wheel.0 += dx;
         self.wheel.1 += dy;
         while self.wheel.1 >= NOTCH {
@@ -188,14 +197,24 @@ impl ViewerInput {
         Ok(())
     }
 
-    /// Release whatever the viewer left pressed.
+    /// Release whatever the viewer left pressed: everything, a failure on one key not leaving
+    /// the next ones pressed; the first failure, if any.
     pub async fn release_all(&mut self) -> Result<()> {
-        for keycode in self.keys.drain() {
-            self.qemu.key(keycode, false).await?;
+        let mut first = Ok(());
+        for keycode in std::mem::take(&mut self.keys) {
+            if let Err(e) = self.qemu.key(keycode, false).await
+                && first.is_ok()
+            {
+                first = Err(e);
+            }
         }
         for button in std::mem::take(&mut self.buttons) {
-            self.button(button, false).await?;
+            if let Err(e) = self.button(button, false).await
+                && first.is_ok()
+            {
+                first = Err(e);
+            }
         }
-        Ok(())
+        first
     }
 }
