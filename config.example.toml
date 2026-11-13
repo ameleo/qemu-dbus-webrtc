@@ -18,9 +18,29 @@ password = "$argon2id$v=19$m=19456,t=2,p=1$..."
 # The pages and their signalling. Default: 127.0.0.1:8090, this host only.
 address = "0.0.0.0:8090"
 # Required: the pages are served in HTTPS only (plain HTTP would carry the sessions in clear,
-# and browsers give the microphone, the camera and the clipboard only in HTTPS).
+# and browsers give the microphone, the camera and the clipboard only in HTTPS). With [acme],
+# where the certificate it gets goes (by default these).
 certificate = "/etc/qemu-dbus-webrtc/tls/cert.pem"
 key = "/etc/qemu-dbus-webrtc/tls/key.pem"
+
+# The certificate from an ACME authority, public or the organization's own (step-ca, OpenBao,
+# FreeIPA...), renewed once two thirds of its lifetime have gone and taken without a restart.
+# An authorization the authority already holds as valid takes no challenge; otherwise HTTP-01,
+# answered on `http` for the time of the validation (a private authority reaches servers on
+# private addresses).
+# [acme]
+# directory = "https://ca.example.com/acme/acme/directory"
+# domains = ["vdi.example.com"]
+# contact = ["mailto:admin@example.com"]
+# # External Account Binding, when the authority asks for it.
+# eab_kid = "..."
+# eab_hmac_key = "..."
+# # The roots of a private authority's own HTTPS certificate.
+# ca_bundle = "/etc/pki/ca-trust/source/anchors/internal-root.pem"
+# # Where to answer HTTP-01. Default: 0.0.0.0:80.
+# http = "0.0.0.0:80"
+# # Where the account is kept. Default: /etc/qemu-dbus-webrtc/acme.
+# dir = "/etc/qemu-dbus-webrtc/acme"
 
 [video]
 # How every VM is encoded.
