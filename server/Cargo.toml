@@ -38,3 +38,6 @@ gstreamer-webrtc = { workspace = true, features = ["v1_22"] }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }

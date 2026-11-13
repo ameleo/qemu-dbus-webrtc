@@ -25,6 +25,8 @@ use instant_acme::{
     Account, AccountCredentials, AuthorizationStatus, ChallengeType, ExternalAccountKey,
     Identifier, NewAccount, NewOrder, OrderStatus, RetryPolicy,
 };
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -88,9 +90,10 @@ impl Acme {
 
     /// The validity of the certificate in place, if it is for every name asked.
     fn lifetime(&self) -> Result<(SystemTime, SystemTime)> {
-        let pem = std::fs::read(&self.certificate)
+        let pem_bytes = std::fs::read(&self.certificate)
             .with_context(|| format!("reading {}", self.certificate.display()))?;
-        let (_, pem) = x509_parser::pem::parse_x509_pem(&pem).context("not a PEM certificate")?;
+        let (_, pem) =
+            x509_parser::pem::parse_x509_pem(&pem_bytes).context("not a PEM certificate")?;
         let certificate = pem.parse_x509().context("not a certificate")?;
         let names: Vec<String> = certificate
             .subject_alternative_name()
@@ -101,9 +104,7 @@ impl Acme {
                     .general_names
                     .iter()
                     .filter_map(|name| match name {
-                        x509_parser::extensions::GeneralName::DNSName(dns) => {
-                            Some(dns.to_ascii_lowercase())
-                        }
+                        x509_parser::extensions::GeneralName::DNSName(dns) => Some(name_of(dns)),
                         x509_parser::extensions::GeneralName::IPAddress(ip) => {
                             ip_of(ip).map(|ip| ip.to_string())
                         }
@@ -112,13 +113,18 @@ impl Acme {
                     .collect()
             })
             .unwrap_or_default();
-        if let Some(missing) = self
-            .domains
-            .iter()
-            .find(|d| !names.contains(&d.to_ascii_lowercase()))
-        {
+        if let Some(missing) = self.domains.iter().find(|d| !names.contains(&name_of(d))) {
             bail!("the certificate in place is not for {missing}");
         }
+        // The key beside it must be its own: written one after the other, a crash between the
+        // two leaves a new key beside the old certificate.
+        let chain = CertificateDer::pem_slice_iter(&pem_bytes)
+            .collect::<Result<Vec<_>, _>>()
+            .context("reading the certificate chain")?;
+        let key = PrivateKeyDer::from_pem_file(&self.key)
+            .with_context(|| format!("reading {}", self.key.display()))?;
+        rustls::sign::CertifiedKey::from_der(chain, key, &rustls::crypto::ring::default_provider())
+            .context("the key in place is not the certificate's")?;
         let validity = certificate.validity();
         let time = |t: x509_parser::time::ASN1Time| {
             SystemTime::UNIX_EPOCH + Duration::from_secs(t.timestamp().max(0) as u64)
@@ -170,7 +176,10 @@ impl Acme {
             info!("every name already validated for the account: no challenge");
         } else {
             // Answer the challenges, then tell the authority they are ready.
-            let server = serve_challenges(self.http, tokens.clone()).await?;
+            // Stopped however this ends: left running, it would hold the port for every later
+            // try. UNTESTED: an error while the challenges are served (needs a failing
+            // authority).
+            let _server = AbortOnDrop(serve_challenges(self.http, tokens.clone()).await?);
             let mut authorizations = order.authorizations();
             while let Some(authorization) = authorizations.next().await {
                 let mut authorization = authorization?;
@@ -187,7 +196,6 @@ impl Acme {
             let status = order
                 .poll_ready(&RetryPolicy::new().timeout(VALIDATION_TIME))
                 .await;
-            server.abort();
             match status.context("waiting for the validation")? {
                 OrderStatus::Ready => {}
                 status => bail!("the order is {status:?}: the validation failed"),
@@ -269,12 +277,32 @@ pub async fn keep(acme: Acme, reload: impl Fn() + Send + 'static) {
             continue;
         }
         match acme.renew().await {
-            Ok(()) => reload(),
+            Ok(()) => {
+                reload();
+                // A certificate due at once (not for every name asked, or already old): asked
+                // again at once, it would be again and again, up to the authority's limits.
+                // UNTESTED: needs an authority issuing such a certificate.
+                if acme.due() <= SystemTime::now() {
+                    warn!(
+                        "the new certificate is due for renewal already: trying again in an hour"
+                    );
+                    tokio::time::sleep(RETRY_AFTER).await;
+                }
+            }
             Err(e) => {
                 warn!(error = %format!("{e:#}"), "certificate not renewed: trying again in an hour");
                 tokio::time::sleep(RETRY_AFTER).await;
             }
         }
+    }
+}
+
+/// A task aborted when this is dropped.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
@@ -327,11 +355,77 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     std::fs::rename(&temporary, path).with_context(|| format!("writing {}", path.display()))
 }
 
+/// A name as certificates are compared on it: an IP address in its canonical form (an IPv6 one
+/// is written many ways), a DNS name in lower case (RFC 4343).
+fn name_of(name: &str) -> String {
+    match name.parse::<IpAddr>() {
+        Ok(ip) => ip.to_string(),
+        Err(_) => name.to_ascii_lowercase(),
+    }
+}
+
 /// An IP address from its bytes in a certificate.
 fn ip_of(bytes: &[u8]) -> Option<IpAddr> {
     match bytes.len() {
         4 => Some(IpAddr::from(<[u8; 4]>::try_from(bytes).ok()?)),
         16 => Some(IpAddr::from(<[u8; 16]>::try_from(bytes).ok()?)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A self-signed certificate for `names`, and its key, in PEM.
+    fn certificate(names: &[&str]) -> (String, String) {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+        let certificate = rcgen::CertificateParams::new(names)
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        (certificate.pem(), key.serialize_pem())
+    }
+
+    /// The certificate in place is kept only if it is for every name asked, whatever their
+    /// spelling, and its key is beside it.
+    #[test]
+    fn the_certificate_in_place_is_checked() {
+        let dir = std::env::temp_dir().join(format!("qdw-acme-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let acme = Acme {
+            directory: String::new(),
+            domains: vec!["Host.Example".into(), "2001:DB8:0::1".into()],
+            contact: Vec::new(),
+            eab: None,
+            ca_bundle: None,
+            http: "127.0.0.1:0".parse().unwrap(),
+            dir: dir.clone(),
+            certificate: dir.join("cert.pem"),
+            key: dir.join("key.pem"),
+        };
+        let place = |(certificate, key): &(String, String)| {
+            std::fs::write(&acme.certificate, certificate).unwrap();
+            std::fs::write(&acme.key, key).unwrap();
+        };
+        let good = certificate(&["host.example", "2001:db8::1"]);
+        place(&good);
+        assert!(acme.due() > SystemTime::now());
+        // Another key beside it.
+        let other = certificate(&["host.example", "2001:db8::1"]);
+        place(&(good.0.clone(), other.1));
+        assert_eq!(acme.due(), SystemTime::UNIX_EPOCH);
+        // A name missing.
+        place(&certificate(&["host.example"]));
+        assert_eq!(acme.due(), SystemTime::UNIX_EPOCH);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn names_are_compared_in_one_form() {
+        assert_eq!(name_of("2001:DB8:0::1"), "2001:db8::1");
+        assert_eq!(name_of("Host.Example"), "host.example");
+        assert_eq!(name_of("192.0.2.1"), "192.0.2.1");
     }
 }
