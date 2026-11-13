@@ -35,6 +35,10 @@ type Tokens = Arc<std::sync::Mutex<Vec<(String, String)>>>;
 
 /// How long the authority has to validate the challenges, and to issue the certificate.
 const VALIDATION_TIME: Duration = Duration::from_secs(120);
+/// How long a whole renewal may take: an authority that takes the connection and never answers
+/// would hold it for ever (the ACME client sets no time on its requests), and the renewals
+/// after it with it.
+const RENEWAL_TIME: Duration = Duration::from_secs(300);
 /// After a failed renewal, how long before the next try.
 const RETRY_AFTER: Duration = Duration::from_secs(3600);
 /// The longest wait between two looks at the certificate.
@@ -88,6 +92,13 @@ impl Acme {
         }
     }
 
+    /// Whether the certificate in place can serve: for every name asked, its key beside it, and
+    /// not expired yet. A server starts with it, and leaves its renewal to [`keep`].
+    pub fn usable(&self) -> bool {
+        self.lifetime()
+            .is_ok_and(|(_, not_after)| SystemTime::now() < not_after)
+    }
+
     /// The validity of the certificate in place, if it is for every name asked.
     fn lifetime(&self) -> Result<(SystemTime, SystemTime)> {
         let pem_bytes = std::fs::read(&self.certificate)
@@ -132,8 +143,14 @@ impl Acme {
         Ok((time(validity.not_before), time(validity.not_after)))
     }
 
-    /// Get a certificate from the authority, and write it with its key.
+    /// Get a certificate from the authority, and write it with its key: within `RENEWAL_TIME`.
     pub async fn renew(&self) -> Result<()> {
+        tokio::time::timeout(RENEWAL_TIME, self.order())
+            .await
+            .context("the authority did not answer in time")?
+    }
+
+    async fn order(&self) -> Result<()> {
         let account = self.account().await?;
         let identifiers: Vec<Identifier> = self
             .domains
@@ -207,8 +224,14 @@ impl Acme {
             .poll_certificate(&RetryPolicy::new().timeout(VALIDATION_TIME))
             .await
             .context("getting the certificate")?;
-        write_private(&self.key, key.as_bytes())?;
-        write_private(&self.certificate, chain.as_bytes())?;
+        // Both written and synced beside their places, then put in place one right after the
+        // other: a crash while writing leaves the pair in place as it was. Between the two
+        // renames, the new key is beside the old certificate: `lifetime` tells, and the pair is
+        // renewed.
+        let new_key = write_beside(&self.key, key.as_bytes())?;
+        let new_certificate = write_beside(&self.certificate, chain.as_bytes())?;
+        put_in_place(&new_key, &self.key)?;
+        put_in_place(&new_certificate, &self.certificate)?;
         info!(domains = ?self.domains, certificate = %self.certificate.display(), "certificate renewed");
         Ok(())
     }
@@ -336,6 +359,16 @@ async fn serve_challenges(
 
 /// Write `bytes` to `path`, readable by its owner only, replacing the file whole.
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    put_in_place(&write_beside(path, bytes)?, path)
+}
+
+fn put_in_place(temporary: &Path, path: &Path) -> Result<()> {
+    std::fs::rename(temporary, path).with_context(|| format!("writing {}", path.display()))
+}
+
+/// Write `bytes` to a file beside `path`, readable by its owner only, synced: to be renamed to
+/// `path`.
+fn write_beside(path: &Path, bytes: &[u8]) -> Result<PathBuf> {
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     if let Some(dir) = path.parent() {
@@ -352,7 +385,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     file.write_all(bytes)?;
     file.sync_all()?;
-    std::fs::rename(&temporary, path).with_context(|| format!("writing {}", path.display()))
+    Ok(temporary)
 }
 
 /// A name as certificates are compared on it: an IP address in its canonical form (an IPv6 one
@@ -412,13 +445,26 @@ mod tests {
         let good = certificate(&["host.example", "2001:db8::1"]);
         place(&good);
         assert!(acme.due() > SystemTime::now());
+        assert!(acme.usable());
         // Another key beside it.
         let other = certificate(&["host.example", "2001:db8::1"]);
         place(&(good.0.clone(), other.1));
         assert_eq!(acme.due(), SystemTime::UNIX_EPOCH);
+        assert!(!acme.usable());
         // A name missing.
         place(&certificate(&["host.example"]));
         assert_eq!(acme.due(), SystemTime::UNIX_EPOCH);
+        assert!(!acme.usable());
+        // Expired: due, and of no use to start with.
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params =
+            rcgen::CertificateParams::new(vec!["host.example".into(), "2001:db8::1".into()])
+                .unwrap();
+        params.not_before = rcgen::date_time_ymd(2020, 1, 1);
+        params.not_after = rcgen::date_time_ymd(2020, 4, 1);
+        place(&(params.self_signed(&key).unwrap().pem(), key.serialize_pem()));
+        assert!(acme.due() < SystemTime::now());
+        assert!(!acme.usable());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

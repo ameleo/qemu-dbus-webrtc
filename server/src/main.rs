@@ -27,7 +27,7 @@ mod vm;
 mod vms;
 mod web;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tracing::{info, warn};
 
 use qdw_video::encode::Codec;
@@ -76,16 +76,14 @@ async fn main() -> Result<()> {
     if matches!(auth, config::Auth::None) && !config.listen.ip().is_loopback() {
         warn!(listen = %config.listen, "[auth] method is none: anyone who reaches this address sees the VMs");
     }
-    // The certificate from ACME first, if it gives it and none is in place yet or it is due.
+    // The certificate from ACME first, when none in place can serve (none, expired, for other
+    // names, or without its key): the pages need one. One that can serve, even due for renewal,
+    // serves at once, and is renewed while it does (`acme::keep`): the start does not wait for
+    // the authority.
     if let Some(acme) = &config.acme
-        && acme.due() <= std::time::SystemTime::now()
-        && let Err(e) = acme.renew().await
+        && !acme.usable()
     {
-        if tls.certificate.exists() {
-            warn!(error = %format!("{e:#}"), "certificate not renewed: the one in place serves");
-        } else {
-            return Err(e.context("no certificate"));
-        }
+        acme.renew().await.context("no certificate")?;
     }
     let rustls = web::load_tls(&tls).await?;
     if let Some(acme) = config.acme {
