@@ -14,6 +14,9 @@ pub struct Pointer {
     pub visible: bool,
 }
 
+/// The largest pointer taken, in pixels each way.
+const MAX_POINTER: u32 = 512;
+
 /// A pointer shape from QEMU: 32-bit pixels holding 0xAARRGGBB in host order, so B, G, R, A in
 /// memory on the little-endian hosts we run on.
 pub fn shape(
@@ -24,6 +27,10 @@ pub fn shape(
     pixels: &[u8],
 ) -> Option<PointerShape> {
     let (width, height) = (u32::try_from(width).ok()?, u32::try_from(height).ok()?);
+    // A pointer is small: a larger shape is a broken one, and the page draws it on a canvas.
+    if width > MAX_POINTER || height > MAX_POINTER {
+        return None;
+    }
     if pixels.len() != width as usize * height as usize * 4 {
         return None;
     }
@@ -87,4 +94,19 @@ fn encode(screen: u32, update: Update) -> Vec<u8> {
         screen,
     }
     .encode_to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shapes_are_checked() {
+        let shape = shape(2, 1, 0, 0, &[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+        assert_eq!(shape.rgba, [3, 2, 1, 4, 7, 6, 5, 8]);
+        assert!(super::shape(2, 2, 0, 0, &[0; 8]).is_none());
+        assert!(super::shape(-1, 1, 0, 0, &[]).is_none());
+        assert!(super::shape(513, 1, 0, 0, &[0; 513 * 4]).is_none());
+        assert!(super::shape(i32::MAX, i32::MAX, 0, 0, &[]).is_none());
+    }
 }

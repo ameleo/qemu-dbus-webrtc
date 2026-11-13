@@ -103,13 +103,18 @@ pub struct Built {
     pub kept: Vec<usize>,
 }
 
-/// Write a CLIPRDR_FILELIST. `None` if a path is empty, absolute, or goes through `.` or `..`:
-/// a list with one is broken or hostile. A path too long for a FILEDESCRIPTORW (259 UTF-16 code
+/// Write a CLIPRDR_FILELIST. `None` if a path is empty, absolute, or goes through `.` or `..`,
+/// or holds what Windows reads as a separator, a drive or a stream (`\`, `:`) or a control
+/// character: a list with one is broken or hostile, and Windows would write where the list
+/// says. A path too long for a FILEDESCRIPTORW (259 UTF-16 code
 /// units, a limit of the Windows format) is left out, with everything under it if it is a
 /// directory: the rest of the list still goes.
 pub fn build(files: &[File]) -> Option<Built> {
     let escapes = |path: &str| {
         path.is_empty()
+            || path
+                .chars()
+                .any(|c| c == '\\' || c == ':' || c.is_control())
             || path
                 .split('/')
                 .any(|c| c.is_empty() || c == "." || c == "..")
@@ -144,9 +149,13 @@ pub fn build(files: &[File]) -> Option<Built> {
             FILE_ATTRIBUTE_NORMAL
         };
         d[ATTRIBUTES..ATTRIBUTES + 4].copy_from_slice(&attributes.to_le_bytes());
-        if file.modified_ms > 0 {
+        // A time that does not fit a FILETIME is left out, as an unknown one.
+        let filetime = (file.modified_ms > 0)
+            .then(|| file.modified_ms.checked_add(FILETIME_TO_UNIX_MS))
+            .flatten()
+            .and_then(|ms| u64::try_from(ms).ok()?.checked_mul(10_000));
+        if let Some(filetime) = filetime {
             flags |= FD_WRITESTIME;
-            let filetime = (file.modified_ms + FILETIME_TO_UNIX_MS) as u64 * 10_000;
             d[WRITE_TIME..WRITE_TIME + 8].copy_from_slice(&filetime.to_le_bytes());
         }
         let size = if file.directory { 0 } else { file.size };
@@ -190,6 +199,41 @@ mod tests {
                 modified_ms: 0,
             },
         ]
+    }
+
+    #[test]
+    fn hostile_paths_are_refused() {
+        let file = |path: &str| File {
+            path: path.into(),
+            directory: false,
+            size: 1,
+            modified_ms: 0,
+        };
+        for path in [
+            "a/../b",
+            "/etc/passwd",
+            "a//b",
+            "a\\..\\..\\Windows\\x",
+            "C:\\Windows\\x",
+            "file.txt:stream",
+            "a\u{0}b",
+            "a\nb",
+        ] {
+            assert!(build(&[file(path)]).is_none(), "{path:?}");
+        }
+        assert!(build(&[file("a/b c/d.txt")]).is_some());
+    }
+
+    #[test]
+    fn times_out_of_range_are_left_out() {
+        let built = build(&[File {
+            path: "f".into(),
+            directory: false,
+            size: 1,
+            modified_ms: i64::MAX,
+        }])
+        .unwrap();
+        assert_eq!(parse(&built.list).unwrap()[0].modified_ms, 0);
     }
 
     #[test]
