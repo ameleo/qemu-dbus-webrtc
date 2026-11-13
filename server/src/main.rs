@@ -76,17 +76,24 @@ async fn main() -> Result<()> {
         warn!(listen = %config.listen, "[auth] method is none: anyone who reaches this address sees the VMs");
     }
     let served = vms.clone();
-    tokio::spawn(async move {
-        if let Err(e) = web::serve(config.listen, tls, served, auth).await {
-            warn!(error = %format!("{e:#}"), "the viewer pages are down");
-        }
-    });
+    let mut serving = tokio::spawn(web::serve(config.listen, tls, served, auth));
     // Stopped (Ctrl+C, or systemd): the sessions end cleanly, each telling its client the server
     // stops, before the process goes. Only a crash leaves the clients without a word.
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     tokio::select! {
         result = tokio::signal::ctrl_c() => result?,
         _ = terminate.recv() => {}
+        // Not serving (the address taken, the certificate unreadable): a server that serves
+        // nothing fails, and its service manager sees it.
+        served = &mut serving => {
+            let error = match served {
+                Ok(Ok(())) => anyhow::anyhow!("the viewer pages stopped"),
+                Ok(Err(e)) => e,
+                Err(e) => anyhow::anyhow!("the viewer pages failed: {e}"),
+            };
+            vms.stop();
+            return Err(error.context("serving the viewer pages"));
+        }
     }
     info!("stopping: the sessions end");
     vms.stop();
