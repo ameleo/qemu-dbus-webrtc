@@ -150,8 +150,9 @@ impl AudioEncoder {
         Ok(())
     }
 
-    /// Samples of the guest, in the last format set.
-    pub fn push(&self, samples: Vec<u8>) {
+    /// Samples of the guest, in the last format set: whole frames, a part of one left out (it
+    /// would shift every later sample).
+    pub fn push(&self, mut samples: Vec<u8>) {
         let mut stream = self.stream.lock().unwrap();
         let Some((info, next)) = stream.as_mut() else {
             return;
@@ -159,7 +160,12 @@ impl AudioEncoder {
         let Some(now) = self.pipeline.current_running_time() else {
             return;
         };
-        let frames = (samples.len() / info.bpf() as usize) as u64;
+        let frame = (info.bpf() as usize).max(1);
+        samples.truncate(samples.len() - samples.len() % frame);
+        if samples.is_empty() {
+            return;
+        }
+        let frames = (samples.len() / frame) as u64;
         let duration =
             gst::ClockTime::from_nseconds(frames * 1_000_000_000 / u64::from(info.rate()));
         // Where the previous buffer ended, unless that is too far from the clock.
