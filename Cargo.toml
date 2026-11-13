@@ -34,6 +34,7 @@ protox = "0.10"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rpassword = "7"
 rustix = "1"
+subtle = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = "1"

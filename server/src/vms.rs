@@ -132,6 +132,11 @@ impl Vms {
         self.providers.names()
     }
 
+    /// How the VMs are encoded: what a client must decode.
+    pub fn config(&self) -> &VmConfig {
+        &self.config
+    }
+
     /// The UUID of the VM `id`, a UUID or a VM's name: `None` when no provider runs a VM by
     /// that name; an error when several do.
     pub async fn uuid_of(&self, id: &str) -> Result<Option<String>> {

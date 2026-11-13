@@ -211,16 +211,10 @@ pub async fn serve(listen: SocketAddr, tls: Tls, vms: Arc<Vms>, auth: Auth) -> R
     Ok(())
 }
 
-/// A VM's page; by a VM's name, a redirection to the page by its UUID, the address that stays.
-async fn page(Path(id): Path<String>, State(AppState { vms, .. }): State<AppState>) -> Response {
-    if crate::vms::normalize(&id).is_some() {
-        return Html(PAGE).into_response();
-    }
-    match vms.uuid_of(&id).await {
-        Ok(Some(uuid)) => Redirect::temporary(&format!("/vm/{uuid}/")).into_response(),
-        Ok(None) => (StatusCode::NOT_FOUND, "no such VM on this host").into_response(),
-        Err(e) => (StatusCode::CONFLICT, format!("{e:#}")).into_response(),
-    }
+/// A VM's page, by its UUID or its name. The same page whatever the VM, whether it exists or
+/// not: which VMs the host runs is said only to a client that logged in (on the signalling).
+async fn page() -> Html<&'static str> {
+    Html(PAGE)
 }
 
 /// What the pages and the signalling share.
@@ -239,8 +233,11 @@ const CHECKS_AT_ONCE: usize = 2;
 /// The error that asks a client for an account: the page shows its login form on it.
 const ACCOUNT_REQUIRED: &str = "an account is required";
 
-/// How long a client has to say hello, its account in it.
-const HELLO_TIME: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long a client has to say hello, its account in it: the page and the native client say
+/// it as soon as the WebSocket opens, and a connection that says nothing is not kept.
+const HELLO_TIME: std::time::Duration = std::time::Duration::from_secs(10);
+/// The longest VM id taken: a UUID, or a VM's name.
+const MAX_ID: usize = 255;
 /// How long a wrong account waits for its answer: guessing passwords takes that long each.
 const REFUSAL_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
@@ -250,33 +247,30 @@ async fn upgrade(
     Path(id): Path<String>,
     State(AppState { vms, auth, checks }): State<AppState>,
 ) -> Response {
-    // Which VM, without starting it nor attaching to it: that waits for the client's account.
-    let uuid = match vms.uuid_of(&id).await {
-        Ok(Some(uuid)) => uuid,
-        Ok(None) => {
-            info!(%peer, id, "no such VM");
-            return (StatusCode::NOT_FOUND, "no such VM on this host").into_response();
-        }
-        Err(e) => return (StatusCode::CONFLICT, format!("{e:#}")).into_response(),
-    };
+    // Which VM is asked only once the client logged in: before, the answer would tell anyone
+    // which VMs the host runs. The id must look like one, a UUID or a name.
+    if id.is_empty() || id.len() > MAX_ID || id.contains(['/', '\\', '\0']) {
+        return (StatusCode::NOT_FOUND, "no such VM on this host").into_response();
+    }
     let stopping = vms.stopping();
     ws.on_upgrade(move |socket| async move {
-        info!(%peer, uuid, "viewer connected");
-        if let Err(e) = open(socket, &vms, &auth, &checks, &uuid, stopping).await {
-            warn!(%peer, uuid, error = %format!("{e:#}"), "viewer session ended");
+        info!(%peer, id, "viewer connected");
+        if let Err(e) = open(socket, &vms, &auth, &checks, &id, stopping).await {
+            warn!(%peer, id, error = %format!("{e:#}"), "viewer session ended");
         }
     })
     .into_response()
 }
 
-/// A client came for the VM `uuid`: its hello, its account checked, then the VM, started or
-/// attached to if need be, and the session.
+/// A client came for the VM `id` (a UUID or a name): its hello, its account checked, whether
+/// it decodes the video, then the VM, found, started or attached to if need be, and the
+/// session.
 async fn open(
     mut socket: WebSocket,
     vms: &Vms,
     auth: &Auth,
     checks: &tokio::sync::Semaphore,
-    uuid: &str,
+    id: &str,
     stopping: watch::Receiver<bool>,
 ) -> Result<()> {
     let hello = match tokio::time::timeout(HELLO_TIME, receive(&mut socket)).await {
@@ -302,14 +296,45 @@ async fn open(
                 tokio::task::spawn_blocking(move || expected.check(&user, &password)).await?
             };
             if !granted {
-                info!(uuid, user = hello.user, "wrong user or password");
+                info!(id, user = hello.user, "wrong user or password");
                 tokio::time::sleep(REFUSAL_DELAY).await;
                 refuse(&mut socket, "wrong user or password").await;
                 return Ok(());
             }
-            info!(uuid, user = hello.user, "logged in");
+            info!(id, user = hello.user, "logged in");
         }
     }
+    // A client that does not decode the video is told so before the VM starts for it.
+    let config = vms.config();
+    let (codec, full_chroma) = (config.settings.codec, config.settings.full_chroma);
+    if !hello
+        .codecs
+        .iter()
+        .any(|c| codec.decoded_by(full_chroma, c))
+    {
+        let wanted = codec.mime_type();
+        let message = if full_chroma {
+            format!("this client does not decode {wanted} in 4:4:4 in WebRTC")
+        } else {
+            format!("this client does not decode {wanted} in WebRTC")
+        };
+        info!(id, message, "client refused");
+        refuse(&mut socket, &message).await;
+        return Ok(());
+    }
+    // Which VM, now the client may know.
+    let uuid = match vms.uuid_of(id).await {
+        Ok(Some(uuid)) => uuid,
+        Ok(None) => {
+            refuse(&mut socket, "no such VM on this host").await;
+            return Ok(());
+        }
+        Err(e) => {
+            refuse(&mut socket, &format!("{e:#}")).await;
+            return Ok(());
+        }
+    };
+    let uuid = uuid.as_str();
     // The VM now: started if it is off and its manager may, attached if need be.
     let attached = match vms.client(uuid).await {
         Ok(Some(client)) => Ok(client),
@@ -399,19 +424,6 @@ async fn viewer(
 ) -> Result<()> {
     let stopping = server_stopping.clone();
     let shared = client.shared().clone();
-    if !codecs
-        .iter()
-        .any(|c| shared.codec.decoded_by(shared.full_chroma, c))
-    {
-        let wanted = shared.codec.mime_type();
-        let message = if shared.full_chroma {
-            format!("this client does not decode {wanted} in 4:4:4 in WebRTC")
-        } else {
-            format!("this client does not decode {wanted} in WebRTC")
-        };
-        refuse(&mut socket, &message).await;
-        anyhow::bail!(message);
-    }
 
     // The video in 10 bits if this viewer and all the others decode it.
     let deep = codecs.iter().any(|c| shared.codec.deep_by(c));

@@ -41,7 +41,10 @@ impl Password {
         let password_ok = Argon2::default()
             .verify_password(password.as_bytes(), &hash)
             .is_ok();
-        password_ok & (user == self.user)
+        // In constant time too: the time does not tell how much of the user matched.
+        let user_ok: bool =
+            subtle::ConstantTimeEq::ct_eq(user.as_bytes(), self.user.as_bytes()).into();
+        password_ok & user_ok
     }
 }
 

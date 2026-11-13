@@ -2,9 +2,10 @@
 //
 // Messages between qemu-dbus-webrtc and its clients (a browser page, a native client).
 //
-// A server serves every VM of its host. Signalling runs over a WebSocket at /vm/<uuid>/signal
-// (the VM's page is /vm/<uuid>/; an unknown VM is a 404), one ClientMessage or ServerMessage
-// per binary WebSocket message:
+// A server serves every VM of its host. Signalling runs over a WebSocket at /vm/<id>/signal,
+// <id> the VM's UUID or name (its page is /vm/<id>/), one ClientMessage or ServerMessage per
+// binary WebSocket message. Whether the VM exists is said only after the hello's account is
+// checked: an unknown VM is an Error then, like a wrong account. The exchange:
 //
 // 1. the client says which video codecs it decodes: ClientMessage.hello;
 // 2. the server makes the WebRTC offer (ServerMessage.offer), or refuses (ServerMessage.error):

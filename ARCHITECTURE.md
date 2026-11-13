@@ -17,8 +17,9 @@ libvirt, plain QEMU) starts and stops it.
   libvirt through libvirt-dbus (every domain with a D-Bus display, running or not, by UUID and
   name; the bus of a running one's display from its live definition; and starting one that is
   off, when `[libvirt] start` allows it), Proxmox VE (QMP sockets and VM configurations), and
-  VMs given by hand. A VM's page is `/vm/<uuid>/`, its signalling `/vm/<uuid>/signal`; a name
-  redirects to the UUID. The server attaches to a VM when its first client comes, after
+  VMs given by hand. A VM's page is `/vm/<uuid>/`, its signalling `/vm/<uuid>/signal`, a name
+  in place of the UUID as well; the VM is looked for only once the client logged in and is
+  known to decode the video, so that which VMs the host runs is said to no one else. The server attaches to a VM when its first client comes, after
   checking the VM's UUID, and detaches when the last one left: five seconds after a clean
   close (time to reload a page), a minute after a client cut off, which may come back; at once
   when the VM stops, which it sees by asking it every second whether it runs. A VM nobody

@@ -16,6 +16,7 @@ qdw-video.workspace = true
 rustix = { workspace = true, features = ["fs"] }
 rustls.workspace = true
 serde.workspace = true
+subtle.workspace = true
 toml.workspace = true
 anyhow.workspace = true
 argon2.workspace = true

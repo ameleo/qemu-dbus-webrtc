@@ -17,10 +17,10 @@ pub mod v1 {
     include!(concat!(env!("OUT_DIR"), "/qdw.v1.rs"));
 }
 
-/// The path of the signalling WebSocket of the VM `uuid` on the server. Its page is
-/// `/vm/<uuid>/`.
-pub fn signalling_path(uuid: &str) -> String {
-    format!("/vm/{uuid}/signal")
+/// The path of the signalling WebSocket of the VM `id` on the server, `id` its UUID or its
+/// name. Its page is `/vm/<id>/`.
+pub fn signalling_path(id: &str) -> String {
+    format!("/vm/{id}/signal")
 }
 
 /// The data channel of the client's keyboard and pointer: [`v1::Input`] messages.
