@@ -187,8 +187,10 @@ pub async fn serve(listen: SocketAddr, tls: Tls, vms: Arc<Vms>, auth: Auth) -> R
         axum::Router::new()
             .route(
                 "/vm/{uuid}",
-                get(|Path(uuid): Path<String>| async move {
-                    Redirect::permanent(&format!("/vm/{uuid}/"))
+                // The path as it came, still percent-encoded: decoded, an encoded '/' in the
+                // id would make another path.
+                get(|uri: axum::http::Uri| async move {
+                    Redirect::permanent(&format!("{}/", uri.path()))
                 }),
             )
             .route("/vm/{uuid}/", get(page))
