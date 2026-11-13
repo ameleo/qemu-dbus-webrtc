@@ -505,7 +505,7 @@ async fn viewer(
     let (signals_tx, mut signals) = mpsc::unbounded_channel();
     let requests = shared.requests.clone();
     let consoles: Vec<u32> = shared.screens.iter().map(|s| s.console).collect();
-    let session = Session::start(
+    let started = Session::start(
         shared.codec,
         shared.full_chroma,
         // The depth the encoders take now. A known limit: when it changes later (another
@@ -522,7 +522,19 @@ async fn viewer(
                 let _ = requests.send(Request::Keyframe { console });
             }
         },
-    )?;
+    );
+    // A session that does not start leaves like one that ends: its depth no longer counts (or
+    // the VM would encode in 8 bits for all those after it), and the client is told a failure.
+    let session = match started {
+        Ok(session) => session,
+        Err(e) => {
+            let _ = shared
+                .requests
+                .send(Request::TenBits(shared.depths.leave(depth_id)));
+            close(&mut socket, axum::extract::ws::close_code::ERROR).await;
+            return Err(e);
+        }
+    };
     let user = (!shadow).then(|| shared.user.take_over());
     info!(shadow, "viewer session");
     let (clipboard, clip) = shared.clipboard.viewer();
