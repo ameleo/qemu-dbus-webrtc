@@ -18,6 +18,10 @@ use zbus::zvariant::OwnedFd;
 
 /// How long the agent has to answer the D-Bus handshake, once the guest opened its port.
 const HANDSHAKE_TIME: std::time::Duration = std::time::Duration::from_secs(30);
+/// The longest a call to the agent may take: a stuck agent, its port still open, never answers,
+/// and the call would hold its caller (a viewer's loop) for ever. Generous: installing a printer
+/// in the guest takes seconds.
+const CALL_TIME: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The name of the agent's character device (`-chardev dbus,name=...`).
 pub const PORT_NAME: &str = "fr.ameleo.agent.0";
@@ -326,7 +330,8 @@ pub async fn connect(
     let connection = host(
         zbus::connection::Builder::unix_stream(stream)
             .p2p()
-            .auth_mechanism(zbus::AuthMechanism::Anonymous),
+            .auth_mechanism(zbus::AuthMechanism::Anonymous)
+            .method_timeout(CALL_TIME),
     )?
     .build();
     // The handshake goes through QEMU once it holds the other end: both at once. An agent that
