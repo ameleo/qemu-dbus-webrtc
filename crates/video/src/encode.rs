@@ -174,6 +174,36 @@ impl Codec {
         }
     }
 
+    /// The fmtp parameters of the stream (RFC 7798 7.1), as caps fields, for HEVC: the offer
+    /// must say what the stream is, for an absent parameter means a default (profile-id 1,
+    /// level-id 93, interop-constraints B00000000000...) that ours are not. Taken from the
+    /// bitstream the VA encoder writes (`general_profile_idc`, the 32
+    /// `general_profile_compatibility_flag`s and the 48 bits from
+    /// `general_progressive_source_flag` on, in the order of the bitstream, base16): measured,
+    /// and checked against a real encoding by a test. The level is the highest the encoder may
+    /// reach (6.2, `general_level_idc` 186, for up to 8192x4320 pixels), which every lower level
+    /// complies with: the encoder picks it by the screen's size, which changes.
+    pub fn rtp_fmtp(self, full_chroma: bool, ten_bits: bool) -> Option<String> {
+        if self != Self::Hevc {
+            return None;
+        }
+        // (profile-id, profile-compatibility-indicator, interop-constraints)
+        let (profile, compatibility, constraints) = match (full_chroma, ten_bits) {
+            // Main: compatible with Main and Main 10.
+            (false, false) => (1, "60000000", "900000000000"),
+            // Main 10.
+            (false, true) => (2, "20000000", "900000000000"),
+            // Format range extensions, Main 4:4:4, then Main 4:4:4 10 (max_8bit_constraint off).
+            (true, false) => (4, "08000000", "9E0800000000"),
+            (true, true) => (4, "08000000", "9C0800000000"),
+        };
+        Some(format!(
+            "profile-id=(string){profile},tier-flag=(string)0,level-id=(string)186,\
+             profile-compatibility-indicator=(string){compatibility},\
+             interop-constraints=(string){constraints}"
+        ))
+    }
+
     /// Whether a client that announces `codec` (a media type, with its fmtp parameters after a
     /// `;` when it has any) decodes this stream.
     pub fn decoded_by(self, full_chroma: bool, codec: &str) -> bool {
@@ -185,8 +215,11 @@ impl Codec {
             return false;
         }
         match (self, full_chroma) {
-            // VP9 in 4:4:4 is profile 1, which the client must announce.
+            // VP9 in 4:4:4 is profile 1, HEVC's is a format range extensions profile, profile-id
+            // 4 (RFC 7798 7.1): the client must announce it, no parameter meaning the codec's
+            // default profile.
             (Self::Vp9, true) => parts.any(|p| p.eq_ignore_ascii_case("profile-id=1")),
+            (Self::Hevc, true) => parts.any(|p| p.eq_ignore_ascii_case("profile-id=4")),
             _ => true,
         }
     }
@@ -728,5 +761,91 @@ mod tests {
         assert!(!Codec::Vp9.decoded_by(true, "video/VP9;profile-id=0"));
         assert!(!Codec::Vp9.decoded_by(true, "video/VP9"));
         assert!(!Codec::Av1.decoded_by(false, "video/VP9"));
+        assert!(Codec::Hevc.decoded_by(false, "video/H265"));
+        assert!(Codec::Hevc.decoded_by(true, "video/H265;profile-id=4;tier-flag=0"));
+        assert!(!Codec::Hevc.decoded_by(true, "video/H265;profile-id=1"));
+        assert!(!Codec::Hevc.decoded_by(true, "video/H265"));
+    }
+
+    /// The fields of a profile_tier_level (H.265 7.3.3) from the first SPS of an HEVC stream in
+    /// Annex B: general_profile_idc, the compatibility flags and the 48 constraint bits, each as
+    /// the offer gives them.
+    fn sps_profile(stream: &[u8]) -> (u32, String, String) {
+        let mut nals = stream
+            .windows(3)
+            .enumerate()
+            .filter(|(_, w)| *w == [0, 0, 1]);
+        let start = nals
+            .find(|&(i, _)| stream.get(i + 3).is_some_and(|b| (b >> 1) & 0x3f == 33))
+            .map(|(i, _)| i + 5)
+            .expect("no SPS");
+        // The payload without its emulation prevention bytes.
+        let mut rbsp = Vec::new();
+        let mut zeros = 0;
+        for &b in &stream[start..(start + 32).min(stream.len())] {
+            if zeros >= 2 && b == 3 {
+                zeros = 0;
+                continue;
+            }
+            zeros = if b == 0 { zeros + 1 } else { 0 };
+            rbsp.push(b);
+        }
+        // sps_video_parameter_set_id, sps_max_sub_layers_minus1, sps_temporal_id_nesting_flag:
+        // one byte; then general_profile_space (2), general_tier_flag (1),
+        // general_profile_idc (5): one byte; then 4 bytes of flags, 6 of constraints.
+        let profile = u32::from(rbsp[1] & 0x1f);
+        let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02X}")).collect::<String>();
+        (profile, hex(&rbsp[2..6]), hex(&rbsp[6..12]))
+    }
+
+    /// The offer's HEVC parameters are those of the bitstream the VA encoder writes. Skipped
+    /// where there is no VA HEVC encoder.
+    #[test]
+    fn hevc_offers_say_what_the_encoder_writes() {
+        gst::init().unwrap();
+        if gst::ElementFactory::find("vah265lpenc").is_none() {
+            eprintln!("no vah265lpenc: skipped");
+            return;
+        }
+        for (full_chroma, ten_bits) in [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let (encoder, profile) = Codec::Hevc.encoder(full_chroma).unwrap();
+            let description = format!(
+                "videotestsrc num-buffers=1 ! video/x-raw,width=320,height=240 ! vapostproc \
+                 ! video/x-raw(memory:VAMemory),format={raw} ! {encoder} \
+                 ! {profile} ! h265parse ! video/x-h265,stream-format=byte-stream \
+                 ! appsink name=sink",
+                raw = Codec::Hevc.raw_format(full_chroma, ten_bits),
+                profile = profile_caps(Codec::Hevc, profile, ten_bits),
+            );
+            let pipeline = gst::parse::launch(&description)
+                .unwrap()
+                .downcast::<gst::Pipeline>()
+                .unwrap();
+            let sink = pipeline
+                .by_name("sink")
+                .unwrap()
+                .downcast::<gst_app::AppSink>()
+                .unwrap();
+            pipeline.set_state(gst::State::Playing).unwrap();
+            let sample = sink.pull_sample().unwrap();
+            let map = sample.buffer().unwrap().map_readable().unwrap();
+            let (idc, compatibility, constraints) = sps_profile(&map);
+            drop(map);
+            pipeline.set_state(gst::State::Null).unwrap();
+            let fmtp = Codec::Hevc.rtp_fmtp(full_chroma, ten_bits).unwrap();
+            let expected = (
+                format!("profile-id=(string){idc},"),
+                format!("profile-compatibility-indicator=(string){compatibility},"),
+                format!("interop-constraints=(string){constraints}"),
+            );
+            assert!(
+                fmtp.contains(&expected.0)
+                    && fmtp.contains(&expected.1)
+                    && fmtp.contains(&expected.2),
+                "4:4:4 {full_chroma}, 10 bits {ten_bits}: the encoder writes {expected:?}, the \
+                 offer says {fmtp}"
+            );
+        }
     }
 }

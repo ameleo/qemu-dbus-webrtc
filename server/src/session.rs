@@ -222,13 +222,15 @@ impl Drop for StopOnDrop {
 }
 
 impl Session {
-    /// Start a session for the streams of the guest's screens, encoded with `codec`, one video
-    /// track each in the order of `viewers`, and the guest's sound. `keyframe` is called with a
+    /// Start a session for the streams of the guest's screens, encoded with `codec` (in 10 bits
+    /// with `ten_bits`, as the offer says), one video track each in the order of `viewers`, and
+    /// the guest's sound. `keyframe` is called with a
     /// screen's index when the client needs a keyframe of it (a lost frame, or the start).
     #[allow(clippy::too_many_arguments)]
     pub fn start(
         codec: Codec,
         full_chroma: bool,
+        ten_bits: bool,
         viewers: Vec<Viewers>,
         audio_viewers: AudioViewers,
         mic: Option<Arc<Mic>>,
@@ -238,18 +240,24 @@ impl Session {
     ) -> Result<Self> {
         let (payloader, encoding) = codec.rtp();
         let screens = viewers.len().min(MAX_SCREENS);
+        // The stream's fmtp parameters the payloader does not give, added to its caps, which
+        // webrtcbin writes into the offer: a capsfilter would refuse caps without them.
+        let fmtp = codec.rtp_fmtp(full_chroma, ten_bits && codec.has_ten_bits());
         let videos: String = (0..screens)
             .map(|i| {
                 let pt = VIDEO_PT + 2 * i as u32;
                 format!(
                     "appsrc name=src{i} is-live=true format=time do-timestamp=true caps={caps} \
                      ! queue \
-                     ! {payloader} pt={pt} mtu=1200 \
+                     ! {payloader} pt={pt} mtu=1200 {setter}\
                      ! application/x-rtp,media=video,encoding-name={encoding},payload={pt},clock-rate=90000{extra},\
 rtcp-fb-nack-pli=(boolean)true,rtcp-fb-transport-cc=(boolean)true,extmap-1=(string){TWCC_URI} \
                      ! capsfilter name=rtp{i} ",
                     caps = codec.stream_caps(),
                     extra = codec.rtp_extra(full_chroma),
+                    setter = fmtp.as_ref().map_or(String::new(), |fmtp| format!(
+                        "! capssetter join=true replace=false caps=\"application/x-rtp,{fmtp}\" "
+                    )),
                 )
             })
             .collect();
@@ -835,5 +843,105 @@ impl Drop for Session {
             .unwrap()
             .retain(|viewer| viewer.src != self.audio_src);
         let _ = self.pipeline.set_state(gst::State::Null);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The offer of an HEVC session gives the profile of the stream (RFC 7798 7.1), which the
+    /// payloader does not: a session fed by real encoders (the GPU's for the video), its offer
+    /// read. Skipped where there is no VA HEVC encoder.
+    #[test]
+    fn an_hevc_offer_gives_the_stream_profile() {
+        gst::init().unwrap();
+        if gst::ElementFactory::find("vah265lpenc").is_none() {
+            eprintln!("no vah265lpenc: skipped");
+            return;
+        }
+        let viewers = Viewers::default();
+        let audio_viewers = AudioViewers::default();
+        let (signals_tx, signals) = std::sync::mpsc::channel();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let session = Session::start(
+            Codec::Hevc,
+            false,
+            false,
+            vec![viewers.clone()],
+            audio_viewers.clone(),
+            None,
+            Bitrates {
+                min: 1000,
+                start: 2000,
+                max: 4000,
+            },
+            tx,
+            |_| {},
+        )
+        .unwrap();
+        // The sound flows first: the offer waits for it.
+        let audio_out = audio_viewers.clone();
+        let _audio = qdw_audio::AudioEncoder::new(move |frame| {
+            fan_out_audio(&audio_out, frame);
+        })
+        .unwrap();
+        let file = rustix::fs::memfd_create("fb", rustix::fs::MemfdFlags::CLOEXEC).unwrap();
+        rustix::fs::ftruncate(&file, 320 * 240 * 4).unwrap();
+        let settings = qdw_video::encode::Settings {
+            codec: Codec::Hevc,
+            full_chroma: false,
+            bitrate: 2000,
+            ten_bits: false,
+            software: false,
+        };
+        let video_out = viewers.clone();
+        let mut encoder = qdw_video::encode::Encoder::new(&settings, move |frame| {
+            fan_out(&video_out, frame);
+        })
+        .unwrap();
+        encoder
+            .set_shared_framebuffer(
+                &file,
+                320,
+                240,
+                gstreamer_video::VideoFormat::Bgrx,
+                0,
+                320 * 4,
+            )
+            .unwrap();
+        std::thread::spawn(move || {
+            while let Some(signal) = rx.blocking_recv() {
+                if let Signal::Offer(sdp) = signal {
+                    let _ = signals_tx.send(sdp);
+                }
+            }
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let sdp = loop {
+            assert!(std::time::Instant::now() < deadline, "no offer");
+            encoder.keyframe().unwrap();
+            if let Ok(sdp) = signals.recv_timeout(std::time::Duration::from_millis(100)) {
+                break sdp;
+            }
+        };
+        let fmtp = sdp
+            .lines()
+            .find(|l| l.starts_with(&format!("a=fmtp:{VIDEO_PT} ")))
+            .unwrap_or_else(|| panic!("no fmtp for the video in {sdp}"));
+        for parameter in [
+            "profile-id=1",
+            "tier-flag=0",
+            "level-id=186",
+            "profile-compatibility-indicator=60000000",
+            "interop-constraints=900000000000",
+        ] {
+            assert!(
+                fmtp.split([' ', ';']).any(|p| p == parameter),
+                "{parameter} not in {fmtp}"
+            );
+        }
+        drop(session);
+        encoder.finish();
     }
 }

@@ -497,6 +497,10 @@ async fn viewer(
     let session = Session::start(
         shared.codec,
         shared.full_chroma,
+        // The depth the encoders take now. A known limit: when it changes later (another
+        // viewer comes or goes), the stream's HEVC profile changes and the offer does not say
+        // it: webrtcbin 1.26 cannot change the format of a track in a new offer (measured).
+        ten_bits,
         shared.screens.iter().map(|s| s.viewers.clone()).collect(),
         shared.audio_viewers.clone(),
         (!shadow).then(|| shared.mic.clone()),
