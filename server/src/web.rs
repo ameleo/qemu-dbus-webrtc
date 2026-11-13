@@ -720,7 +720,7 @@ async fn run(
                 }
                 Some(Signal::CameraFrame { mid, timestamp_us, data }) => {
                     if user {
-                        cameras.frame(&mid, timestamp_us, data);
+                        cameras.frame(&mid, timestamp_us, data, session);
                     }
                 }
                 Some(Signal::Message(Channel::Input, bytes)) => match Input::decode(bytes.as_slice()) {

@@ -8,7 +8,7 @@
 //! comes on it to the agent as it is. When the viewer goes, its cameras go too; when the agent
 //! comes back (the guest restarted), they are added again.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -24,6 +24,49 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::session::Session;
+
+/// Access units waiting for the guest, at most: about a second at 30 frames a second. Past
+/// that the guest takes them more slowly than they come, and they are dropped.
+const QUEUED_FRAMES: usize = 32;
+
+/// An access unit for the guest's camera: its id, the capture time, the H.264.
+type Frame = (u32, u64, Vec<u8>);
+
+/// Whether an H.264 access unit (Annex B: each NAL unit after a 0x000001 start code) decodes
+/// on its own: it has a sequence parameter set (nal_unit_type 7) or an IDR slice (5) before its
+/// first other slice (1). The agent's contract puts the SPS and PPS before each IDR.
+fn keyframe(au: &[u8]) -> bool {
+    let mut i = 0;
+    while i + 3 < au.len() {
+        if au[i..i + 3] == [0, 0, 1] {
+            match au[i + 3] & 0x1f {
+                5 | 7 => return true,
+                1 => return false,
+                _ => {}
+            }
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
+/// Push the access units of `frames` to the guest's cameras, in their order: one call after the
+/// other, apart from the viewer's loop.
+fn pusher(cameras: Arc<Cameras>) -> mpsc::Sender<Frame> {
+    let (tx, mut frames) = mpsc::channel::<Frame>(QUEUED_FRAMES);
+    tokio::spawn(async move {
+        while let Some((id, timestamp_us, data)) = frames.recv().await {
+            if let Some(agent) = cameras.agent()
+                && let Err(e) = agent.push_frame(id, timestamp_us, data).await
+            {
+                debug!(id, error = %e, "camera frame not pushed");
+            }
+        }
+    });
+    tx
+}
 
 /// What the guest asks of a viewer's camera.
 #[derive(Debug)]
@@ -191,6 +234,8 @@ impl Cameras {
             outgoing: outgoing_tx,
             streams: HashMap::new(),
             waiting: HashMap::new(),
+            frames: None,
+            broken: HashSet::new(),
         };
         (viewer, CamerasFollow { calls, outgoing })
     }
@@ -214,6 +259,11 @@ pub struct ViewerCameras {
     streams: HashMap<String, u32>,
     /// The tracks that have not brought a frame since their camera started: when it started.
     waiting: HashMap<String, std::time::Instant>,
+    /// The access units on their way to the guest, once a camera streamed.
+    frames: Option<mpsc::Sender<Frame>>,
+    /// The tracks that lost an access unit: the next ones would not decode, so none goes to
+    /// the guest before a keyframe.
+    broken: HashSet<String>,
 }
 
 /// A client's format as the agent takes it, if it does: even sizes, within the agent's limits.
@@ -288,6 +338,8 @@ impl ViewerCameras {
             CameraCall::Stop { client_id } => {
                 if let Some(id) = self.guest_id(client_id) {
                     self.streams.retain(|_, &mut g| g != id);
+                    let streams = &self.streams;
+                    self.broken.retain(|mid| streams.contains_key(mid));
                 }
                 vec![encode(Message::Stop(CameraStop { id: client_id }))]
             }
@@ -315,15 +367,12 @@ impl ViewerCameras {
         }
     }
 
-    /// An access unit came on the camera track of `mid`: to the guest's camera streaming on it.
-    pub fn frame(&mut self, mid: &str, timestamp_us: u64, data: Vec<u8>) {
+    /// An access unit came on the camera track of `mid`: to the guest's camera streaming on it,
+    /// in order.
+    pub fn frame(&mut self, mid: &str, timestamp_us: u64, data: Vec<u8>, session: &Session) {
         tracing::trace!(mid, timestamp_us, bytes = data.len(), "camera frame");
+        let keyframe = keyframe(&data);
         if let Some(asked) = self.waiting.remove(mid) {
-            // A keyframe starts with an SPS (NAL type 7) after its start code.
-            let keyframe = data
-                .windows(5)
-                .take(64)
-                .any(|w| w[..4] == [0, 0, 0, 1] && w[4] & 0x1f == 7);
             info!(
                 mid,
                 after_ms = asked.elapsed().as_millis() as u64,
@@ -332,14 +381,27 @@ impl ViewerCameras {
                 "first camera frame"
             );
         }
-        let (Some(&id), Some(agent)) = (self.streams.get(mid), self.cameras.agent()) else {
+        let Some(&id) = self.streams.get(mid) else {
             return;
         };
-        tokio::spawn(async move {
-            if let Err(e) = agent.push_frame(id, timestamp_us, data).await {
-                debug!(id, error = %e, "camera frame not pushed");
+        if self.broken.contains(mid) {
+            if !keyframe {
+                return;
             }
-        });
+            self.broken.remove(mid);
+        }
+        let cameras = &self.cameras;
+        let frames = self.frames.get_or_insert_with(|| pusher(cameras.clone()));
+        // UNTESTED: a guest slower than the camera (the drop, the keyframe asked, the frames
+        // held back until it comes) needs a session's pipeline to ask for the keyframe.
+        if frames.try_send((id, timestamp_us, data)).is_err() {
+            warn!(
+                mid,
+                "the guest takes the camera's frames too slowly: dropped until a keyframe"
+            );
+            self.broken.insert(mid.to_string());
+            session.camera_keyframe(mid);
+        }
     }
 
     /// A data channel message from the client.
@@ -383,20 +445,11 @@ impl ViewerCameras {
             .filter_map(control)
             .take(camera::MAX_CONTROLS)
             .collect();
-        let why = if self.cameras.cameras.lock().unwrap().len() >= camera::MAX_CAMERAS {
-            Some("too many cameras")
-        } else if self.guest_id(client_id).is_some() {
-            Some("this camera id is announced already")
-        } else if formats.len() != announce.formats.len() || formats.is_empty() {
-            Some("a format the guest does not take (even sizes up to 3840x2160)")
-        } else {
-            None
-        };
-        if let Some(why) = why {
+        if formats.len() != announce.formats.len() || formats.is_empty() {
+            let why = "a format the guest does not take (even sizes up to 3840x2160)";
             let _ = self.outgoing.send(added(client_id, why.into()));
             return;
         }
-        let id = self.cameras.next_id.fetch_add(1, Ordering::Relaxed);
         let camera = Camera {
             viewer: self.id,
             client_id,
@@ -406,11 +459,30 @@ impl ViewerCameras {
             calls: self.calls_tx.clone(),
             outgoing: self.outgoing.clone(),
         };
-        self.cameras
-            .cameras
-            .lock()
-            .unwrap()
-            .insert(id, camera.clone());
+        // Checked and added under one lock: two viewers announcing at once stay within the
+        // limit.
+        let added_as = {
+            let mut cameras = self.cameras.cameras.lock().unwrap();
+            let announced = cameras
+                .values()
+                .any(|c| c.viewer == self.id && c.client_id == client_id);
+            if announced {
+                Err("this camera id is announced already")
+            } else if cameras.len() >= camera::MAX_CAMERAS {
+                Err("too many cameras")
+            } else {
+                let id = self.cameras.next_id.fetch_add(1, Ordering::Relaxed);
+                cameras.insert(id, camera.clone());
+                Ok(id)
+            }
+        };
+        let id = match added_as {
+            Ok(id) => id,
+            Err(why) => {
+                let _ = self.outgoing.send(added(client_id, why.into()));
+                return;
+            }
+        };
         let agent = self.cameras.agent();
         tokio::spawn(async move {
             let result = match agent {
@@ -430,6 +502,8 @@ impl ViewerCameras {
     async fn remove(&mut self, id: u32) {
         self.cameras.cameras.lock().unwrap().remove(&id);
         self.streams.retain(|_, &mut g| g != id);
+        let streams = &self.streams;
+        self.broken.retain(|mid| streams.contains_key(mid));
         if let Some(agent) = self.cameras.agent()
             && let Err(e) = agent.remove_camera(id).await
         {
@@ -456,6 +530,19 @@ impl ViewerCameras {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyframes_are_told_apart() {
+        // SPS, PPS, IDR slice; with an access unit delimiter first, and 3-byte start codes.
+        assert!(keyframe(&[
+            0, 0, 0, 1, 0x67, 1, 0, 0, 0, 1, 0x68, 2, 0, 0, 1, 0x65, 3
+        ]));
+        assert!(keyframe(&[0, 0, 1, 0x09, 0xf0, 0, 0, 1, 0x65, 3]));
+        // A non-IDR slice, even with an SPS-looking byte in its data.
+        assert!(!keyframe(&[0, 0, 0, 1, 0x41, 0x67, 0, 0, 1, 0x67]));
+        assert!(!keyframe(&[0, 0, 0, 1]));
+        assert!(!keyframe(&[]));
+    }
 
     #[test]
     fn formats_the_guest_takes() {
