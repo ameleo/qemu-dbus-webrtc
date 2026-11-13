@@ -19,6 +19,9 @@ use tracing::{debug, warn};
 
 use crate::libvirt::Libvirt;
 
+/// The most UUIDs read from VMs kept: past it, they are read again.
+const MAX_PROBED: usize = 256;
+
 /// How long the UUID of a VM may take to read, when a provider does not know it.
 const PROBE_TIME: Duration = Duration::from_secs(3);
 
@@ -343,7 +346,13 @@ impl Providers {
         match tokio::time::timeout(PROBE_TIME, read).await {
             Ok(Ok(probed)) => {
                 if let Some(bus) = bus {
-                    self.probed.lock().unwrap().insert(bus, probed.clone());
+                    let mut probed_ones = self.probed.lock().unwrap();
+                    // A bus is a VM's until it stops, and its next start has another: the
+                    // stale ones are dropped rather than kept for ever.
+                    if probed_ones.len() >= MAX_PROBED {
+                        probed_ones.clear();
+                    }
+                    probed_ones.insert(bus, probed.clone());
                 }
                 Some(probed)
             }
