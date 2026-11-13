@@ -12,8 +12,7 @@ use anyhow::{Context, Result};
 use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
 use qdw_qemu::display::Attach;
-use tokio::sync::OnceCell;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use zbus::zvariant::OwnedObjectPath;
 
 use crate::providers::{Candidate, Provider};
@@ -47,8 +46,11 @@ pub struct Libvirt {
     pub dir: PathBuf,
     /// Start a domain that is off when a client asks for it.
     pub start: bool,
-    /// The system bus, if libvirt-dbus answers on it; looked for once.
-    libvirt: OnceCell<Option<zbus::Connection>>,
+    /// The system bus, once libvirt-dbus answered on it; looked for again while it has not,
+    /// and after a failure (libvirtd started after the server, the bus restarted).
+    libvirt: tokio::sync::Mutex<Option<zbus::Connection>>,
+    /// libvirt-dbus was found missing: said once, not at every look.
+    missing_said: std::sync::atomic::AtomicBool,
 }
 
 impl Libvirt {
@@ -56,75 +58,101 @@ impl Libvirt {
         Self {
             dir,
             start,
-            libvirt: OnceCell::new(),
+            libvirt: Default::default(),
+            missing_said: Default::default(),
         }
     }
 
     /// The connection to libvirt-dbus, or `None` without it.
-    async fn libvirt(&self) -> Option<&zbus::Connection> {
-        self.libvirt
-            .get_or_init(|| async {
-                let found = async {
-                    let system = zbus::Connection::system().await?;
-                    ConnectProxy::new(&system).await?.list_domains(0).await?;
-                    anyhow::Ok(system)
-                };
-                match found.await {
-                    Ok(system) => {
-                        info!("libvirt domains through libvirt-dbus");
-                        Some(system)
-                    }
-                    Err(e) => {
-                        warn!(
-                            error = %format!("{e:#}"),
-                            "no libvirt-dbus: only the running domains are seen, and none is started"
-                        );
-                        None
-                    }
+    async fn libvirt(&self) -> Option<zbus::Connection> {
+        let mut libvirt = self.libvirt.lock().await;
+        if let Some(system) = libvirt.as_ref() {
+            return Some(system.clone());
+        }
+        let found = async {
+            let system = zbus::Connection::system().await?;
+            ConnectProxy::new(&system).await?.list_domains(0).await?;
+            anyhow::Ok(system)
+        };
+        match found.await {
+            Ok(system) => {
+                info!("libvirt domains through libvirt-dbus");
+                self.missing_said
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                *libvirt = Some(system.clone());
+                Some(system)
+            }
+            Err(e) => {
+                if !self
+                    .missing_said
+                    .swap(true, std::sync::atomic::Ordering::Relaxed)
+                {
+                    warn!(
+                        error = %format!("{e:#}"),
+                        "no libvirt-dbus: only the running domains are seen, and none is started"
+                    );
                 }
-            })
+                None
+            }
+        }
+    }
+
+    /// libvirt-dbus failed: looked for again at the next call.
+    async fn forget_libvirt(&self) {
+        *self.libvirt.lock().await = None;
+    }
+
+    /// The candidate of the domain at `path`: `None` for one without a D-Bus display, or a
+    /// running one whose display is peer to peer.
+    async fn domain_candidate(
+        &self,
+        system: &zbus::Connection,
+        path: OwnedObjectPath,
+    ) -> Result<Option<Candidate>> {
+        let domain = domain(system, path).await?;
+        // The live definition of a running domain: its display's bus is in it.
+        let xml = domain
+            .get_xml_desc(0)
             .await
-            .as_ref()
+            .context("reading a domain's definition")?;
+        let Some(graphics) = dbus_graphics(&xml) else {
+            return Ok(None);
+        };
+        let attach = if domain
+            .active()
+            .await
+            .context("reading whether a domain runs")?
+        {
+            // A peer-to-peer display has no bus to join.
+            let Some(address) = attribute(graphics, "address") else {
+                return Ok(None);
+            };
+            Some(Attach::Bus { address })
+        } else {
+            None
+        };
+        Ok(Some(Candidate {
+            attach,
+            uuid: Some(domain.uuid().await.context("reading a domain's UUID")?),
+            names: vec![domain.name().await.context("reading a domain's name")?],
+            startable: self.start,
+        }))
     }
 
     async fn domains(&self, system: &zbus::Connection) -> Result<Vec<Candidate>> {
-        let mut candidates = Vec::new();
         let paths = ConnectProxy::new(system)
             .await?
             .list_domains(0)
             .await
             .context("listing the domains")?;
+        let mut candidates = Vec::new();
         for path in paths {
-            let domain = domain(system, path).await?;
-            // The live definition of a running domain: its display's bus is in it.
-            let xml = domain
-                .get_xml_desc(0)
-                .await
-                .context("reading a domain's definition")?;
-            let Some(graphics) = dbus_graphics(&xml) else {
-                continue;
-            };
-            let attach = if domain
-                .active()
-                .await
-                .context("reading whether a domain runs")?
-            {
-                // A peer-to-peer display has no bus to join.
-                let Some(address) = attribute(graphics, "address") else {
-                    continue;
-                };
-                Some(Attach::Bus {
-                    address: address.to_owned(),
-                })
-            } else {
-                None
-            };
-            candidates.push(Candidate {
-                attach,
-                uuid: Some(domain.uuid().await.context("reading a domain's UUID")?),
-                names: vec![domain.name().await.context("reading a domain's name")?],
-                startable: self.start,
-            });
+            // A domain that fails to answer (undefined meanwhile) is left out, not the others.
+            match self.domain_candidate(system, path).await {
+                Ok(Some(candidate)) => candidates.push(candidate),
+                Ok(None) => {}
+                Err(e) => debug!(error = %format!("{e:#}"), "domain left out"),
+            }
         }
         Ok(candidates)
     }
@@ -162,7 +190,13 @@ impl Provider for Libvirt {
     fn candidates(&self) -> BoxFuture<'_, Result<Vec<Candidate>>> {
         async move {
             match self.libvirt().await {
-                Some(system) => self.domains(system).await,
+                Some(system) => match self.domains(&system).await {
+                    Ok(candidates) => Ok(candidates),
+                    Err(e) => {
+                        self.forget_libvirt().await;
+                        Err(e)
+                    }
+                },
                 None => self.sockets(),
             }
         }
@@ -175,11 +209,11 @@ impl Provider for Libvirt {
                 .libvirt()
                 .await
                 .context("starting a domain takes libvirt-dbus")?;
-            let path = ConnectProxy::new(system)
+            let path = ConnectProxy::new(&system)
                 .await?
                 .domain_lookup_by_uuid(uuid)
                 .await?;
-            let domain = domain(system, path).await?;
+            let domain = domain(&system, path).await?;
             let name = domain.name().await?;
             info!(uuid, %name, "starting the domain");
             domain.create(0).await.context("starting the domain")?;
@@ -206,7 +240,7 @@ fn dbus_graphics(xml: &str) -> Option<&str> {
         let element = &rest[start..];
         let end = element.find('>')?;
         let tag = &element[..end];
-        if attribute(tag, "type") == Some("dbus") {
+        if attribute(tag, "type").as_deref() == Some("dbus") {
             return Some(tag);
         }
         rest = &element[end..];
@@ -214,16 +248,25 @@ fn dbus_graphics(xml: &str) -> Option<&str> {
     None
 }
 
-/// The value of an XML attribute in a start tag, quoted either way.
-fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+/// The value of an XML attribute in a start tag, quoted either way, its entities decoded.
+fn attribute(tag: &str, name: &str) -> Option<String> {
     for quote in ['\'', '"'] {
         let key = format!(" {name}={quote}");
         if let Some(start) = tag.find(&key) {
             let value = &tag[start + key.len()..];
-            return value.find(quote).map(|end| &value[..end]);
+            return value.find(quote).map(|end| unescape(&value[..end]));
         }
     }
     None
+}
+
+/// XML's predefined entities decoded (`&amp;` last, so that `&amp;lt;` stays `&lt;`).
+fn unescape(text: &str) -> String {
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
 }
 
 /// The domain of a libvirt display socket, `<id>-<domain>-dbus.sock`: `None` for another file,
@@ -248,8 +291,14 @@ mod tests {
                     <gl enable='yes'/>\n  </graphics>\n</domain>";
         let graphics = dbus_graphics(live).unwrap();
         assert_eq!(
-            attribute(graphics, "address"),
+            attribute(graphics, "address").as_deref(),
             Some("unix:path=/run/libvirt/qemu/dbus/6-win-dbus.sock")
+        );
+        let escaped =
+            "<graphics type='dbus' address='unix:path=/run/a&amp;b&apos;c&amp;lt;d.sock'>";
+        assert_eq!(
+            attribute(dbus_graphics(escaped).unwrap(), "address").as_deref(),
+            Some("unix:path=/run/a&b'c&lt;d.sock")
         );
         // Off: no address yet.
         let inactive = "<domain>\n  <graphics type=\"dbus\">\n  </graphics>\n</domain>";
