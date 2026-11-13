@@ -202,7 +202,15 @@ impl Clipboard {
             tokio::select! {
                 signal = grabbed.next() => {
                     let Some(signal) = signal else { return Ok(()) };
-                    let mimes = from_agent(&signal.args()?.mimes);
+                    // A malformed signal is the agent's fault: skipped, the clipboard still
+                    // followed.
+                    let mimes = match signal.args() {
+                        Ok(args) => from_agent(&args.mimes),
+                        Err(e) => {
+                            warn!(error = %e, "malformed clipboard grab from the agent");
+                            continue;
+                        }
+                    };
                     debug!(?mimes, "guest copied");
                     // The guest owns the clipboard now, not a viewer.
                     *self.owner.lock().unwrap() = None;
@@ -229,7 +237,7 @@ impl Clipboard {
             outgoing: outgoing_tx,
             data: HashMap::new(),
             files: HashMap::new(),
-            file_index: Vec::new(),
+            file_index: None,
             locks: std::collections::HashSet::new(),
             next_request: 0,
             open: false,
@@ -370,6 +378,9 @@ struct Waiting<R> {
     received: Vec<u8>,
     /// For a file request: whether it asked for the size.
     size: bool,
+    /// The most it may give: a range answer is at most the length asked (MS-RDPECLIP 2.2.5.3,
+    /// cbRequested), a size answer carries none.
+    most: usize,
 }
 
 /// One viewer's side of the clipboard.
@@ -380,8 +391,9 @@ pub struct ViewerClipboard {
     outgoing: mpsc::UnboundedSender<Vec<u8>>,
     data: HashMap<u32, Waiting<DataReply>>,
     files: HashMap<u32, Waiting<FileReply>>,
-    /// For each file of the list the guest got from this viewer, its index in the viewer's.
-    file_index: Vec<u32>,
+    /// For each file of the list the guest got from this viewer, its index in the viewer's;
+    /// `None` until the guest got one.
+    file_index: Option<Vec<u32>>,
     /// The clipboard contents the guest locked on this viewer, by id.
     locks: std::collections::HashSet<u32>,
     next_request: u32,
@@ -435,6 +447,7 @@ impl ViewerClipboard {
                         reply,
                         received: Vec::new(),
                         size: false,
+                        most: MAX_CLIPBOARD,
                     },
                 );
                 Message::Request(ClipboardRequest {
@@ -443,15 +456,21 @@ impl ViewerClipboard {
                 })
             }
             HostCall::File { mut request, reply } => {
-                // The guest's index, in the list it got, to the viewer's.
-                if !self.file_index.is_empty() {
-                    match self.file_index.get(request.index as usize) {
-                        Some(&index) => request.index = index,
-                        None => {
-                            warn!(index = request.index, "guest reads a file past its list");
-                            let _ = reply.send(None);
-                            return Vec::new();
-                        }
+                // The guest's index, in the list it got, to the viewer's: a file of no list the
+                // guest got is none of the viewer's.
+                match self
+                    .file_index
+                    .as_ref()
+                    .and_then(|kept| kept.get(request.index as usize))
+                {
+                    Some(&index) => request.index = index,
+                    None => {
+                        warn!(
+                            index = request.index,
+                            "guest reads a file of no list it got"
+                        );
+                        let _ = reply.send(None);
+                        return Vec::new();
                     }
                 }
                 let id = self.request_id();
@@ -469,6 +488,11 @@ impl ViewerClipboard {
                         reply,
                         received: Vec::new(),
                         size: request.size,
+                        most: if request.size {
+                            0
+                        } else {
+                            request.length as usize
+                        },
                     },
                 );
                 Message::FileRequest(ClipboardFileRequest {
@@ -569,14 +593,14 @@ impl ViewerClipboard {
                     return Ok(Vec::new());
                 };
                 waiting.received.extend_from_slice(&data);
-                if waiting.received.len() > MAX_CLIPBOARD {
+                if waiting.received.len() > waiting.most {
                     if let Some(waiting) = self.data.remove(&id) {
                         let _ = waiting.reply.send(None);
                     }
                 } else if last && let Some(waiting) = self.data.remove(&id) {
                     let converted = client_data(&mime, waiting.received);
                     if let Some((_, _, Some(kept))) = &converted {
-                        self.file_index = kept.clone();
+                        self.file_index = Some(kept.clone());
                     }
                     let _ = waiting
                         .reply
@@ -603,7 +627,10 @@ impl ViewerClipboard {
                     return Ok(Vec::new());
                 };
                 waiting.received.extend_from_slice(&data);
-                if failed || waiting.received.len() > MAX_FILE_PIECE as usize {
+                if failed || waiting.received.len() > waiting.most {
+                    if !failed {
+                        warn!(id, "the viewer gave more than asked: refused");
+                    }
                     if let Some(waiting) = self.files.remove(&id) {
                         let _ = waiting.reply.send(None);
                     }
@@ -718,21 +745,22 @@ fn from_message(file: ClipboardFile) -> File {
 async fn guest_file(agent: &Agent, request: &ClipboardFileRequest) -> Outgoing {
     let read = async {
         let index = i32::try_from(request.index)?;
-        let flags = if request.size {
-            file_contents::SIZE
+        // MS-RDPECLIP 2.2.5.3: a size request asks for 8 bytes at position 0.
+        let (flags, offset, length) = if request.size {
+            (file_contents::SIZE, 0, 8)
         } else {
-            file_contents::RANGE
+            let length = request
+                .length
+                .min(MAX_FILE_PIECE)
+                .min(file_contents::MAX_RANGE);
+            (file_contents::RANGE, request.offset, length)
         };
-        let length = request
-            .length
-            .min(MAX_FILE_PIECE)
-            .min(file_contents::MAX_RANGE);
         let data = agent
             .files
             .file_contents(
                 index,
                 flags,
-                request.offset,
+                offset,
                 length,
                 request.clip_data_id.unwrap_or_default(),
                 request.clip_data_id.is_some(),
@@ -740,6 +768,10 @@ async fn guest_file(agent: &Agent, request: &ClipboardFileRequest) -> Outgoing {
             .await?;
         if request.size && data.len() != 8 {
             bail!("a file size of {} bytes", data.len());
+        }
+        // At most the length asked (MS-RDPECLIP 2.2.5.3).
+        if data.len() > length as usize {
+            bail!("{} bytes of a file, {length} asked", data.len());
         }
         anyhow::Ok(data)
     };
@@ -836,6 +868,92 @@ mod tests {
         ];
         assert_eq!(to_agent(&ours), [mime::FILE_LIST, mime::TEXT]);
         assert_eq!(from_agent(&to_agent(&ours)), [FILE_LIST_MIME, mime::TEXT]);
+    }
+
+    /// The guest reads files by their index in the list it got, mapped to the viewer's, and a
+    /// viewer's answer is at most what was asked.
+    #[tokio::test]
+    async fn file_reads_are_checked() {
+        let clipboard = Clipboard::new();
+        let (mut viewer, _follow) = clipboard.viewer();
+        let read = |viewer: &mut ViewerClipboard, index, length| {
+            let (reply, answer) = oneshot::channel();
+            let request = FilePiece {
+                index,
+                size: false,
+                offset: 0,
+                length,
+                clip_data_id: None,
+            };
+            let sent = viewer.host_call(HostCall::File { request, reply });
+            let sent = sent.into_iter().next().map(|m| {
+                match ClipboardMessage::decode(m.as_slice()).unwrap().message {
+                    Some(Message::FileRequest(r)) => (r.id, r.index),
+                    _ => panic!("not a file request"),
+                }
+            });
+            (sent, answer)
+        };
+        // No list given to the guest: no file of the viewer's.
+        let (sent, mut answer) = read(&mut viewer, 0, 4);
+        assert_eq!(sent, None);
+        assert_eq!(answer.try_recv().unwrap(), None);
+        // The guest gets a list, with the second file left out (too long a path for Windows).
+        let file = |path: String| ClipboardFile {
+            path,
+            directory: false,
+            size: 4,
+            modified_ms: 0,
+        };
+        let list = ClipboardFileList {
+            files: vec![file("a".into()), file("b".repeat(300)), file("c".into())],
+        };
+        let (reply, mut got) = oneshot::channel();
+        let request = viewer.host_call(HostCall::Data {
+            mimes: vec![mime::FILE_LIST.into()],
+            reply,
+        });
+        let Some(Message::Request(ClipboardRequest { id, .. })) =
+            ClipboardMessage::decode(request[0].as_slice())
+                .unwrap()
+                .message
+        else {
+            panic!("not a data request");
+        };
+        let data = encode(Message::Data(ClipboardData {
+            id,
+            mime: FILE_LIST_MIME.into(),
+            data: list.encode_to_vec(),
+            last: true,
+        }));
+        viewer.message(&data).await.unwrap();
+        assert!(got.try_recv().unwrap().is_some());
+        // The guest's second file is the viewer's third; it has no third.
+        let (sent, _) = read(&mut viewer, 1, 4);
+        assert_eq!(sent.map(|(_, index)| index), Some(2));
+        assert_eq!(read(&mut viewer, 2, 4).0, None);
+        // An answer longer than asked is refused, one as long is taken.
+        let answer_with = |id, bytes: usize| {
+            encode(Message::FileData(ClipboardFileData {
+                id,
+                size: 0,
+                data: vec![0; bytes],
+                last: true,
+                failed: false,
+            }))
+        };
+        let (sent, mut answer) = read(&mut viewer, 0, 4);
+        viewer
+            .message(&answer_with(sent.unwrap().0, 5))
+            .await
+            .unwrap();
+        assert_eq!(answer.try_recv().unwrap(), None);
+        let (sent, mut answer) = read(&mut viewer, 0, 4);
+        viewer
+            .message(&answer_with(sent.unwrap().0, 4))
+            .await
+            .unwrap();
+        assert_eq!(answer.try_recv().unwrap(), Some(vec![0; 4]));
     }
 
     /// A file list from a viewer reaches the agent in the Windows format, and back.
