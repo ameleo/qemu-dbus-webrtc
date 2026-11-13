@@ -103,18 +103,16 @@ pub struct Built {
     pub kept: Vec<usize>,
 }
 
-/// Write a CLIPRDR_FILELIST. `None` if a path is empty, absolute, or goes through `.` or `..`,
-/// or holds what Windows reads as a separator, a drive or a stream (`\`, `:`) or a control
-/// character: a list with one is broken or hostile, and Windows would write where the list
-/// says. A path too long for a FILEDESCRIPTORW (259 UTF-16 code
-/// units, a limit of the Windows format) is left out, with everything under it if it is a
-/// directory: the rest of the list still goes.
+/// Write a CLIPRDR_FILELIST. `None` if a path is empty, absolute, or goes through `.` or `..`:
+/// a list with one is broken or hostile. A path Windows cannot take is left out, the rest of
+/// the list still going: one that holds what Windows reads as a separator, a drive or a stream
+/// (`\`, `:`) or a control character, all legal in a name elsewhere ("Screenshot 10:30.png"),
+/// which Windows would write where the list does not say; and one too long for a
+/// FILEDESCRIPTORW (259 UTF-16 code units, a limit of the Windows format), with everything
+/// under it if it is a directory.
 pub fn build(files: &[File]) -> Option<Built> {
     let escapes = |path: &str| {
         path.is_empty()
-            || path
-                .chars()
-                .any(|c| c == '\\' || c == ':' || c.is_control())
             || path
                 .split('/')
                 .any(|c| c.is_empty() || c == "." || c == "..")
@@ -122,6 +120,11 @@ pub fn build(files: &[File]) -> Option<Built> {
     if files.iter().any(|f| escapes(&f.path)) {
         return None;
     }
+    // What is under a directory with such a name has it in its path too: left out with it.
+    let unnameable = |path: &str| {
+        path.chars()
+            .any(|c| c == '\\' || c == ':' || c.is_control())
+    };
     let mut descriptors = Vec::with_capacity(files.len() * DESCRIPTOR);
     let mut kept = Vec::with_capacity(files.len());
     let mut left_out: Vec<&str> = Vec::new();
@@ -131,7 +134,7 @@ pub fn build(files: &[File]) -> Option<Built> {
                 .strip_prefix(*dir)
                 .is_some_and(|rest| rest.starts_with('/'))
         };
-        if left_out.iter().any(under) {
+        if left_out.iter().any(under) || unnameable(&file.path) {
             continue;
         }
         let name: Vec<u16> = file.path.replace('/', "\\").encode_utf16().collect();
@@ -209,19 +212,38 @@ mod tests {
             size: 1,
             modified_ms: 0,
         };
-        for path in [
-            "a/../b",
-            "/etc/passwd",
-            "a//b",
-            "a\\..\\..\\Windows\\x",
-            "C:\\Windows\\x",
-            "file.txt:stream",
-            "a\u{0}b",
-            "a\nb",
-        ] {
+        for path in ["a/../b", "/etc/passwd", "a//b", "", "./a"] {
             assert!(build(&[file(path)]).is_none(), "{path:?}");
         }
         assert!(build(&[file("a/b c/d.txt")]).is_some());
+    }
+
+    /// A name Windows cannot take leaves its file out, and what is under it: the others go.
+    #[test]
+    fn names_windows_cannot_take_are_left_out() {
+        let file = |path: &str| File {
+            path: path.into(),
+            directory: false,
+            size: 1,
+            modified_ms: 0,
+        };
+        let files = [
+            file("ok.txt"),
+            file("Screenshot 10:30:12.png"),
+            file("a\\..\\..\\Windows\\x"),
+            file("C:\\Windows\\x"),
+            file("a\u{0}b"),
+            file("a\nb"),
+            file("dir:x/inside.txt"),
+            file("last.txt"),
+        ];
+        let built = build(&files).unwrap();
+        assert_eq!(built.kept, [0, 7]);
+        let back = parse(&built.list).unwrap();
+        assert_eq!(
+            back.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+            ["ok.txt", "last.txt"]
+        );
     }
 
     #[test]

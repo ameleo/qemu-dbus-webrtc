@@ -713,7 +713,8 @@ fn client_data(mime: &str, data: Vec<u8>) -> Option<(String, Vec<u8>, Option<Vec
                     .collect();
                 warn!(
                     ?left_out,
-                    "paths too long for Windows (259 characters), left out of the copy"
+                    "paths Windows cannot take (over 259 characters, or with \\, : or a control \
+                     character), left out of the copy"
                 );
             }
             let kept = built.kept.iter().map(|&i| i as u32).collect();
