@@ -16,6 +16,7 @@ use anyhow::{Result, anyhow};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
+use gstreamer_audio as gst_audio;
 use tracing::warn;
 
 use crate::Pcm;
@@ -34,12 +35,23 @@ struct Samples {
     bytes: VecDeque<u8>,
     /// The most it holds, in bytes: a whole number of frames.
     max: usize,
-    /// The bytes of one frame. Whatever goes out goes in whole frames: a part of one would
-    /// shift every later sample.
+    /// The bytes of one frame. Whatever comes in and goes out does in whole frames: a part of
+    /// one would shift every later sample.
     frame: usize,
+    /// The format of the samples it takes (sample type, rate, channels): a buffer in another
+    /// one, converted before the format changed and arriving after, is not the guest's sound.
+    format: Option<(gst_audio::AudioFormat, u32, u32)>,
 }
 
 impl Samples {
+    /// Add samples, in whole frames (a part of one at the end is left out), then drop the
+    /// oldest past `max`.
+    fn append(&mut self, samples: &[u8]) {
+        let whole = samples.len() - samples.len() % self.frame;
+        self.bytes.extend(&samples[..whole]);
+        self.trim();
+    }
+
     /// Drop the oldest frames past `max`.
     fn trim(&mut self) {
         let excess = self.bytes.len().saturating_sub(self.max);
@@ -91,6 +103,7 @@ impl Microphone {
             bytes: VecDeque::new(),
             max: 0,
             frame: 1,
+            format: None,
         }));
         let filled = buffer.clone();
         appsink.set_callbacks(
@@ -100,8 +113,14 @@ impl Microphone {
                     let samples = sample.buffer().ok_or(gst::FlowError::Error)?;
                     let map = samples.map_readable().map_err(|_| gst::FlowError::Error)?;
                     let mut samples = filled.lock().unwrap();
-                    samples.bytes.extend(map.iter());
-                    samples.trim();
+                    // Only in the format the guest records in now.
+                    let format = sample
+                        .caps()
+                        .and_then(|caps| gst_audio::AudioInfo::from_caps(caps).ok())
+                        .map(|info| (info.format(), info.rate(), info.channels()));
+                    if format.is_some() && format == samples.format {
+                        samples.append(&map);
+                    }
                     Ok(gst::FlowSuccess::Ok)
                 })
                 .build(),
@@ -133,6 +152,7 @@ impl Microphone {
         let mut samples = self.buffer.lock().unwrap();
         // Samples of the former format mean nothing in the new one.
         samples.bytes.clear();
+        samples.format = Some((info.format(), info.rate(), info.channels()));
         samples.frame = frame;
         samples.max = frame * (info.rate() as usize / MAX_DELAY_DIVISOR);
         Ok(())
@@ -169,6 +189,36 @@ impl Drop for Microphone {
 mod tests {
     use super::*;
 
+    /// A client's sound comes out in the guest's format, through the real pipeline: the format
+    /// check lets the guest's own format through, and what comes out is whole frames.
+    #[test]
+    fn a_client_is_heard_in_the_guest_format() {
+        gst::init().unwrap();
+        let mic = Microphone::new().unwrap();
+        // 44.1 kHz mono, 16 bits: frames of 2 bytes.
+        mic.set_format(Pcm {
+            bits: 16,
+            signed: true,
+            float: false,
+            big_endian: false,
+            rate: 44_100,
+            channels: 1,
+        })
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let heard = loop {
+            assert!(std::time::Instant::now() < deadline, "nothing heard");
+            // 10 ms of the canonical format.
+            mic.push(&[0x11; 480 * 4]);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let heard = mic.read(4096);
+            if !heard.is_empty() {
+                break heard;
+            }
+        };
+        assert_eq!(heard.len() % 2, 0);
+    }
+
     #[test]
     fn whole_frames_only() {
         // Frames of 4 bytes (16-bit stereo), 3 at most.
@@ -176,6 +226,7 @@ mod tests {
             bytes: (0..14).collect(),
             max: 12,
             frame: 4,
+            format: None,
         };
         // 14 bytes, 12 at most: the oldest whole frame goes, not 2 bytes of it.
         samples.trim();
@@ -186,5 +237,14 @@ mod tests {
         assert_eq!(samples.take(100), [8, 9, 10, 11]);
         // What is left is less than a frame: nothing.
         assert!(samples.take(100).is_empty());
+        // What comes in does in whole frames too: 6 bytes are one frame, the rest left out.
+        samples.bytes.clear();
+        samples.append(&[1, 2, 3, 4, 5, 6]);
+        assert_eq!(samples.bytes.len(), 4);
+        samples.append(&[7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]);
+        assert_eq!(
+            samples.take(100),
+            [7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
+        );
     }
 }
