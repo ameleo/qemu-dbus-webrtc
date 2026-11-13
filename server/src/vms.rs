@@ -88,9 +88,11 @@ impl Drop for Client {
 pub struct Vms {
     providers: Providers,
     config: VmConfig,
-    /// By UUID, in lower case. One attachment at a time: two clients of the same VM coming
-    /// together attach once.
+    /// By UUID, in lower case. Held briefly: never across an attachment.
     attached: tokio::sync::Mutex<HashMap<String, Arc<Attached>>>,
+    /// One attachment at a time per VM, by UUID: two clients of the same VM coming together
+    /// attach once, while the clients of other VMs come and go.
+    attaching: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Turns true when the server stops: every session ends.
     stopping: tokio::sync::watch::Sender<bool>,
     /// Wakes the reaper before its time.
@@ -103,6 +105,7 @@ impl Vms {
             providers,
             config,
             attached: Default::default(),
+            attaching: Default::default(),
             stopping: tokio::sync::watch::Sender::new(false),
             reap: Default::default(),
         });
@@ -152,41 +155,82 @@ impl Vms {
         let Some(uuid) = self.uuid_of(id).await? else {
             return Ok(None);
         };
-        let mut attached = self.attached.lock().await;
-        if attached.get(&uuid).is_some_and(|a| a.vm.ended()) {
-            info!(uuid, "VM gone: attaching again");
-            attached.remove(&uuid);
+        // This VM's turn: a client of the same VM coming meanwhile waits, and then finds it
+        // attached; the other VMs' clients do not.
+        // UNTESTED: one attachment per VM at a time, none across VMs; the table's lock never
+        // held across an attachment (a VM starting takes seconds). Check both when changing the
+        // locking: no test attaches VMs.
+        let gate = self
+            .attaching
+            .lock()
+            .unwrap()
+            .entry(uuid.clone())
+            .or_default()
+            .clone();
+        let turn = gate.lock().await;
+        let result = self.client_in_turn(&uuid).await;
+        drop(turn);
+        // The gate goes with its last user: this one, and none waiting.
+        let mut attaching = self.attaching.lock().unwrap();
+        if Arc::strong_count(&gate) == 2 {
+            attaching.remove(&uuid);
         }
-        let entry = match attached.get(&uuid) {
-            Some(entry) => entry.clone(),
-            None => {
-                let Some(how) = self.attach_to(&uuid).await? else {
-                    return Ok(None);
-                };
-                let vm = match vm::start(&how, &uuid, &self.config, self.reap.clone()).await {
-                    Ok(vm) => vm,
-                    Err(e) => {
-                        // What the provider remembered of it may be stale.
-                        self.providers.forget(&how);
-                        return Err(e);
-                    }
-                };
-                let entry = Arc::new(Attached {
-                    vm,
-                    reap: self.reap.clone(),
-                    clients: AtomicUsize::new(0),
-                    detach_at: Default::default(),
-                });
-                attached.insert(uuid, entry.clone());
-                entry
+        result
+    }
+
+    /// The VM `uuid`, attached if it was not, this VM's attachments being this caller's.
+    async fn client_in_turn(&self, uuid: &str) -> Result<Option<Client>> {
+        loop {
+            let known = {
+                let mut attached = self.attached.lock().await;
+                if attached.get(uuid).is_some_and(|a| a.vm.ended()) {
+                    info!(uuid, "VM gone: attaching again");
+                    attached.remove(uuid);
+                }
+                attached.get(uuid).cloned()
+            };
+            let entry = match known {
+                Some(entry) => entry,
+                None => {
+                    let Some(how) = self.attach_to(uuid).await? else {
+                        return Ok(None);
+                    };
+                    let vm = match vm::start(&how, uuid, &self.config, self.reap.clone()).await {
+                        Ok(vm) => vm,
+                        Err(e) => {
+                            // What the provider remembered of it may be stale.
+                            self.providers.forget(&how);
+                            return Err(e);
+                        }
+                    };
+                    let entry = Arc::new(Attached {
+                        vm,
+                        reap: self.reap.clone(),
+                        clients: AtomicUsize::new(0),
+                        detach_at: Default::default(),
+                    });
+                    self.attached
+                        .lock()
+                        .await
+                        .insert(uuid.to_owned(), entry.clone());
+                    entry
+                }
+            };
+            // Counted under the table's lock, as the reaper looks: a VM it sees without
+            // clients is one no client is joining. The reaper may have detached it since it was
+            // looked up: then attach again.
+            let attached = self.attached.lock().await;
+            if !attached.get(uuid).is_some_and(|e| Arc::ptr_eq(e, &entry)) {
+                continue;
             }
-        };
-        entry.clients.fetch_add(1, Ordering::AcqRel);
-        *entry.detach_at.lock().unwrap() = None;
-        Ok(Some(Client {
-            attached: entry,
-            left: false,
-        }))
+            entry.clients.fetch_add(1, Ordering::AcqRel);
+            *entry.detach_at.lock().unwrap() = None;
+            drop(attached);
+            return Ok(Some(Client {
+                attached: entry,
+                left: false,
+            }));
+        }
     }
 }
 
