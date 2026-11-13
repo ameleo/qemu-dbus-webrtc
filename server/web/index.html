@@ -217,11 +217,13 @@ const onMessage = async (event) => {
     await pc.addIceCandidate({ candidate: str(c, 1), sdpMLineIndex: uint(c, 2) });
   } else if (message.has(3)) {
     const error = str(pb.parse(message.get(3)[0]), 1);
+    // The server closes next: the error says why, the close adds nothing.
+    ended = true;
     if (error === "an account is required" || error === "wrong user or password") {
-      // The server closes next: not an end, the login form instead.
-      ended = true;
+      // The login form; the peer connection, unused yet, serves the next try.
       login.ask(error === "an account is required" ? "" : "Wrong user or password.");
     } else {
+      pc.close();
       fail(error);
     }
   } else if (message.has(4)) {

@@ -213,8 +213,63 @@ pub async fn serve(listen: SocketAddr, tls: Tls, vms: Arc<Vms>, auth: Auth) -> R
 
 /// A VM's page, by its UUID or its name. The same page whatever the VM, whether it exists or
 /// not: which VMs the host runs is said only to a client that logged in (on the signalling).
-async fn page() -> Html<&'static str> {
-    Html(PAGE)
+/// With the headers that keep it from being framed by another site (its keys go to the guest),
+/// and that let it run its own script and style only, and talk to this server only.
+async fn page() -> impl IntoResponse {
+    use axum::http::header;
+    (
+        [
+            (header::CONTENT_SECURITY_POLICY, page_policy()),
+            (header::X_FRAME_OPTIONS, "DENY"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::REFERRER_POLICY, "no-referrer"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        Html(PAGE),
+    )
+}
+
+/// The page's Content Security Policy: its inline script and style only, by their SHA-256
+/// (CSP 3), the guest pointer's images as data URLs, connections to this server only (the
+/// signalling), and no framing.
+fn page_policy() -> &'static str {
+    static POLICY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    POLICY.get_or_init(|| {
+        let digest = |open: &str, close: &str| {
+            let start = PAGE.find(open).map(|i| i + open.len()).unwrap_or(0);
+            let end = PAGE[start..].find(close).map_or(start, |i| start + i);
+            let hash = ring::digest::digest(&ring::digest::SHA256, &PAGE.as_bytes()[start..end]);
+            use base64::Engine;
+            format!(
+                "'sha256-{}'",
+                base64::engine::general_purpose::STANDARD.encode(hash.as_ref())
+            )
+        };
+        format!(
+            "default-src 'none'; script-src {script}; style-src {style}; img-src data:; \
+             connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+            script = digest("<script>", "</script>"),
+            style = digest("<style>", "</style>"),
+        )
+    })
+}
+
+/// Whether a WebSocket upgrade comes from this server's own page, or from no page: a browser
+/// says the page's origin, which must be this server's; a native client says none. Another
+/// site's page, in the user's browser, must not reach the VMs (cross-site WebSocket hijacking).
+fn same_origin(headers: &axum::http::HeaderMap) -> bool {
+    let Some(origin) = headers.get(axum::http::header::ORIGIN) else {
+        return true;
+    };
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok());
+    match (origin.to_str().ok(), host) {
+        (Some(origin), Some(host)) => origin
+            .strip_prefix("https://")
+            .is_some_and(|o| o.eq_ignore_ascii_case(host)),
+        _ => false,
+    }
 }
 
 /// What the pages and the signalling share.
@@ -243,10 +298,15 @@ const REFUSAL_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
 async fn upgrade(
     ws: WebSocketUpgrade,
+    headers: axum::http::HeaderMap,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Path(id): Path<String>,
     State(AppState { vms, auth, checks }): State<AppState>,
 ) -> Response {
+    if !same_origin(&headers) {
+        warn!(%peer, origin = ?headers.get(axum::http::header::ORIGIN), "WebSocket from another site refused");
+        return (StatusCode::FORBIDDEN, "not from this server's page").into_response();
+    }
     // Which VM is asked only once the client logged in: before, the answer would tell anyone
     // which VMs the host runs. The id must look like one, a UUID or a name.
     if id.is_empty() || id.len() > MAX_ID || id.contains(['/', '\\', '\0']) {
@@ -782,6 +842,38 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn websockets_from_this_server_or_no_page() {
+        use axum::http::{HeaderMap, HeaderValue, header};
+        let headers = |origin: Option<&str>| {
+            let mut h = HeaderMap::new();
+            h.insert(
+                header::HOST,
+                HeaderValue::from_static("vdi.example.com:8090"),
+            );
+            if let Some(origin) = origin {
+                h.insert(header::ORIGIN, HeaderValue::from_str(origin).unwrap());
+            }
+            h
+        };
+        assert!(same_origin(&headers(None)));
+        assert!(same_origin(&headers(Some("https://vdi.example.com:8090"))));
+        assert!(same_origin(&headers(Some("https://VDI.example.com:8090"))));
+        assert!(!same_origin(&headers(Some("https://evil.example.org"))));
+        assert!(!same_origin(&headers(Some("http://vdi.example.com:8090"))));
+        assert!(!same_origin(&headers(Some("https://vdi.example.com:8091"))));
+        assert!(!same_origin(&headers(Some("null"))));
+    }
+
+    #[test]
+    fn the_page_runs_its_own_script_and_style_only() {
+        let policy = page_policy();
+        assert!(policy.contains("script-src 'sha256-"), "{policy}");
+        assert!(policy.contains("style-src 'sha256-"), "{policy}");
+        assert!(policy.contains("frame-ancestors 'none'"));
+        assert!(!policy.contains("unsafe"));
+    }
 
     #[test]
     fn ten_bits_when_every_viewer_decodes_them() {
