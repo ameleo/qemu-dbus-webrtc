@@ -7,6 +7,7 @@
 //! the host GPU, and serves them over WebRTC.
 
 mod access;
+mod acme;
 mod agent;
 mod audio;
 mod cameras;
@@ -75,8 +76,35 @@ async fn main() -> Result<()> {
     if matches!(auth, config::Auth::None) && !config.listen.ip().is_loopback() {
         warn!(listen = %config.listen, "[auth] method is none: anyone who reaches this address sees the VMs");
     }
+    // The certificate from ACME first, if it gives it and none is in place yet or it is due.
+    if let Some(acme) = &config.acme
+        && acme.due() <= std::time::SystemTime::now()
+        && let Err(e) = acme.renew().await
+    {
+        if tls.certificate.exists() {
+            warn!(error = %format!("{e:#}"), "certificate not renewed: the one in place serves");
+        } else {
+            return Err(e.context("no certificate"));
+        }
+    }
+    let rustls = web::load_tls(&tls).await?;
+    if let Some(acme) = config.acme {
+        let (rustls, tls) = (rustls.clone(), tls.clone());
+        tokio::spawn(acme::keep(acme, move || {
+            let (rustls, tls) = (rustls.clone(), tls.clone());
+            tokio::spawn(async move {
+                match rustls
+                    .reload_from_pem_file(&tls.certificate, &tls.key)
+                    .await
+                {
+                    Ok(()) => info!("the pages serve the new certificate"),
+                    Err(e) => warn!(error = %e, "the new certificate is not served"),
+                }
+            });
+        }));
+    }
     let served = vms.clone();
-    let mut serving = tokio::spawn(web::serve(config.listen, tls, served, auth));
+    let mut serving = tokio::spawn(web::serve(config.listen, rustls, served, auth));
     // Stopped (Ctrl+C, or systemd): the sessions end cleanly, each telling its client the server
     // stops, before the process goes. Only a crash leaves the clients without a word.
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;

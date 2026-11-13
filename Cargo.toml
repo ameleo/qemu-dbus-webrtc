@@ -29,6 +29,7 @@ gstreamer-video = "0.24"
 gstreamer-webrtc = "0.24"
 base64 = "0.22"
 futures-util = "0.3"
+instant-acme = { version = "0.8", default-features = false, features = ["ring", "hyper-rustls", "rcgen"] }
 prost = "0.14"
 prost-build = "0.14"
 protox = "0.10"
@@ -43,6 +44,7 @@ tokio = "1"
 toml = { version = "0.9", default-features = false, features = ["parse", "display", "serde", "std"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+x509-parser = "0.18"
 zbus = { version = "5", default-features = false, features = ["tokio", "p2p"] }
 
 # Password hashes take RFC 9106's parameters (64 MiB, t=3): unoptimized, they take seconds, in

@@ -33,6 +33,11 @@ const MIN_BITRATE: u32 = 4_000;
 const START_BITRATE: u32 = 10_000;
 const MAX_BITRATE: u32 = 30_000;
 
+/// Where the certificate goes by default, with ACME, and the ACME account.
+const DEFAULT_CERTIFICATE: &str = "/etc/qemu-dbus-webrtc/tls/cert.pem";
+const DEFAULT_KEY: &str = "/etc/qemu-dbus-webrtc/tls/key.pem";
+const DEFAULT_ACME_DIR: &str = "/etc/qemu-dbus-webrtc/acme";
+
 /// Where libvirt puts the D-Bus bus of a domain's display.
 const LIBVIRT_DBUS_DIR: &str = "/run/libvirt/qemu/dbus";
 /// Where Proxmox VE puts the VMs' QMP sockets and their configurations.
@@ -44,6 +49,7 @@ const PROXMOX_CONF_DIR: &str = "/etc/pve/qemu-server";
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct File {
+    acme: Option<AcmeFile>,
     auth: AuthFile,
     listen: Listen,
     video: Video,
@@ -63,6 +69,25 @@ struct AuthFile {
     user: Option<String>,
     /// Its Argon2id hash: `qemu-dbus-webrtc hash-password`.
     password: Option<String>,
+}
+
+/// The server's certificate from an ACME authority.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AcmeFile {
+    directory: String,
+    domains: Vec<String>,
+    #[serde(default)]
+    contact: Vec<String>,
+    /// External Account Binding: the key id and the MAC key (base64url), both or neither.
+    eab_kid: Option<String>,
+    eab_hmac_key: Option<String>,
+    /// The roots of a private authority's own HTTPS certificate.
+    ca_bundle: Option<PathBuf>,
+    /// Where to answer the HTTP-01 challenges: 0.0.0.0:80 by default.
+    http: Option<SocketAddr>,
+    /// Where the account is kept: /etc/qemu-dbus-webrtc/acme by default.
+    dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -169,6 +194,8 @@ pub struct Config {
     tls: Option<web::Tls>,
     /// Where the VMs are found.
     pub providers: Providers,
+    /// The certificate from an ACME authority, if one gives it.
+    pub acme: Option<crate::acme::Acme>,
 }
 
 /// The settings from the configuration file, if `--config` names one, then from the other
@@ -291,10 +318,41 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
     let start = bitrate.start.unwrap_or(START_BITRATE).clamp(min, max);
     let bitrates = session::Bitrates { min, start, max };
 
+    // With ACME, the certificate is the one it gets, where [listen] says or by default.
+    if file.acme.is_some() {
+        listen
+            .certificate
+            .get_or_insert_with(|| DEFAULT_CERTIFICATE.into());
+        listen.key.get_or_insert_with(|| DEFAULT_KEY.into());
+    }
     let tls = match (listen.certificate, listen.key) {
         (Some(certificate), Some(key)) => Some(web::Tls { certificate, key }),
         (None, None) => None,
         _ => bail!("HTTPS takes a certificate and its key"),
+    };
+    let acme = match (file.acme, &tls) {
+        (Some(acme), Some(tls)) => {
+            if acme.domains.is_empty() {
+                bail!("[acme] takes the domains the certificate is for");
+            }
+            let eab = match (acme.eab_kid, acme.eab_hmac_key) {
+                (Some(kid), Some(key)) => Some((kid, key)),
+                (None, None) => None,
+                _ => bail!("[acme] External Account Binding takes both eab_kid and eab_hmac_key"),
+            };
+            Some(crate::acme::Acme {
+                directory: acme.directory,
+                domains: acme.domains,
+                contact: acme.contact,
+                eab,
+                ca_bundle: acme.ca_bundle,
+                http: acme.http.unwrap_or_else(|| ([0, 0, 0, 0], 80).into()),
+                dir: acme.dir.unwrap_or_else(|| DEFAULT_ACME_DIR.into()),
+                certificate: tls.certificate.clone(),
+                key: tls.key.clone(),
+            })
+        }
+        _ => None,
     };
     let listen = match listen.address {
         Some(address) => address,
@@ -330,6 +388,7 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
         listen,
         tls,
         providers,
+        acme,
     })
 }
 

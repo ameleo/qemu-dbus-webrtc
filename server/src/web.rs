@@ -179,7 +179,12 @@ pub struct Tls {
 /// with `tls`: never in plain HTTP, which would carry the session in clear (and browsers give
 /// the clipboard, the microphone and the camera to pages served in HTTPS only). A VM's page is
 /// `/vm/<uuid>/`, its signalling `/vm/<uuid>/signal` (`qdw_protocol::signalling_path`).
-pub async fn serve(listen: SocketAddr, tls: Tls, vms: Arc<Vms>, auth: Auth) -> Result<()> {
+pub async fn serve(
+    listen: SocketAddr,
+    tls: axum_server::tls_rustls::RustlsConfig,
+    vms: Arc<Vms>,
+    auth: Auth,
+) -> Result<()> {
     let state = AppState {
         vms,
         auth,
@@ -199,9 +204,16 @@ pub async fn serve(listen: SocketAddr, tls: Tls, vms: Arc<Vms>, auth: Auth) -> R
             .route("/vm/{uuid}/signal", get(upgrade))
             .with_state(state)
             .into_make_service_with_connect_info::<SocketAddr>();
+    info!(%listen, "serving the viewer page in HTTPS");
+    axum_server::bind_rustls(listen, tls).serve(app).await?;
+    Ok(())
+}
+
+/// The pages' TLS, from `tls`'s files: reloaded in place when they change (`reload`).
+pub async fn load_tls(tls: &Tls) -> Result<axum_server::tls_rustls::RustlsConfig> {
     // One crypto provider for the process: ring.
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.certificate, &tls.key)
+    axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.certificate, &tls.key)
         .await
         .with_context(|| {
             format!(
@@ -209,10 +221,7 @@ pub async fn serve(listen: SocketAddr, tls: Tls, vms: Arc<Vms>, auth: Auth) -> R
                 tls.certificate.display(),
                 tls.key.display()
             )
-        })?;
-    info!(%listen, "serving the viewer page in HTTPS");
-    axum_server::bind_rustls(listen, config).serve(app).await?;
-    Ok(())
+        })
 }
 
 /// A VM's page, by its UUID or its name. The same page whatever the VM, whether it exists or
