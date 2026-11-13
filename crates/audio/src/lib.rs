@@ -87,6 +87,7 @@ impl AudioEncoder {
         let raw = "audio/x-raw,format=S16LE,layout=interleaved,rate=48000,channels=2";
         let description = format!(
             "appsrc name=src is-live=true format=time \
+             leaky-type=downstream max-time=200000000 max-bytes=0 max-buffers=0 \
              ! queue max-size-time=200000000 max-size-buffers=0 max-size-bytes=0 \
              ! audioconvert ! audioresample ! volume name=volume ! {raw} ! mix. \
              audiotestsrc wave=silence is-live=true samplesperbuffer=480 ! {raw} ! mix. \
@@ -181,7 +182,8 @@ impl AudioEncoder {
             buffer.set_pts(pts);
             buffer.set_duration(duration);
         }
-        // A full queue (the encoder stalled) drops samples rather than holding QEMU.
+        // The encoder stalled, the appsrc drops its oldest samples past 200 ms rather than
+        // queue them all: never held, QEMU's calls are not either.
         let _ = self.src.push_buffer(buffer);
     }
 

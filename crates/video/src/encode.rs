@@ -285,6 +285,13 @@ fn video_format(fourcc: u32) -> Option<gst_video::VideoFormat> {
     }
 }
 
+/// The appsrc keeps the latest frame only, dropping older ones: without a bound, it queues
+/// every frame pushed while the encoder is behind (the GPU busy), and the picture lags more
+/// and more (measured: 35 frames, over a second, after 2 s at 30 frames a second into an
+/// encoder taking 10). Every frame shows the framebuffer as it is when encoded, so the latest
+/// loses nothing. `downstream` drops the oldest (measured too).
+const LATEST: &str = "leaky-type=downstream max-buffers=1";
+
 /// Where the encoded frames go.
 type Sink = Arc<std::sync::Mutex<Box<dyn FnMut(&gst::Buffer) + Send>>>;
 
@@ -311,7 +318,7 @@ fn build(
         }
         let (encoder, profile) = software_encoder(settings.full_chroma, settings.bitrate);
         let description = format!(
-            "appsrc name=src is-live=true format=time do-timestamp=true \
+            "appsrc name=src is-live=true format=time do-timestamp=true {LATEST} \
              ! queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 \
              ! {encoder} ! {profile} \
              ! {parser} ! {stream_caps} \
@@ -333,7 +340,7 @@ fn build(
         settings.ten_bits && settings.codec.has_ten_bits(),
     );
     let description = format!(
-        "appsrc name=src is-live=true format=time do-timestamp=true \
+        "appsrc name=src is-live=true format=time do-timestamp=true {LATEST} \
          ! queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 \
          ! vapostproc \
          ! video/x-raw(memory:VAMemory),format={raw},colorimetry=bt601 \
@@ -530,6 +537,7 @@ impl Encoder {
         offset: u32,
         stride: u32,
     ) -> Result<()> {
+        let stride = i32::try_from(stride).context("framebuffer stride")?;
         let caps = gst_video::VideoInfo::builder(format, width, height)
             .fps(gst::Fraction::new(0, 1))
             .build()?
@@ -541,7 +549,7 @@ impl Encoder {
             width,
             height,
             offset: offset as usize,
-            stride: stride as i32,
+            stride,
         });
         Ok(())
     }
@@ -599,7 +607,8 @@ impl Encoder {
         if let Some(encoder) = self.pipeline.by_name("encoder") {
             if encoder.find_property("target-bitrate").is_some() {
                 // libvpx, which takes it with the next frame.
-                encoder.set_property("target-bitrate", (bitrate as i32).saturating_mul(1000));
+                let bps = i32::try_from(u64::from(bitrate) * 1000).unwrap_or(i32::MAX);
+                encoder.set_property("target-bitrate", bps);
             } else {
                 encoder.set_property("cpb-size", cpb_size(bitrate));
                 encoder.set_property("bitrate", bitrate);
@@ -658,6 +667,41 @@ mod tests {
         assert!(own(&file, 4, 64, 256, 8).is_err());
         // Rows shorter than their pixels.
         assert!(own(&file, 0, 64, 255, 8).is_err());
+    }
+
+    /// A real encoder, on the CPU: the pipeline builds, and a framebuffer comes out encoded.
+    #[test]
+    fn a_framebuffer_is_encoded() {
+        gst::init().unwrap();
+        let (width, height) = (64, 64);
+        let file = rustix::fs::memfd_create("fb", rustix::fs::MemfdFlags::CLOEXEC).unwrap();
+        rustix::fs::ftruncate(&file, u64::from(width * height * 4)).unwrap();
+        let settings = Settings {
+            codec: Codec::Vp9,
+            full_chroma: false,
+            bitrate: 1000,
+            ten_bits: false,
+            software: true,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut encoder = Encoder::new(&settings, move |frame: &gst::Buffer| {
+            let _ = tx.send(frame.size());
+        })
+        .unwrap();
+        encoder
+            .set_shared_framebuffer(
+                &file,
+                width,
+                height,
+                gst_video::VideoFormat::Bgrx,
+                0,
+                width * 4,
+            )
+            .unwrap();
+        encoder.keyframe().unwrap();
+        let size = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        assert!(size > 0);
+        encoder.finish();
     }
 
     #[test]
