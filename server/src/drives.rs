@@ -30,8 +30,13 @@ const ANSWER_TIMEOUT: Duration = Duration::from_secs(30);
 const STATUS_OBJECT_NAME_INVALID: u32 = 0xC000_0033;
 
 /// A guest path (`\` separated) as the viewers name it (`/` separated); `None` if it goes
-/// through `..` or `.`: no client is asked about such a path.
+/// through `..` or `.`, or has a `:` (a drive, or a Windows stream) or a control character in
+/// it: no client is asked about such a path. A Windows client joining `C:/x` to its folder
+/// would get `C:/x`.
 fn client_path(guest: &str) -> Option<String> {
+    if guest.chars().any(|c| c == ':' || c.is_control()) {
+        return None;
+    }
     let path = guest.trim_start_matches('\\').replace('\\', "/");
     let escapes = path.split('/').any(|c| c == ".." || c == ".");
     (!escapes).then_some(path)
@@ -288,29 +293,40 @@ impl ViewerDrives {
     }
 
     fn announce(&mut self, client_id: u32, name: String, label: String) {
-        let replaced = self.guest_id(client_id);
-        let full = self.drives.drives.lock().unwrap().len() >= drive::MAX_DRIVES;
-        if replaced.is_some() || full {
-            let why = if full {
-                "too many drives"
+        // Checked and added under one lock: two viewers announcing at once stay within the
+        // limit.
+        let added_as = {
+            let mut drives = self.drives.drives.lock().unwrap();
+            let announced = drives
+                .values()
+                .any(|d| d.viewer == self.id && d.client_id == client_id);
+            if announced {
+                Err("this drive id is announced already")
+            } else if drives.len() >= drive::MAX_DRIVES {
+                Err("too many drives")
             } else {
-                "this drive id is announced already"
-            };
-            send(&self.outgoing, added(client_id, Err(why.into())));
-            return;
-        }
-        let id = self.drives.next_id.fetch_add(1, Ordering::Relaxed);
-        self.drives.drives.lock().unwrap().insert(
-            id,
-            Drive {
-                viewer: self.id,
-                client_id,
-                name: name.clone(),
-                label: label.clone(),
-                calls: self.calls_tx.clone(),
-                outgoing: self.outgoing.clone(),
-            },
-        );
+                let id = self.drives.next_id.fetch_add(1, Ordering::Relaxed);
+                drives.insert(
+                    id,
+                    Drive {
+                        viewer: self.id,
+                        client_id,
+                        name: name.clone(),
+                        label: label.clone(),
+                        calls: self.calls_tx.clone(),
+                        outgoing: self.outgoing.clone(),
+                    },
+                );
+                Ok(id)
+            }
+        };
+        let id = match added_as {
+            Ok(id) => id,
+            Err(why) => {
+                send(&self.outgoing, added(client_id, Err(why.into())));
+                return;
+            }
+        };
         let agent = self.drives.agent();
         let outgoing = self.outgoing.clone();
         // Mounting takes a moment in the guest: apart from the viewer's loop.
@@ -449,6 +465,7 @@ impl HostDrive {
         offset: u64,
         data: Vec<u8>,
     ) -> zbus::fdo::Result<(u32, u32)> {
+        let sent = u32::try_from(data.len()).unwrap_or(u32::MAX);
         let reply = self
             .ask(
                 drive_id,
@@ -460,7 +477,8 @@ impl HostDrive {
             )
             .await?;
         let written = match reply.result {
-            Some(drive_reply::Result::Written(written)) => written,
+            // At most what was sent.
+            Some(drive_reply::Result::Written(written)) => written.min(sent),
             _ => 0,
         };
         Ok((reply.status, written))
@@ -590,6 +608,33 @@ impl HostDrive {
 mod tests {
     use super::*;
 
+    /// Drives past the guest's letters are refused, and an id announced twice.
+    #[tokio::test]
+    async fn announcements_are_bounded() {
+        let drives = Drives::new();
+        let (mut viewer, _follow) = drives.viewer();
+        let (mut other, mut follow) = drives.viewer();
+        for id in 0..drive::MAX_DRIVES as u32 {
+            viewer.announce(id, format!("d{id}"), String::new());
+        }
+        viewer.announce(0, "again".into(), String::new());
+        other.announce(0, "late".into(), String::new());
+        assert_eq!(drives.drives.lock().unwrap().len(), drive::MAX_DRIVES);
+        // The refusal reaches the viewer that announced; the guest got no more drives.
+        let refused = follow.outgoing.recv().await.unwrap();
+        let refused = qdw_protocol::drive::Reassembler::default()
+            .push(&refused)
+            .unwrap()
+            .unwrap();
+        let Some(Message::Added(added)) = refused.message else {
+            panic!("not an answer to an announcement");
+        };
+        assert_eq!((added.id, added.error.as_str()), (0, "too many drives"));
+        other.release().await;
+        viewer.release().await;
+        assert!(drives.drives.lock().unwrap().is_empty());
+    }
+
     #[test]
     fn paths() {
         assert_eq!(
@@ -600,6 +645,9 @@ mod tests {
         assert_eq!(client_path("\\Docs").as_deref(), Some("Docs"));
         assert_eq!(client_path("Docs\\..\\..\\secret"), None);
         assert_eq!(client_path(".\\x"), None);
+        assert_eq!(client_path("C:\\Windows"), None);
+        assert_eq!(client_path("a.txt:secret"), None);
+        assert_eq!(client_path("a\u{0}b"), None);
         assert_eq!(guest_path("Docs/a.txt"), "Docs\\a.txt");
     }
 }
