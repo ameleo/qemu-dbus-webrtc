@@ -201,20 +201,29 @@ async fn start_in(
         let size = format!("{}x{}", console.width().await?, console.height().await?);
         info!(console = id, %label, head, %kind, %size, "console");
         if kind == "Graphic" {
-            listeners.push(display::listen(&vm_connection, id, events_tx.clone()).await?);
-            info!(console = id, "listening");
-            graphic.push((console.head().await?, id, console));
+            graphic.push((head, id, console));
         }
     }
-    drop(events_tx);
-
     // The guest's screens, in the order of their heads: one video track each for the viewers,
-    // as many as a session carries.
+    // as many as a session carries. The others are not listened to: no viewer could see them,
+    // and each would take an encoder.
     graphic.sort_by_key(|(head, id, _)| (*head, *id));
-    graphic.truncate(session::MAX_SCREENS);
+    if graphic.len() > session::MAX_SCREENS {
+        warn!(
+            screens = graphic.len(),
+            shown = session::MAX_SCREENS,
+            "more guest screens than a session carries: the last ones are not shown"
+        );
+        graphic.truncate(session::MAX_SCREENS);
+    }
     if graphic.is_empty() {
         bail!("the VM has no graphic console");
     }
+    for &(_, id, _) in &graphic {
+        listeners.push(display::listen(&vm_connection, id, events_tx.clone()).await?);
+        info!(console = id, "listening");
+    }
+    drop(events_tx);
     let screens: Vec<web::Screen> = graphic
         .iter()
         .map(|&(head, console, _)| web::Screen {
@@ -356,6 +365,8 @@ async fn start_in(
                 continue;
             }
             _ = still.tick() => {
+                // Only the encoders there are count in what they produced.
+                output.retain(|console, _| encoders.contains_key(console));
                 // A frame pushed just after a tick is a bit less than one interval old at the
                 // next one: hence the margin, or every other tick would be skipped.
                 for (console, encoder) in &encoders {
@@ -727,9 +738,6 @@ async fn start_in(
     })
 }
 
-/// A new DMA-BUF framebuffer on `console`: point its encoder at it, creating the encoder first
-/// if needed.
-#[allow(clippy::too_many_arguments)]
 /// Wait until the VM is gone: asked every `ALIVE_INTERVAL` whether it runs, it answers with an
 /// error (no `org.qemu` on its bus, the bus or the peer-to-peer connection gone). Apart from
 /// the display loop, which a slow answer does not hold; and a slow answer, QEMU's main loop
