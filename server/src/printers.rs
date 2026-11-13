@@ -353,21 +353,13 @@ impl ViewerPrinters {
         capabilities: String,
         default_ticket: String,
     ) {
-        let full = self.printers.printers.lock().unwrap().len() >= printer::MAX_PRINTERS;
-        let why = if full {
-            Some("too many printers")
-        } else if self.guest_id(client_id).is_some() {
-            Some("this printer id is announced already")
-        } else if capabilities.len() > printer::MAX_XML || default_ticket.len() > printer::MAX_XML {
-            Some("capabilities or ticket too large")
-        } else {
-            None
-        };
-        if let Some(why) = why {
-            send(&self.outgoing, added(client_id, why.into()));
+        if capabilities.len() > printer::MAX_XML || default_ticket.len() > printer::MAX_XML {
+            send(
+                &self.outgoing,
+                added(client_id, "capabilities or ticket too large".into()),
+            );
             return;
         }
-        let id = self.printers.next_id.fetch_add(1, Ordering::Relaxed);
         let printer = Printer {
             viewer: self.id,
             client_id,
@@ -378,11 +370,30 @@ impl ViewerPrinters {
             calls: self.calls_tx.clone(),
             outgoing: self.outgoing.clone(),
         };
-        self.printers
-            .printers
-            .lock()
-            .unwrap()
-            .insert(id, printer.clone());
+        // Checked and added under one lock: two viewers announcing at once stay within the
+        // limit.
+        let added_as = {
+            let mut printers = self.printers.printers.lock().unwrap();
+            let announced = printers
+                .values()
+                .any(|p| p.viewer == self.id && p.client_id == client_id);
+            if announced {
+                Err("this printer id is announced already")
+            } else if printers.len() >= printer::MAX_PRINTERS {
+                Err("too many printers")
+            } else {
+                let id = self.printers.next_id.fetch_add(1, Ordering::Relaxed);
+                printers.insert(id, printer.clone());
+                Ok(id)
+            }
+        };
+        let id = match added_as {
+            Ok(id) => id,
+            Err(why) => {
+                send(&self.outgoing, added(client_id, why.into()));
+                return;
+            }
+        };
         let agent = self.printers.agent();
         // Apart from the viewer's loop: the call carries up to megabytes of XML.
         tokio::spawn(async move {
@@ -624,6 +635,48 @@ mod tests {
         });
         viewer.message(&from_client(done)).await.unwrap();
         assert_eq!(finished.try_recv(), Ok(Err("out of paper".into())));
+    }
+
+    /// Printers past the guest's limit are refused, and an id announced twice.
+    #[tokio::test]
+    async fn announcements_are_bounded() {
+        let printers = Printers::new();
+        let (mut viewer, mut follow) = printers.viewer();
+        let announce = |viewer: &mut ViewerPrinters, id| {
+            viewer.announce(id, format!("p{id}"), false, String::new(), String::new())
+        };
+        for id in 0..printer::MAX_PRINTERS as u32 {
+            announce(&mut viewer, id);
+        }
+        assert_eq!(
+            printers.printers.lock().unwrap().len(),
+            printer::MAX_PRINTERS
+        );
+        let (mut other, mut other_follow) = printers.viewer();
+        announce(&mut other, 0);
+        announce(&mut viewer, 0);
+        assert_eq!(
+            printers.printers.lock().unwrap().len(),
+            printer::MAX_PRINTERS
+        );
+        let error = |bytes: Vec<u8>| {
+            let message = Reassembler::default().push(&bytes).unwrap().unwrap();
+            match message.message {
+                Some(Message::Added(added)) => added.error,
+                _ => panic!("not an answer to an announcement"),
+            }
+        };
+        assert_eq!(
+            error(other_follow.outgoing.recv().await.unwrap()),
+            "too many printers"
+        );
+        // The viewer's own answers come from the tasks adding its printers, in any order, then
+        // its refusal: look for it.
+        let mut errors = Vec::new();
+        for _ in 0..=printer::MAX_PRINTERS {
+            errors.push(error(follow.outgoing.recv().await.unwrap()));
+        }
+        assert!(errors.contains(&"this printer id is announced already".to_string()));
     }
 
     #[tokio::test]
