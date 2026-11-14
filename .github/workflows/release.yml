@@ -36,7 +36,8 @@ jobs:
           git archive --format=tar.gz --prefix="qemu-dbus-webrtc-$VERSION/" HEAD \
             -o "$top/SOURCES/qemu-dbus-webrtc-$VERSION.tar.gz"
           cp packaging/qemu-dbus-webrtc.sysusers "$top/SOURCES/"
-          rpmbuild --define "_topdir $top" -bb packaging/qemu-dbus-webrtc.spec
+          rpmbuild --define "_topdir $top" --define "commit $(git rev-parse --short=10 HEAD)" \
+            -bb packaging/qemu-dbus-webrtc.spec
           cp "$top"/RPMS/x86_64/*.rpm .
       - uses: actions/upload-artifact@v7
         with:

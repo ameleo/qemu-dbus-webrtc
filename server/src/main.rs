@@ -55,6 +55,11 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     let mut config = config::parse_args()?;
+    info!(
+        version = env!("CARGO_PKG_VERSION"),
+        commit = env!("QDW_COMMIT"),
+        "starting qemu-dbus-webrtc"
+    );
     let found = gpus::gpus();
     let vm = &mut config.vm;
     // Without a GPU, encode on the CPU: VP9, unless another codec was asked for.

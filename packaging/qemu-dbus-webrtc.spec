@@ -42,6 +42,8 @@ video encoded on the GPU (AV1, HEVC, VP9 through VA-API) or on the CPU (VP9).
 %autosetup -p1
 
 %build
+# The commit the tarball comes from, logged by the server at startup.
+%{?commit:export QDW_COMMIT=%{commit}}
 cargo build --release --locked -p qemu-dbus-webrtc
 
 %install
