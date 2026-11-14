@@ -1,7 +1,7 @@
 # Contributing
 
-Thank you for your interest. The project is at an early stage: before a large change, please
-open an issue to discuss it.
+Thank you for your interest. The project is at an early stage: please open an issue to discuss
+any large change before starting on it.
 
 This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md); report unacceptable behavior to
 opensource@ameleo.fr.
@@ -14,7 +14,7 @@ under the project's license ([Developer Certificate of Origin](https://developer
     git commit -s
 
 This adds a `Signed-off-by: Your Name <you@example.com>` line with your real name. A check on
-every pull request refuses commits without it. No contributor license agreement is needed.
+every pull request rejects commits without it. No contributor license agreement is required.
 
 ## License of contributions
 

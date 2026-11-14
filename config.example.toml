@@ -1,87 +1,86 @@
-# qemu-dbus-webrtc configuration: `qemu-dbus-webrtc --config <file>`, one per host, for instance
-# /etc/qemu-dbus-webrtc/config.toml. Every setting is optional but the certificate; the command
-# line's options override the file's.
+# qemu-dbus-webrtc configuration, one file per host: `qemu-dbus-webrtc --config <file>`, for
+# example /etc/qemu-dbus-webrtc/config.toml. All settings are optional except the certificate;
+# command-line options override this file.
 #
-# One server serves every VM of the host. A VM's page is https://<host>:<port>/vm/<uuid>/: the
-# server attaches to the VM when its first client comes, and detaches when the last one left (a
-# minute after a client cut off, which may come back).
+# One server handles all VMs of the host. A VM's console is at https://<host>:<port>/vm/<uuid>/.
+# The server attaches to a VM when its first client connects and detaches when the last one
+# leaves (one minute after a lost connection, so that the client can reconnect).
 
 [auth]
-# Who may open the consoles: "password" (the default), the user and password below, checked
-# before the server starts a VM or attaches to it; "none", anyone who reaches the server (a
-# test). The password is an Argon2id hash, never in clear: `qemu-dbus-webrtc hash-password`.
+# Client authentication: "password" (default) checks the username and password below before
+# the server starts or attaches to a VM; "none" lets anyone who can reach the server in (for
+# testing only). The password is stored as an Argon2id hash, generated with
+# `qemu-dbus-webrtc hash-password`.
 method = "password"
 user = "admin"
 password = "$argon2id$v=19$m=19456,t=2,p=1$..."
 
 [listen]
-# The pages and their signalling. Default: 127.0.0.1:8090, this host only.
+# Address of the client page and signaling endpoint. Default: 127.0.0.1:8090 (local only).
 address = "0.0.0.0:8090"
-# Required: the pages are served in HTTPS only (plain HTTP would carry the sessions in clear,
-# and browsers give the microphone, the camera and the clipboard only in HTTPS). With [acme],
-# where the certificate it gets goes (by default these).
+# Required: the server only serves HTTPS (plain HTTP would expose the sessions, and browsers
+# require HTTPS for microphone, camera and clipboard access). With [acme], the paths where the
+# obtained certificate is written (these by default).
 certificate = "/etc/qemu-dbus-webrtc/tls/cert.pem"
 key = "/etc/qemu-dbus-webrtc/tls/key.pem"
 
-# The certificate from an ACME authority, public or the organization's own (step-ca, OpenBao,
-# FreeIPA...), renewed once two thirds of its lifetime have gone and taken without a restart.
-# An authorization the authority already holds as valid takes no challenge; otherwise HTTP-01,
-# answered on `http` for the time of the validation (a private authority reaches servers on
-# private addresses).
+# Certificate from an ACME CA, public or private (step-ca, OpenBao, FreeIPA...), renewed after
+# two thirds of its lifetime and reloaded without a restart. Authorizations the CA already holds
+# as valid need no challenge; otherwise the server answers HTTP-01 challenges on `http` during
+# validation (a private CA can reach servers on private addresses).
 # [acme]
 # directory = "https://ca.example.com/acme/acme/directory"
 # domains = ["vdi.example.com"]
 # contact = ["mailto:admin@example.com"]
-# # External Account Binding, when the authority asks for it.
+# # External Account Binding, if the CA requires it.
 # eab_kid = "..."
 # eab_hmac_key = "..."
-# # The roots of a private authority's own HTTPS certificate.
+# # Root certificates of a private CA's own HTTPS endpoint.
 # ca_bundle = "/etc/pki/ca-trust/source/anchors/internal-root.pem"
-# # Where to answer HTTP-01. Default: 0.0.0.0:80.
+# # Address for HTTP-01 challenges. Default: 0.0.0.0:80.
 # http = "0.0.0.0:80"
-# # Where the account is kept. Default: /etc/qemu-dbus-webrtc/acme.
+# # ACME account directory. Default: /etc/qemu-dbus-webrtc/acme.
 # dir = "/etc/qemu-dbus-webrtc/acme"
 
 [video]
-# How every VM is encoded.
-# av1, vp9 or hevc (qemu-dbus-webrtc --codecs says what the GPUs encode). Default: av1, vp9 on
-# the CPU.
+# Video encoding, for all VMs.
+# av1, vp9 or hevc (`qemu-dbus-webrtc --codecs` lists what the GPUs encode). Default: av1, or
+# vp9 when encoding on the CPU.
 codec = "hevc"
-# 420 or 444 (VP9 and HEVC). Default: 420.
+# Chroma subsampling: 420 or 444 (VP9 and HEVC only). Default: 420.
 chroma = "444"
-# Encode on the CPU (VP9), without a GPU. Default: false, and true when the host has no GPU
+# Software encoding on the CPU (VP9). Default: false, or true when the host has no hardware
 # encoder.
 software = false
 # Record each screen's stream to <prefix>-<vm uuid>-<console>.<extension>.
 # record = "/var/tmp/qdw"
 
 [bitrate]
-# In kbit/s, for each client: the bandwidth estimation never goes below min, starts at start,
-# and stays under max.
+# Bandwidth estimate bounds per client, in kbit/s: initial value and range.
 min = 4000
 start = 10000
 max = 30000
 
-# Where the VMs are found: every VM manager enabled, then the VMs given by hand.
+# VM discovery: all enabled VM managers, plus the static VMs below.
 
 [libvirt]
-# The domains with <graphics type='dbus'>. Default: enabled.
+# libvirt domains with <graphics type='dbus'>. Default: enabled.
 enabled = true
-# Start a domain that is off when a client asks for it (through libvirt-dbus). Default: false;
-# without authentication, anyone who reaches the server could start the host's VMs.
+# Start a stopped domain when a client requests it (through libvirt-dbus). Default: false;
+# without authentication, anyone who can reach the server could start the host's VMs.
 start = false
-# Where libvirt puts their display's bus: read without libvirt-dbus, which then sees the
-# running domains only.
+# Directory of libvirt's display buses, used without libvirt-dbus (running domains only).
 # dir = "/run/libvirt/qemu/dbus"
 
 [proxmox]
-# The VMs of Proxmox VE, started with -display dbus,p2p=on (args: in their configuration).
-# Default: disabled. Not tried yet.
+# Proxmox VE VMs started with -display dbus,p2p=on (`args:` in their configuration).
+# Default: disabled. Untested.
 enabled = false
 # run_dir = "/var/run/qemu-server"
 # conf_dir = "/etc/pve/qemu-server"
 
-# A VM of no VM manager above, one of: qmp (its QMP socket, for -display dbus,p2p=on), dbus
-# (the D-Bus bus on which QEMU owns org.qemu), or domain (a libvirt domain, by its name).
+# Static VMs, outside any VM manager above, each with one of: qmp (its QMP socket, for
+# -display dbus,p2p=on), dbus (the D-Bus bus on which QEMU owns org.qemu), or domain (a libvirt
+# domain name).
 [[vm]]
 qmp = "/run/qemu/vm.qmp"
