@@ -1,0 +1,60 @@
+name: Release
+
+# A tag v<version> builds the RPM for Enterprise Linux 10 and publishes it in a GitHub release.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  rpm:
+    runs-on: ubuntu-24.04
+    container: rockylinux/rockylinux:10
+    timeout-minutes: 30
+    steps:
+      - name: Tools
+        # git first: the source tarball is made from the repository.
+        run: dnf install -y git rpm-build dnf-plugins-core
+      - uses: actions/checkout@v7
+      - name: The tag is the spec's version
+        run: |
+          version=$(rpm -q --qf '%{VERSION}\n' --specfile packaging/qemu-dbus-webrtc.spec | head -1)
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME, spec $version"; exit 1; }
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: Build dependencies
+        # libvpx and opus development files are in CRB.
+        run: |
+          dnf config-manager --set-enabled crb
+          dnf builddep -y packaging/qemu-dbus-webrtc.spec
+      - name: RPM
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          top="$PWD/rpmbuild"
+          mkdir -p "$top/SOURCES"
+          git archive --format=tar.gz --prefix="qemu-dbus-webrtc-$VERSION/" HEAD \
+            -o "$top/SOURCES/qemu-dbus-webrtc-$VERSION.tar.gz"
+          cp packaging/qemu-dbus-webrtc.sysusers "$top/SOURCES/"
+          rpmbuild --define "_topdir $top" -bb packaging/qemu-dbus-webrtc.spec
+          cp "$top"/RPMS/x86_64/*.rpm .
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rpm
+          path: '*.rpm'
+          if-no-files-found: error
+
+  publish:
+    needs: rpm
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: rpm
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes ./*.rpm

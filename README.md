@@ -115,6 +115,57 @@ override the file's: `--codec av1|vp9|hevc`, `--chroma 420|444`, `--software`,
 file), and VMs by hand: `--domain <libvirt domain>`, `--dbus <address>`, `--qmp <socket>`.
 `qemu-dbus-webrtc --codecs` lists what the host encodes.
 
+### As a service (Enterprise Linux 10)
+
+Each release has an RPM for Enterprise Linux 10 (Rocky, Alma, RHEL), on the
+[releases page](https://github.com/ameleo/qemu-dbus-webrtc/releases). It installs the
+`qemu-dbus-webrtc` service, which runs under an account of its own, `qemu-dbus-webrtc`, in the
+groups `qemu` (the VMs' QMP sockets and display buses), `libvirt` (libvirt-dbus) and `render`
+(the GPU), confined by systemd. The configuration is `/etc/qemu-dbus-webrtc/config.toml`.
+libvirt's VMs need nothing more; a VM reached by its QMP socket (Proxmox VE, `[[vm]] qmp`)
+needs the socket writable by the account (`connect()` takes write access).
+
+```
+dnf install ./qemu-dbus-webrtc-<version>-1.el10.x86_64.rpm
+install -m 0600 cert.pem key.pem /etc/qemu-dbus-webrtc/tls/
+systemctl enable --now qemu-dbus-webrtc
+```
+
+The certificate and its key stay readable by root alone: systemd reads them and hands them to
+the service (`LoadCredential=`). A renewed certificate is taken at the next
+`systemctl restart qemu-dbus-webrtc`. With a TPM 2.0, the key can be kept sealed by it, so that
+only this machine can read it (a stolen disk or backup gives nothing):
+
+```
+systemd-creds encrypt --with-key=tpm2 --name=key.pem /etc/qemu-dbus-webrtc/tls/key.pem /etc/qemu-dbus-webrtc/tls/key.pem.cred
+shred -u /etc/qemu-dbus-webrtc/tls/key.pem
+systemctl edit qemu-dbus-webrtc
+```
+
+with, in the drop-in:
+
+```
+[Service]
+LoadCredential=
+LoadCredential=cert.pem:/etc/qemu-dbus-webrtc/tls/cert.pem
+LoadCredentialEncrypted=key.pem:/etc/qemu-dbus-webrtc/tls/key.pem.cred
+```
+
+With `[acme]`, the service writes the certificate itself, and answers the HTTP-01 challenges on
+port 80: in a drop-in, the files it writes and the port, in place of the credentials.
+
+```
+[Service]
+LoadCredential=
+ExecStart=
+ExecStart=/usr/bin/qemu-dbus-webrtc --config /etc/qemu-dbus-webrtc/config.toml
+ReadWritePaths=/etc/qemu-dbus-webrtc/tls /etc/qemu-dbus-webrtc/acme
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+```
+
+(the two directories owned by `qemu-dbus-webrtc`).
+
 ## Goals
 
 - Hardware video encoding on the host (VA-API first: Intel and AMD GPUs, including integrated

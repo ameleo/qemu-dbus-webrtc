@@ -1,0 +1,47 @@
+[Unit]
+Description=WebRTC console for QEMU virtual machines
+Documentation=https://github.com/ameleo/qemu-dbus-webrtc
+After=network-online.target virtqemud.service libvirtd.service libvirt-dbus.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+# Its own account: the VMs' QMP sockets and display buses belong to the group qemu, libvirt-dbus
+# answers the group libvirt, the GPU's render node the group render.
+User=qemu-dbus-webrtc
+Group=qemu-dbus-webrtc
+SupplementaryGroups=qemu libvirt render
+# The certificate and its private key, read by systemd and handed to the service alone: the key
+# stays readable by root only on disk. A renewed certificate is taken at the next restart. With
+# [acme], replace these in a drop-in (see the README).
+LoadCredential=cert.pem:/etc/qemu-dbus-webrtc/tls/cert.pem
+LoadCredential=key.pem:/etc/qemu-dbus-webrtc/tls/key.pem
+ExecStart=/usr/bin/qemu-dbus-webrtc --config /etc/qemu-dbus-webrtc/config.toml --tls %d/cert.pem %d/key.pem
+Restart=on-failure
+RestartSec=2s
+
+# Hardening: the server reads its configuration, talks to the VMs, the GPU and the network.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# Unix sockets (the VMs, D-Bus), the network, and netlink for the host's addresses (the ICE
+# candidates).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target
