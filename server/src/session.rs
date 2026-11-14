@@ -852,12 +852,16 @@ mod tests {
 
     /// The offer of an HEVC session gives the profile of the stream (RFC 7798 7.1), which the
     /// payloader does not: a session fed by real encoders (the GPU's for the video), its offer
-    /// read. Skipped where there is no VA HEVC encoder.
+    /// read. Skipped where no GPU encodes HEVC.
     #[test]
     fn an_hevc_offer_gives_the_stream_profile() {
         gst::init().unwrap();
-        if gst::ElementFactory::find("vah265lpenc").is_none() {
-            eprintln!("no vah265lpenc: skipped");
+        if !qdw_video::gpus::gpus().iter().any(|gpu| {
+            gpu.codecs
+                .iter()
+                .any(|s| s.codec == Codec::Hevc && s.reduced.eight)
+        }) {
+            eprintln!("no HEVC encoder: skipped");
             return;
         }
         let viewers = Viewers::default();
@@ -895,7 +899,6 @@ mod tests {
             ten_bits: false,
             software: false,
             max_bitrate: 30_000,
-            direct: true,
         };
         let video_out = viewers.clone();
         let mut encoder = qdw_video::encode::Encoder::new(&settings, move |frame| {
@@ -907,7 +910,7 @@ mod tests {
                 &file,
                 320,
                 240,
-                gstreamer_video::VideoFormat::Bgrx,
+                qdw_video::encode::PixelFormat::Bgrx,
                 0,
                 320 * 4,
             )

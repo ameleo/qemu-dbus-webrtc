@@ -43,7 +43,7 @@ mod vpx;
 mod yuv;
 
 use std::os::fd::BorrowedFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub use error::{Error, Result};
@@ -224,6 +224,46 @@ struct Session {
     codec: CodecEncoder,
 }
 
+/// A GPU of the host that VA-API drives.
+pub struct Gpu {
+    /// Its render node: `/dev/dri/renderD128`.
+    pub device: PathBuf,
+    /// Its driver, by its own words.
+    pub driver: String,
+    display: Arc<Display>,
+}
+
+impl Gpu {
+    /// The host's GPUs, in the order of their render nodes.
+    pub fn all() -> Vec<Self> {
+        Display::nodes()
+            .into_iter()
+            .filter_map(|device| {
+                let display = Display::open(&device).ok()?;
+                Some(Self {
+                    driver: display.vendor(),
+                    device,
+                    display,
+                })
+            })
+            .collect()
+    }
+
+    /// Whether the GPU encodes `codec` in this chroma and depth.
+    pub fn encodes(&self, codec: Codec, full_chroma: bool, ten_bits: bool) -> bool {
+        encodes(&self.display, codec, full_chroma, ten_bits)
+    }
+}
+
+/// Whether `display`'s GPU encodes `codec` in this chroma and depth.
+fn encodes(display: &Display, codec: Codec, full_chroma: bool, ten_bits: bool) -> bool {
+    match codec {
+        Codec::Av1 => av1_encoder::supported(display, full_chroma, ten_bits),
+        Codec::Hevc => hevc::supported(display, full_chroma, ten_bits),
+        Codec::Vp9 => vp9_encoder::supported(display, full_chroma, ten_bits),
+    }
+}
+
 /// An encoder of one video stream on a GPU.
 pub struct Encoder {
     display: Arc<Display>,
@@ -238,10 +278,13 @@ impl Encoder {
         if settings.bitrate == 0 || settings.framerate == 0 {
             return Err(Error::Unsupported("no bitrate or no frame rate".into()));
         }
-        let encodes = |display: &Display| match settings.codec {
-            Codec::Av1 => av1_encoder::supported(display, settings.full_chroma, settings.ten_bits),
-            Codec::Hevc => hevc::supported(display, settings.full_chroma, settings.ten_bits),
-            Codec::Vp9 => vp9_encoder::supported(display, settings.full_chroma, settings.ten_bits),
+        let encodes = |display: &Display| {
+            encodes(
+                display,
+                settings.codec,
+                settings.full_chroma,
+                settings.ten_bits,
+            )
         };
         let display = match device {
             Some(device) => {

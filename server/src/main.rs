@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
         .init();
     if std::env::args().nth(1).as_deref() == Some("--codecs") {
         gstreamer::init()?;
-        print!("{}", gpus::report(&gpus::gpus(), gpus::software()));
+        print!("{}", gpus::report(&gpus::gpus()));
         return Ok(());
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
