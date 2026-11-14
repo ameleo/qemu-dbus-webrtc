@@ -4,7 +4,7 @@
 # the CI's container has the network. The tarball's top directory is %{name}-%{version}.
 
 Name:           qemu-dbus-webrtc
-Version:        0.1.1
+Version:        0.1.2
 Release:        1%{?dist}
 Summary:        WebRTC console for QEMU virtual machines
 License:        MPL-2.0
@@ -78,6 +78,12 @@ install -d -m 0700 %{buildroot}%{_sysconfdir}/qemu-dbus-webrtc/tls
 %dir %attr(0700,root,root) %{_sysconfdir}/qemu-dbus-webrtc/tls
 
 %changelog
+* Sat Nov 14 2026 Mickaël Bourneuf <mickael.bourneuf@ameleo.fr> - 0.1.2-1
+- Encode in variable bitrate on the GPU: no more filler data on still screens nor frame rate
+  collapse to 4 fps
+- Take the guest agent's D-Bus contract from ameleo-display-protocol
+- Log identical scanouts at debug level, and the version and commit at startup
+
 * Sat Nov 14 2026 Mickaël Bourneuf <mickael.bourneuf@ameleo.fr> - 0.1.1-1
 - On a narrow link, drop frames while the encoder is ahead of its bitrate, rather than let
   the sender's queue delay the picture and the sound

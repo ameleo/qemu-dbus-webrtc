@@ -3,6 +3,32 @@
 What each release brings. The packages are on the
 [releases page](https://github.com/ameleo/qemu-dbus-webrtc/releases).
 
+## 0.1.2 — 2026-11-14
+
+Variable bitrate encoding, which fixes the frame rate collapsing to 4 fps after a still screen,
+most visible with Linux guests.
+
+### Fixed
+
+- **Frame rate collapse after a still screen.** Intel's constant bitrate mode pads every frame
+  up to bitrate / frame rate. On a still screen the measured frame rate drops to the still-frame
+  rate (4 fps), so the encoder sent up to 25 Mbit/s of filler data, then oversized frames once
+  motion resumed, which the frame dropper skipped, keeping the stream at 4 fps. GPU encoding now
+  uses variable bitrate (VBR), which adds no filler, and dropped frames count in the measured
+  frame rate. Measured on an Arc A380, HEVC 4:4:4 at 3440×1440: 0.5 Mbit/s on a still screen
+  instead of 25, and 47–53 fps on a simulated 10 Mbit/s WAN link with a GNOME guest.
+
+### Changed
+
+- The guest agent's D-Bus contract now comes from
+  [ameleo-display-protocol](https://github.com/ameleo/ameleo-display-protocol), shared with the
+  agent, instead of a copy in the server. Nothing changes on the wire.
+- Identical scanouts (sent by virgl with every frame) are logged at debug level; only changes
+  are logged at info level.
+- The server logs its version and git commit at startup.
+- Documentation rewritten in conventional technical English; automatic Windows logon dropped from
+  the roadmap in favor of client certificates and FIDO security keys.
+
 ## 0.1.1 — 2026-11-14
 
 Behaviour on a narrow or congested link. Measured on a simulated link of 10 Mbit/s with 30 ms of
