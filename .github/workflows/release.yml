@@ -51,10 +51,16 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           name: rpm
       - name: GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes ./*.rpm
+        # The notes: the version's section of CHANGELOG.md, which must have one.
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '$1 == "##" && $2 == v {on = 1; next} $1 == "##" {on = 0} on' CHANGELOG.md > notes.md
+          test -s notes.md || { echo "no section for $version in CHANGELOG.md"; exit 1; }
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes-file notes.md ./*.rpm
