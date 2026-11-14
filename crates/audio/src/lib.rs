@@ -1,190 +1,121 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Opus encoding of the guest's sound.
+//! The guest's sound in Opus, and the clients' sound for its microphone, with libopus and no
+//! media framework.
 //!
-//! ```text
-//! appsrc (guest samples) ! audioconvert ! audioresample ! volume ─┐
-//!                                                                  audiomixer ! opusenc ! appsink
-//! audiotestsrc (silence) ─────────────────────────────────────────┘
-//! ```
-//!
-//! The silence keeps the stream going while the guest plays nothing: a WebRTC sender needs the
-//! audio to flow before it can make its offer, and receivers expect a steady stream.
-//!
-//! The guest's samples are stamped by their count, each buffer starting where the previous
-//! one ended: QEMU writes 10 ms every 10 ms on average, but with up to several milliseconds of
-//! jitter, and stamping each buffer on arrival made gaps and overlaps, heard as crackles. The
-//! stamps go back to the clock only when they drift from it, after the guest paused.
+//! The encoder runs on a thread of its own, a 10 ms Opus frame every 10 ms, with or without
+//! the guest's sound: a WebRTC sender needs the sound to flow before it can make its offer, and
+//! receivers expect a steady stream. The guest's samples, converted to 48 kHz stereo, wait in
+//! a queue that absorbs QEMU's jitter (it writes 10 ms every 10 ms on average, with up to
+//! several milliseconds of jitter); a frame the queue cannot fill is completed with silence.
+//! The frames are stamped by their count from the encoder's start.
 
 pub mod mic;
+mod opus;
+mod pcm;
+mod resample;
 
-use std::sync::Mutex;
-use std::time::Duration;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use gstreamer as gst;
-use gstreamer::prelude::*;
-use gstreamer_app as gst_app;
-use gstreamer_audio as gst_audio;
 use tracing::warn;
 
-/// How far the stamps may drift from the clock before they go back to it.
-const RESYNC: Duration = Duration::from_millis(80);
+pub use opus::Decoder;
+pub use pcm::Pcm;
+use resample::Resampler;
 
 /// The caps of the encoded stream, to feed it to another pipeline.
 pub const STREAM_CAPS: &str = "audio/x-opus,channel-mapping-family=0,rate=48000,channels=2";
 
-/// The sample format of the guest's sound, as QEMU gives it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Pcm {
-    pub bits: u8,
-    pub signed: bool,
-    pub float: bool,
-    pub big_endian: bool,
-    pub rate: u32,
-    pub channels: u8,
-}
+/// The Opus bitrate, in bit/s.
+const BITRATE: u32 = 128_000;
 
-impl Pcm {
-    fn info(self) -> Option<gst_audio::AudioInfo> {
-        use gst_audio::AudioFormat as F;
-        // A rate divides durations, channels sizes frames: none of either is no sound.
-        if self.rate == 0 || self.channels == 0 {
-            return None;
-        }
-        let format = match (self.bits, self.float, self.signed, self.big_endian) {
-            (8, false, true, _) => F::S8,
-            (8, false, false, _) => F::U8,
-            (16, false, true, false) => F::S16le,
-            (16, false, true, true) => F::S16be,
-            (16, false, false, false) => F::U16le,
-            (16, false, false, true) => F::U16be,
-            (32, false, true, false) => F::S32le,
-            (32, false, true, true) => F::S32be,
-            (32, true, _, false) => F::F32le,
-            (32, true, _, true) => F::F32be,
-            _ => return None,
-        };
-        gst_audio::AudioInfo::builder(format, self.rate, u32::from(self.channels))
-            .build()
-            .ok()
-    }
+/// A frame: 10 ms at 48 kHz.
+const FRAME: Duration = Duration::from_millis(10);
+const FRAME_SAMPLES: usize = 480;
+
+/// The guest's sound waits this long in the queue before it plays, after a start or an
+/// interruption: the room for QEMU's jitter.
+const PREBUFFER: usize = FRAME_SAMPLES * 2;
+
+/// The queue holds this much at most: past it, the guest runs ahead of the encoder's clock,
+/// and the queue goes back to `PREBUFFER`, so that the delay does not grow.
+const MAX_QUEUE: usize = FRAME_SAMPLES * 8;
+
+/// What the encoding thread and the guest share.
+struct Shared {
+    /// The guest's sound, 48 kHz stereo, interleaved.
+    queue: VecDeque<f32>,
+    /// Whether the queue is filling up before it plays.
+    filling: bool,
+    /// The guest's format and the resampler to 48 kHz.
+    format: Option<(Pcm, Resampler)>,
+    /// The gain of the guest's volume.
+    gain: f32,
 }
 
 /// The encoder of the guest's sound.
 pub struct AudioEncoder {
-    pipeline: gst::Pipeline,
-    src: gst_app::AppSrc,
-    volume: gst::Element,
-    /// The format of the guest's samples, and the stamp of the next buffer.
-    stream: Mutex<Option<(gst_audio::AudioInfo, Option<gst::ClockTime>)>>,
+    shared: Arc<Mutex<Shared>>,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
 }
 
 impl AudioEncoder {
-    /// Build and start the encoder. Its output goes to `sink`, called once per Opus frame
-    /// (10 ms), on a GStreamer thread.
+    /// Start the encoder. Its output goes to `sink`, called once per Opus frame (10 ms), on
+    /// the encoder's thread.
     pub fn new(sink: impl FnMut(&gst::Buffer) + Send + 'static) -> Result<Self> {
-        let raw = "audio/x-raw,format=S16LE,layout=interleaved,rate=48000,channels=2";
-        let description = format!(
-            "appsrc name=src is-live=true format=time \
-             leaky-type=downstream max-time=200000000 max-bytes=0 max-buffers=0 \
-             ! queue max-size-time=200000000 max-size-buffers=0 max-size-bytes=0 \
-             ! audioconvert ! audioresample ! volume name=volume ! {raw} ! mix. \
-             audiotestsrc wave=silence is-live=true samplesperbuffer=480 ! {raw} ! mix. \
-             audiomixer name=mix latency=20000000 \
-             ! opusenc audio-type=generic bitrate=128000 frame-size=10 \
-             ! appsink name=sink sync=false"
-        );
-        let pipeline = gst::parse::launch(&description)?
-            .downcast::<gst::Pipeline>()
-            .map_err(|_| anyhow!("not a pipeline"))?;
-        let src = pipeline
-            .by_name("src")
-            .and_then(|e| e.downcast::<gst_app::AppSrc>().ok())
-            .ok_or_else(|| anyhow!("no appsrc"))?;
-        let volume = pipeline
-            .by_name("volume")
-            .ok_or_else(|| anyhow!("no volume"))?;
-        let appsink = pipeline
-            .by_name("sink")
-            .and_then(|e| e.downcast::<gst_app::AppSink>().ok())
-            .ok_or_else(|| anyhow!("no appsink"))?;
-        let sink = Mutex::new(sink);
-        appsink.set_callbacks(
-            gst_app::AppSinkCallbacks::builder()
-                .new_sample(move |appsink| {
-                    let sample = appsink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
-                    let buffer = sample.buffer_owned().ok_or(gst::FlowError::Error)?;
-                    (sink.lock().unwrap())(&buffer);
-                    Ok(gst::FlowSuccess::Ok)
-                })
-                .build(),
-        );
-        let bus = pipeline.bus().ok_or_else(|| anyhow!("no bus"))?;
-        bus.set_sync_handler(|_, message| {
-            if let gst::MessageView::Error(error) = message.view() {
-                warn!(
-                    source = ?error.src().map(|s| s.path_string()),
-                    error = %error.error(),
-                    debug = ?error.debug(),
-                    "audio pipeline error"
-                );
-            }
-            gst::BusSyncReply::Drop
-        });
-        pipeline.set_state(gst::State::Playing)?;
+        let encoder = opus::Encoder::new(BITRATE)?;
+        let shared = Arc::new(Mutex::new(Shared {
+            queue: VecDeque::new(),
+            filling: true,
+            format: None,
+            gain: 1.0,
+        }));
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = std::thread::Builder::new()
+            .name("audio-encoder".into())
+            .spawn({
+                let (shared, stop) = (shared.clone(), stop.clone());
+                move || run(encoder, &shared, &stop, sink)
+            })?;
         Ok(Self {
-            pipeline,
-            src,
-            volume,
-            stream: Mutex::new(None),
+            shared,
+            stop,
+            thread: Some(thread),
         })
     }
 
     /// The guest's samples now come in this format.
     pub fn set_format(&self, pcm: Pcm) -> Result<()> {
-        let info = pcm
-            .info()
-            .ok_or_else(|| anyhow!("unsupported sample format {pcm:?}"))?;
-        self.src.set_caps(Some(&info.to_caps()?));
-        *self.stream.lock().unwrap() = Some((info, None));
+        if !pcm.is_supported() {
+            return Err(anyhow!("unsupported sample format {pcm:?}"));
+        }
+        let resampler = Resampler::new(pcm.rate, opus::RATE, opus::CHANNELS)?;
+        self.shared.lock().unwrap().format = Some((pcm, resampler));
         Ok(())
     }
 
     /// Samples of the guest, in the last format set: whole frames, a part of one left out (it
     /// would shift every later sample).
-    pub fn push(&self, mut samples: Vec<u8>) {
-        let mut stream = self.stream.lock().unwrap();
-        let Some((info, next)) = stream.as_mut() else {
+    pub fn push(&self, samples: Vec<u8>) {
+        let mut shared = self.shared.lock().unwrap();
+        let Some((pcm, resampler)) = &mut shared.format else {
             return;
         };
-        let Some(now) = self.pipeline.current_running_time() else {
-            return;
-        };
-        let frame = (info.bpf() as usize).max(1);
-        samples.truncate(samples.len() - samples.len() % frame);
-        if samples.is_empty() {
-            return;
+        let stereo = pcm::to_stereo(&pcm.to_float(&samples), usize::from(pcm.channels));
+        let resampled = resampler.process(&stereo);
+        let queue = &mut shared.queue;
+        queue.extend(resampled);
+        if queue.len() > MAX_QUEUE * opus::CHANNELS {
+            let excess = queue.len() - PREBUFFER * opus::CHANNELS;
+            queue.drain(..excess);
         }
-        let frames = (samples.len() / frame) as u64;
-        let duration =
-            gst::ClockTime::from_nseconds(frames * 1_000_000_000 / u64::from(info.rate()));
-        // Where the previous buffer ended, unless that is too far from the clock.
-        let resync = gst::ClockTime::from_nseconds(RESYNC.as_nanos() as u64);
-        let pts = match *next {
-            Some(pts) if pts.absdiff(now) < resync => pts,
-            _ => now,
-        };
-        *next = Some(pts + duration);
-        let mut buffer = gst::Buffer::from_mut_slice(samples);
-        {
-            let buffer = buffer.get_mut().unwrap();
-            buffer.set_pts(pts);
-            buffer.set_duration(duration);
-        }
-        // The encoder stalled, the appsrc drops its oldest samples past 200 ms rather than
-        // queue them all: never held, QEMU's calls are not either.
-        let _ = self.src.push_buffer(buffer);
     }
 
     /// The guest's volume: muted, and per channel from 0 to 255. The guest's slider is a
@@ -195,15 +126,80 @@ impl AudioEncoder {
         } else {
             volume.iter().map(|&v| f64::from(v)).sum::<f64>() / volume.len() as f64 / 255.0
         };
-        self.volume.set_property("volume", level.powi(3));
-        self.volume.set_property("mute", mute);
+        self.shared.lock().unwrap().gain = if mute { 0.0 } else { level.powi(3) as f32 };
     }
 }
 
 /// Stopped however it goes: at the end of its task, or with the task aborted on shutdown.
 impl Drop for AudioEncoder {
     fn drop(&mut self) {
-        let _ = self.pipeline.set_state(gst::State::Null);
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// The next frame: the guest's sound when the queue plays, silence where it runs short.
+fn next_frame(shared: &Mutex<Shared>) -> Vec<i16> {
+    let mut shared = shared.lock().unwrap();
+    let wanted = FRAME_SAMPLES * opus::CHANNELS;
+    if shared.filling && shared.queue.len() >= PREBUFFER * opus::CHANNELS {
+        shared.filling = false;
+    }
+    let gain = shared.gain;
+    let mut frame: Vec<f32> = if shared.filling {
+        Vec::new()
+    } else {
+        let take = wanted.min(shared.queue.len());
+        shared.queue.drain(..take).collect()
+    };
+    if frame.len() < wanted {
+        // The guest stopped, or is late: silence, and the queue fills up again first.
+        shared.filling = true;
+        frame.resize(wanted, 0.0);
+    }
+    frame
+        .iter()
+        .map(|&s| ((s * gain).clamp(-1.0, 1.0) * 32767.0).round() as i16)
+        .collect()
+}
+
+/// The encoding thread: a frame every 10 ms, on time, until told to stop.
+fn run(
+    mut encoder: opus::Encoder,
+    shared: &Mutex<Shared>,
+    stop: &AtomicBool,
+    mut sink: impl FnMut(&gst::Buffer),
+) {
+    let start = Instant::now();
+    let mut count: u64 = 0;
+    while !stop.load(Ordering::Relaxed) {
+        let due = start + FRAME * count as u32;
+        let now = Instant::now();
+        if due > now {
+            std::thread::sleep(due - now);
+        } else if now - due > FRAME * 10 {
+            // Far behind (the host stalled): the frames missed are not made up.
+            count = ((now - start).as_nanos() / FRAME.as_nanos()) as u64;
+            continue;
+        }
+        let samples = next_frame(shared);
+        match encoder.encode(&samples) {
+            Ok(packet) => {
+                let mut buffer = gst::Buffer::from_slice(packet);
+                {
+                    let buffer = buffer.get_mut().expect("a buffer just made");
+                    buffer.set_pts(gst::ClockTime::from_nseconds(
+                        count * FRAME.as_nanos() as u64,
+                    ));
+                    buffer.set_duration(gst::ClockTime::from_nseconds(FRAME.as_nanos() as u64));
+                }
+                sink(&buffer);
+            }
+            Err(error) => warn!(%error, "sound not encoded"),
+        }
+        count += 1;
     }
 }
 
@@ -211,22 +207,83 @@ impl Drop for AudioEncoder {
 mod tests {
     use super::*;
 
-    fn pcm(rate: u32, channels: u8) -> Pcm {
-        Pcm {
-            bits: 16,
-            signed: true,
-            float: false,
-            big_endian: false,
-            rate,
-            channels,
+    fn shared() -> Mutex<Shared> {
+        Mutex::new(Shared {
+            queue: VecDeque::new(),
+            filling: true,
+            format: None,
+            gain: 1.0,
+        })
+    }
+
+    /// The queue plays once it holds `PREBUFFER`, fills up again after it ran short, and
+    /// gives silence meanwhile.
+    #[test]
+    fn the_queue_absorbs_the_jitter() {
+        let shared = shared();
+        shared
+            .lock()
+            .unwrap()
+            .queue
+            .extend([0.5; FRAME_SAMPLES * 2]);
+        // 10 ms waiting: not enough yet, silence.
+        assert!(next_frame(&shared).iter().all(|&s| s == 0));
+        shared
+            .lock()
+            .unwrap()
+            .queue
+            .extend([0.5; FRAME_SAMPLES * 2]);
+        // 20 ms: it plays.
+        assert!(next_frame(&shared).iter().all(|&s| s == 16384));
+        assert!(next_frame(&shared).iter().all(|&s| s == 16384));
+        // Empty: silence, and it waits for 20 ms again.
+        assert!(next_frame(&shared).iter().all(|&s| s == 0));
+        shared
+            .lock()
+            .unwrap()
+            .queue
+            .extend([0.5; FRAME_SAMPLES * 2]);
+        assert!(next_frame(&shared).iter().all(|&s| s == 0));
+    }
+
+    /// Frames come out every 10 ms, stamped by their count, with or without the guest.
+    #[test]
+    fn frames_flow_without_the_guest() {
+        gst::init().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let encoder = AudioEncoder::new(move |frame: &gst::Buffer| {
+            let _ = tx.send(frame.pts());
+        })
+        .unwrap();
+        let stamps: Vec<_> = (0..5)
+            .map(|_| rx.recv_timeout(Duration::from_secs(1)).unwrap())
+            .collect();
+        drop(encoder);
+        for (i, stamp) in stamps.into_iter().enumerate() {
+            assert_eq!(stamp, Some(gst::ClockTime::from_mseconds(10 * i as u64)));
         }
     }
 
     #[test]
     fn formats_without_sound_are_refused() {
         gst::init().unwrap();
-        assert!(pcm(48_000, 2).info().is_some());
-        assert!(pcm(0, 2).info().is_none());
-        assert!(pcm(48_000, 0).info().is_none());
+        let encoder = AudioEncoder::new(|_: &gst::Buffer| {}).unwrap();
+        let pcm = Pcm {
+            bits: 16,
+            signed: true,
+            float: false,
+            big_endian: false,
+            rate: 0,
+            channels: 2,
+        };
+        assert!(encoder.set_format(pcm).is_err());
+        assert!(
+            encoder
+                .set_format(Pcm {
+                    rate: 44_100,
+                    ..pcm
+                })
+                .is_ok()
+        );
     }
 }

@@ -78,10 +78,11 @@ Coming next: automatic logon to the guest, and single sign-on (OpenBao, OIDC).
 ## Running it
 
 It needs libva with the GPU's VA driver (Intel's `iHD`, or Mesa's for AMD) and libvpx for the
-video; GStreamer 1.26 for the transport and the sound (`webrtcbin` and Opus, and `rtpgccbwe`,
-`rtpvp9pay2` of gst-plugins-rs); libvirt-dbus for libvirt's VMs; and VMs started with
-`-display dbus` (libvirt: `<graphics type='dbus'/>`). Building it also needs the development
-files of libva and libvpx, and libclang, which generates the bindings to both. A fix to
+video, libopus for the sound; GStreamer 1.26 for the transport (`webrtcbin`, and `rtpgccbwe`,
+`rtpvp9pay2` of gst-plugins-rs; it also decodes the microphone's Opus for now);
+libvirt-dbus for libvirt's VMs; and VMs started with `-display dbus` (libvirt:
+`<graphics type='dbus'/>`). Building it also needs the development files of libva, libvpx and
+libopus, and libclang, which generates the bindings to them. A fix to
 GStreamer, to be offered upstream, makes the congestion control smoother: as released,
 `rtpgccbwe` raises its estimate far above the link while the desktop sends little.
 One server serves every VM of its host. It finds them through their VM manager: libvirt (the

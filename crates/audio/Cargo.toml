@@ -1,6 +1,6 @@
 [package]
 name = "qdw-audio"
-description = "Opus encoding of the guest's sound"
+description = "The guest's sound in Opus, and the clients' sound for its microphone"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,6 +11,9 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 gstreamer.workspace = true
-gstreamer-app.workspace = true
-gstreamer-audio.workspace = true
+rubato = { version = "5.1", default-features = false, features = ["fft_resampler"] }
 tracing.workspace = true
+
+[build-dependencies]
+bindgen.workspace = true
+pkg-config.workspace = true

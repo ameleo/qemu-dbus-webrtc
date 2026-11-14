@@ -154,10 +154,12 @@ space unknown (measured on the A380), which decoders take for BT.601.
 > operating system. Whether your deployment needs a patent license depends on
 > your use and jurisdiction; this is not legal advice.
 
-Audio is Opus, 128 kbit/s in 10 ms frames, encoded once for every viewer. A silent source keeps
-the stream going while the guest plays nothing: a WebRTC sender needs the audio to flow before
-it can make its offer. The samples are stamped by their count, not on arrival, and each viewer
-keeps the encoder's timestamps: they become the RTP timestamps, from which the receiver places
+Audio is Opus, 128 kbit/s in 10 ms frames, encoded once for every viewer with libopus, on a
+thread of its own that makes a frame every 10 ms: silence completes what the guest does not
+play, which keeps the stream going (a WebRTC sender needs the audio to flow before it can make
+its offer). The guest's samples are converted to 48 kHz stereo (rubato resamples other rates)
+and wait 20 ms in a queue that absorbs QEMU's jitter; the frames are stamped by their count, not
+on arrival, and each viewer keeps the encoder's timestamps: they become the RTP timestamps, from which the receiver places
 the samples. Browsers play sound only after the user did something on the page: the page
 starts muted and unmutes on the first click or key.
 

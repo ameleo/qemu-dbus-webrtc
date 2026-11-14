@@ -1,31 +1,31 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! The guest's microphone: the clients' sound, converted to the format the guest records in.
-//!
-//! ```text
-//! appsrc (CANONICAL) ! audioconvert ! audioresample ! guest format ! appsink -> buffer
-//! ```
+//! The guest's microphone: the clients' sound, converted to the format the guest records in
+//! (its sample type, rate and channels).
 //!
 //! QEMU reads the buffer when it wants, and waits for the answer: the buffer gives at once what
 //! it holds. It keeps 100 ms at most, the oldest dropped first, so that the delay cannot grow.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use anyhow::{Result, anyhow};
-use gstreamer as gst;
-use gstreamer::prelude::*;
-use gstreamer_app as gst_app;
-use gstreamer_audio as gst_audio;
-use tracing::warn;
 
-use crate::Pcm;
+use crate::pcm::{self, Pcm};
+use crate::resample::Resampler;
 
 /// The decoded sound of a client, as the microphone takes it.
 pub const CANONICAL: &str = "audio/x-raw,format=S16LE,layout=interleaved,rate=48000,channels=2";
 
-/// The bytes of one second of [`CANONICAL`].
-const CANONICAL_BYTES_PER_SECOND: u64 = 48_000 * 2 * 2;
+/// [`CANONICAL`] as a sample format.
+const CANONICAL_PCM: Pcm = Pcm {
+    bits: 16,
+    signed: true,
+    float: false,
+    big_endian: false,
+    rate: 48_000,
+    channels: 2,
+};
 
 /// What the buffer holds at most: 100 ms.
 const MAX_DELAY_DIVISOR: usize = 10;
@@ -38,9 +38,8 @@ struct Samples {
     /// The bytes of one frame. Whatever comes in and goes out does in whole frames: a part of
     /// one would shift every later sample.
     frame: usize,
-    /// The format of the samples it takes (sample type, rate, channels): a buffer in another
-    /// one, converted before the format changed and arriving after, is not the guest's sound.
-    format: Option<(gst_audio::AudioFormat, u32, u32)>,
+    /// The guest's format, and the resampler from 48 kHz to its rate.
+    format: Option<(Pcm, Resampler)>,
 }
 
 impl Samples {
@@ -69,108 +68,48 @@ impl Samples {
 
 /// The microphone of the guest.
 pub struct Microphone {
-    pipeline: gst::Pipeline,
-    src: gst_app::AppSrc,
-    format: gst::Element,
     /// Samples in the guest's format, whole frames only (all channels of one instant).
-    buffer: Arc<Mutex<Samples>>,
-    /// Samples pushed so far, to stamp the next ones.
-    pushed: Mutex<u64>,
+    buffer: Mutex<Samples>,
 }
 
 impl Microphone {
     pub fn new() -> Result<Self> {
-        let description = format!(
-            "appsrc name=src format=time caps={CANONICAL} \
-             ! audioconvert ! audioresample ! capsfilter name=format \
-             ! appsink name=sink sync=false"
-        );
-        let pipeline = gst::parse::launch(&description)?
-            .downcast::<gst::Pipeline>()
-            .map_err(|_| anyhow!("not a pipeline"))?;
-        let src = pipeline
-            .by_name("src")
-            .and_then(|e| e.downcast::<gst_app::AppSrc>().ok())
-            .ok_or_else(|| anyhow!("no appsrc"))?;
-        let format = pipeline
-            .by_name("format")
-            .ok_or_else(|| anyhow!("no capsfilter"))?;
-        let appsink = pipeline
-            .by_name("sink")
-            .and_then(|e| e.downcast::<gst_app::AppSink>().ok())
-            .ok_or_else(|| anyhow!("no appsink"))?;
-        let buffer = Arc::new(Mutex::new(Samples {
-            bytes: VecDeque::new(),
-            max: 0,
-            frame: 1,
-            format: None,
-        }));
-        let filled = buffer.clone();
-        appsink.set_callbacks(
-            gst_app::AppSinkCallbacks::builder()
-                .new_sample(move |appsink| {
-                    let sample = appsink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
-                    let samples = sample.buffer().ok_or(gst::FlowError::Error)?;
-                    let map = samples.map_readable().map_err(|_| gst::FlowError::Error)?;
-                    let mut samples = filled.lock().unwrap();
-                    // Only in the format the guest records in now.
-                    let format = sample
-                        .caps()
-                        .and_then(|caps| gst_audio::AudioInfo::from_caps(caps).ok())
-                        .map(|info| (info.format(), info.rate(), info.channels()));
-                    if format.is_some() && format == samples.format {
-                        samples.append(&map);
-                    }
-                    Ok(gst::FlowSuccess::Ok)
-                })
-                .build(),
-        );
-        let bus = pipeline.bus().ok_or_else(|| anyhow!("no bus"))?;
-        bus.set_sync_handler(|_, message| {
-            if let gst::MessageView::Error(error) = message.view() {
-                warn!(error = %error.error(), debug = ?error.debug(), "microphone pipeline error");
-            }
-            gst::BusSyncReply::Drop
-        });
-        pipeline.set_state(gst::State::Playing)?;
         Ok(Self {
-            pipeline,
-            src,
-            format,
-            buffer,
-            pushed: Mutex::new(0),
+            buffer: Mutex::new(Samples {
+                bytes: VecDeque::new(),
+                max: 0,
+                frame: 1,
+                format: None,
+            }),
         })
     }
 
     /// The guest now records in this format.
     pub fn set_format(&self, pcm: Pcm) -> Result<()> {
-        let info = pcm
-            .info()
-            .ok_or_else(|| anyhow!("unsupported sample format {pcm:?}"))?;
-        self.format.set_property("caps", info.to_caps()?);
-        let frame = (info.bpf() as usize).max(1);
+        if !pcm.is_supported() {
+            return Err(anyhow!("unsupported sample format {pcm:?}"));
+        }
+        let resampler = Resampler::new(CANONICAL_PCM.rate, pcm.rate, 2)?;
+        let frame = pcm.frame_bytes().max(1);
         let mut samples = self.buffer.lock().unwrap();
         // Samples of the former format mean nothing in the new one.
         samples.bytes.clear();
-        samples.format = Some((info.format(), info.rate(), info.channels()));
+        samples.format = Some((pcm, resampler));
         samples.frame = frame;
-        samples.max = frame * (info.rate() as usize / MAX_DELAY_DIVISOR);
+        samples.max = frame * (pcm.rate as usize / MAX_DELAY_DIVISOR);
         Ok(())
     }
 
     /// A client's sound, in [`CANONICAL`].
     pub fn push(&self, samples: &[u8]) {
-        let mut pushed = self.pushed.lock().unwrap();
-        let nanos = |bytes: u64| bytes * 1_000_000_000 / CANONICAL_BYTES_PER_SECOND;
-        let start = gst::ClockTime::from_nseconds(nanos(*pushed));
-        *pushed += samples.len() as u64;
-        let mut buffer = gst::Buffer::from_slice(samples.to_vec());
-        {
-            let buffer = buffer.get_mut().unwrap();
-            buffer.set_pts(start);
-            buffer.set_duration(gst::ClockTime::from_nseconds(nanos(samples.len() as u64)));
-        }
-        let _ = self.src.push_buffer(buffer);
+        let mut buffer = self.buffer.lock().unwrap();
+        let Some((pcm, resampler)) = &mut buffer.format else {
+            return;
+        };
+        let pcm = *pcm;
+        let resampled = resampler.process(&CANONICAL_PCM.to_float(samples));
+        let guest = pcm.from_float(&pcm::from_stereo(&resampled, usize::from(pcm.channels)));
+        buffer.append(&guest);
     }
 
     /// Up to `size` bytes of samples in the guest's format, at once, in whole frames.
@@ -179,21 +118,14 @@ impl Microphone {
     }
 }
 
-impl Drop for Microphone {
-    fn drop(&mut self) {
-        let _ = self.pipeline.set_state(gst::State::Null);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A client's sound comes out in the guest's format, through the real pipeline: the format
-    /// check lets the guest's own format through, and what comes out is whole frames.
+    /// A client's sound comes out in the guest's format: resampled to its rate, mixed to its
+    /// channels, in whole frames.
     #[test]
     fn a_client_is_heard_in_the_guest_format() {
-        gst::init().unwrap();
         let mic = Microphone::new().unwrap();
         // 44.1 kHz mono, 16 bits: frames of 2 bytes.
         mic.set_format(Pcm {
@@ -205,18 +137,28 @@ mod tests {
             channels: 1,
         })
         .unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        let heard = loop {
-            assert!(std::time::Instant::now() < deadline, "nothing heard");
-            // 10 ms of the canonical format.
+        // 100 ms of the canonical format, a constant level: 0x1111 on both sides.
+        for _ in 0..10 {
             mic.push(&[0x11; 480 * 4]);
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            let heard = mic.read(4096);
-            if !heard.is_empty() {
-                break heard;
-            }
-        };
+        }
+        let heard = mic.read(1 << 20);
+        // About 100 ms at 44.1 kHz, mono 16 bits, less what the resampler holds back.
         assert_eq!(heard.len() % 2, 0);
+        assert!(
+            (3_500..=8_820).contains(&heard.len()),
+            "{} bytes",
+            heard.len()
+        );
+        // The level comes through, past the resampler's start.
+        let tail = i16::from_le_bytes([heard[heard.len() - 2], heard[heard.len() - 1]]);
+        assert!((0x1000..0x1200).contains(&tail), "{tail:#x}");
+        // Another format: what was waiting is dropped.
+        mic.set_format(Pcm {
+            channels: 2,
+            ..CANONICAL_PCM
+        })
+        .unwrap();
+        assert!(mic.read(1 << 20).is_empty());
     }
 
     #[test]
