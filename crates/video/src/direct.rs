@@ -113,6 +113,8 @@ pub(crate) enum Source {
 /// A framebuffer to encode.
 #[derive(Clone)]
 pub(crate) struct Picture {
+    /// When the frame was asked for: the guest had drawn.
+    pub asked: std::time::Instant,
     pub source: Arc<Source>,
     pub format: PixelFormat,
     pub width: u32,
@@ -374,9 +376,13 @@ fn run(mut engine: Engine, shared: &Shared, sink: &Sink, counters: &Counters) {
                 .expect("a buffer just made")
                 .set_flags(gst::BufferFlags::DELTA_UNIT);
         }
+        (sink.lock().unwrap())(&buffer);
+        // From the guest's drawing to the frame handed to the viewers' pipelines.
+        let latency = picture.asked.elapsed().as_micros() as u64;
         counters.encoded.fetch_add(1, Ordering::Relaxed);
         counters.bytes.fetch_add(size, Ordering::Relaxed);
         counters.output.fetch_add(size, Ordering::Relaxed);
-        (sink.lock().unwrap())(&buffer);
+        counters.latency.fetch_add(latency, Ordering::Relaxed);
+        counters.latency_max.fetch_max(latency, Ordering::Relaxed);
     }
 }

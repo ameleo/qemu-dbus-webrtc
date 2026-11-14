@@ -889,16 +889,21 @@ fn report_rates(
 ) {
     let secs = elapsed.as_secs_f64();
     for (&console, encoder) in encoders {
-        let (frames, bytes) = encoder.take_counters();
+        let produced = encoder.take_counters();
         let guest = updates.remove(&console).unwrap_or(0);
-        if guest == 0 && frames == 0 {
+        if guest == 0 && produced.frames == 0 {
             continue;
         }
+        let ms = |d: Duration| format!("{:.1}", d.as_secs_f64() * 1000.0);
         info!(
             console,
             updates_per_second = format!("{:.1}", f64::from(guest) / secs),
-            frames_per_second = format!("{:.1}", frames as f64 / secs),
-            kbit_per_second = format!("{:.0}", bytes as f64 * 8.0 / 1000.0 / secs),
+            frames_per_second = format!("{:.1}", produced.frames as f64 / secs),
+            kbit_per_second = format!("{:.0}", produced.bytes as f64 * 8.0 / 1000.0 / secs),
+            // From the frame asked for to its encoding handed to the transport: a guest that
+            // draws faster than the frame rate waits up to a frame interval more, not counted.
+            encode_ms = ms(produced.latency),
+            encode_max_ms = ms(produced.latency_max),
             "rates"
         );
     }

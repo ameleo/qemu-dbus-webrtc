@@ -264,6 +264,21 @@ pub(crate) struct Counters {
     pub(crate) bytes: Arc<AtomicU64>,
     /// Bytes out of the encoder since it started.
     pub(crate) output: Arc<AtomicU64>,
+    /// The time from a frame asked for to its encoding handed to the viewers, added over
+    /// the frames, and the longest, in microseconds.
+    pub(crate) latency: Arc<AtomicU64>,
+    pub(crate) latency_max: Arc<AtomicU64>,
+}
+
+/// What an encoder produced over a while.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Produced {
+    pub frames: u64,
+    pub bytes: u64,
+    /// From a frame asked for (the guest drew) to its encoding handed to the viewers: the
+    /// mean over the frames, and the longest.
+    pub latency: std::time::Duration,
+    pub latency_max: std::time::Duration,
 }
 
 /// A guest framebuffer, ready to be encoded as often as it changes.
@@ -375,6 +390,7 @@ impl Encoder {
             return Ok(());
         };
         self.direct.frame(Picture {
+            asked: std::time::Instant::now(),
             source: fb.source.clone(),
             format: fb.format,
             width: fb.width,
@@ -419,12 +435,18 @@ impl Encoder {
         self.counters.output.load(Ordering::Relaxed)
     }
 
-    /// Frames and bytes encoded since the last call.
-    pub fn take_counters(&self) -> (u64, u64) {
-        (
-            self.counters.encoded.swap(0, Ordering::Relaxed),
-            self.counters.bytes.swap(0, Ordering::Relaxed),
-        )
+    /// What the encoder produced since the last call.
+    pub fn take_counters(&self) -> Produced {
+        let counters = &self.counters;
+        let frames = counters.encoded.swap(0, Ordering::Relaxed);
+        let total = counters.latency.swap(0, Ordering::Relaxed);
+        let max = counters.latency_max.swap(0, Ordering::Relaxed);
+        Produced {
+            frames,
+            bytes: counters.bytes.swap(0, Ordering::Relaxed),
+            latency: std::time::Duration::from_micros(total.checked_div(frames).unwrap_or(0)),
+            latency_max: std::time::Duration::from_micros(max),
+        }
     }
 
     /// Finish the stream: the frame being encoded goes through before this returns.
