@@ -134,12 +134,19 @@ fn frame<'a>(picture: &Picture, bytes: &'a [u8]) -> hw::Frame<'a> {
     }
 }
 
+/// How a GPU reads a DMA-BUF framebuffer: imported, where it is; or, when the GPU cannot
+/// import it, mapped and read by the CPU, slowly but read.
+enum Read {
+    Imported(hw::Imported),
+    Mapped(Mapping),
+}
+
 /// What encodes, and what it made of the current framebuffer: a GPU's import of the
 /// DMA-BUF, or the CPU's mapping of it.
 enum Engine {
     Gpu {
         encoder: Box<hw::Encoder>,
-        imported: Option<(Arc<Source>, hw::Imported)>,
+        imported: Option<(Arc<Source>, Read)>,
     },
     Cpu {
         encoder: Box<hw::CpuEncoder>,
@@ -216,7 +223,7 @@ impl Engine {
                 {
                     // The previous framebuffer's import goes first.
                     *imported = None;
-                    let frame = encoder.import(&hw::DmaBuf {
+                    let import = encoder.import(&hw::DmaBuf {
                         fd: fd.as_fd(),
                         size: *size,
                         fourcc: *fourcc,
@@ -225,11 +232,24 @@ impl Engine {
                         stride: u32::try_from(picture.stride)?,
                         width: picture.width,
                         height: picture.height,
-                    })?;
-                    *imported = Some((picture.source.clone(), frame));
+                    });
+                    let read = match import {
+                        Ok(frame) => Read::Imported(frame),
+                        Err(error) => {
+                            // Once for this framebuffer, not at every frame.
+                            warn!(%error, "framebuffer not imported: read by the CPU");
+                            Read::Mapped(Mapping::new(fd, *size as usize, true)?)
+                        }
+                    };
+                    *imported = Some((picture.source.clone(), read));
                 }
-                let (_, frame) = imported.as_ref().expect("imported just above");
-                Ok(encoder.encode_imported(frame, keyframe)?)
+                match imported.as_ref().map(|(_, read)| read) {
+                    Some(Read::Imported(frame)) => Ok(encoder.encode_imported(frame, keyframe)?),
+                    Some(Read::Mapped(mapping)) => {
+                        mapping.read(|bytes| Ok(encoder.encode(&frame(picture, bytes), keyframe)?))
+                    }
+                    None => unreachable!("read just above"),
+                }
             }
             (Self::Cpu { encoder, mapped }, Source::DmaBuf { fd, size, .. }) => {
                 if !mapped
@@ -339,6 +359,8 @@ impl Drop for Direct {
 
 /// The encoding thread: encodes what is asked until told to stop.
 fn run(mut engine: Engine, shared: &Shared, sink: &Sink, counters: &Counters) {
+    // The last error said, which is not said again at every frame.
+    let mut last_error = None;
     loop {
         let (picture, keyframe) = {
             let mut asked = shared.asked.lock().unwrap();
@@ -362,11 +384,21 @@ fn run(mut engine: Engine, shared: &Shared, sink: &Sink, counters: &Counters) {
         let packet = match engine.encode(&picture, keyframe) {
             Ok(packet) => packet,
             Err(error) => {
-                // The encoder makes the next frame a keyframe.
-                warn!(error = %format!("{error:#}"), "frame not encoded");
+                let error = format!("{error:#}");
+                if last_error.as_ref() != Some(&error) {
+                    warn!(%error, "frame not encoded");
+                    last_error = Some(error);
+                }
+                // A keyframe asked for still is: a frame can fail before the codec (an
+                // import, the conversion), which leaves the stream going on from the last
+                // frame encoded.
+                if keyframe {
+                    shared.asked.lock().unwrap().keyframe = true;
+                }
                 continue;
             }
         };
+        last_error = None;
         let size = packet.data.len() as u64;
         let keyframe = packet.keyframe;
         let mut buffer = gst::Buffer::from_slice(packet.data);

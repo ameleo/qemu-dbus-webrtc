@@ -131,13 +131,18 @@ impl Codec {
 
     /// The fmtp parameters of the stream (RFC 7798 7.1), as caps fields, for HEVC: the offer
     /// must say what the stream is, for an absent parameter means a default (profile-id 1,
-    /// level-id 93, interop-constraints B00000000000...) that ours are not. Taken from the
-    /// bitstream the VA encoder writes (`general_profile_idc`, the 32
-    /// `general_profile_compatibility_flag`s and the 48 bits from
-    /// `general_progressive_source_flag` on, in the order of the bitstream, base16): measured,
-    /// and checked against a real encoding by a test. The level is the highest the encoder may
-    /// reach (6.2, `general_level_idc` 186, for up to 8192x4320 pixels), which every lower level
-    /// complies with: the encoder picks it by the screen's size, which changes.
+    /// level-id 93) that ours may not be. Taken from the bitstream the encoder writes
+    /// (`general_profile_idc`, the 32 `general_profile_compatibility_flag`s and the 48 bits
+    /// from `general_progressive_source_flag` on, in the order of the bitstream, base16), and
+    /// checked against a real encoding by a test. interop-constraints is the default the RFC
+    /// infers without it (B0...: progressive, non-packed, frame only), which the stream also
+    /// says, so that an answer that leaves it out keeps it, as 7.2.2 asks; for 4:4:4, the
+    /// format range extensions' constraint flags follow. The level is the highest the bitstream
+    /// complies with (7.1): 6.2, `general_level_idc` 186, the highest the encoder reaches (up
+    /// to 8192x4320 pixels), with which every lower level complies; the stream's own level
+    /// follows the screen's size, which changes during a session. An answer may lower level-id
+    /// (7.2.2); it is not read: a client whose decoder stops below the screen's level fails
+    /// to decode it.
     pub fn rtp_fmtp(self, full_chroma: bool, ten_bits: bool) -> Option<String> {
         if self != Self::Hevc {
             return None;
@@ -145,12 +150,12 @@ impl Codec {
         // (profile-id, profile-compatibility-indicator, interop-constraints)
         let (profile, compatibility, constraints) = match (full_chroma, ten_bits) {
             // Main: compatible with Main and Main 10.
-            (false, false) => (1, "60000000", "900000000000"),
+            (false, false) => (1, "60000000", "B00000000000"),
             // Main 10.
-            (false, true) => (2, "20000000", "900000000000"),
+            (false, true) => (2, "20000000", "B00000000000"),
             // Format range extensions, Main 4:4:4, then Main 4:4:4 10 (max_8bit_constraint off).
-            (true, false) => (4, "08000000", "9E0800000000"),
-            (true, true) => (4, "08000000", "9C0800000000"),
+            (true, false) => (4, "08000000", "BE0800000000"),
+            (true, true) => (4, "08000000", "BC0800000000"),
         };
         Some(format!(
             "profile-id=(string){profile},tier-flag=(string)0,level-id=(string)186,\

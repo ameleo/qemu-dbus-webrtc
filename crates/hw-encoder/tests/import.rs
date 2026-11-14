@@ -156,3 +156,43 @@ fn unknown_formats_are_refused() {
     };
     assert!(encoder.import(&buffer).is_err());
 }
+
+/// A buffer too small for the frame it is said to hold is refused, before the GPU reads it.
+#[test]
+fn buffers_too_small_are_refused() {
+    let Some(encoder) = common::encoder(Settings::new(Codec::Av1, 4_000_000)) else {
+        return;
+    };
+    let pixels = picture(64, 64, 0);
+    let Some((fd, size)) = udmabuf(&pixels) else {
+        return;
+    };
+    let buffer = DmaBuf {
+        fd: fd.as_fd(),
+        size,
+        fourcc: u32::from_le_bytes(*b"XR24"),
+        modifier: 0,
+        offset: 0,
+        stride: 64 * 4,
+        width: 64,
+        height: 64,
+    };
+    assert!(encoder.import(&buffer).is_ok());
+    // One row more than the buffer holds; rows shorter than their pixels; an offset past
+    // the end.
+    let tall = DmaBuf {
+        height: size / (64 * 4) + 1,
+        ..buffer
+    };
+    assert!(encoder.import(&tall).is_err());
+    let narrow = DmaBuf {
+        stride: 64 * 4 - 1,
+        ..buffer
+    };
+    assert!(encoder.import(&narrow).is_err());
+    let late = DmaBuf {
+        offset: size,
+        ..buffer
+    };
+    assert!(encoder.import(&late).is_err());
+}

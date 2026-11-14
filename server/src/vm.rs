@@ -464,6 +464,9 @@ async fn start_in(
                                     warn!(console, error = %format!("{e:#}"), "encoder not restarted");
                                 }
                             }
+                            // The new encoders start at the whole bitrate: each screen gets its
+                            // share again.
+                            share(&encoders, &sizes, settings.bitrate, args.bitrates.min);
                         }
                     }
                     Request::Keyframe { console } => {

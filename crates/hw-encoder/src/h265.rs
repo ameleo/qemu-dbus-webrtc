@@ -192,7 +192,9 @@ impl Sequence {
         w.bits(u64::from(self.profile.compatibility()), 32);
         w.flag(true); // general_progressive_source_flag
         w.flag(false); // general_interlaced_source_flag
-        w.flag(false); // general_non_packed_constraint_flag
+        // No frame packing arrangement SEI in the stream (7.4.4), and what RFC 7798 infers
+        // when an answer leaves interop-constraints out (7.1).
+        w.flag(true); // general_non_packed_constraint_flag
         w.flag(true); // general_frame_only_constraint_flag
         if self.profile.full_chroma() {
             // The format range extensions profiles, by table A.2.
@@ -519,25 +521,26 @@ mod tests {
         (ptl[0] & 0x1f, hex(&ptl[1..5]), hex(&ptl[5..11]))
     }
 
-    /// The values measured in the streams of a reference encoder (GStreamer's on an Intel
-    /// Arc A380), which are those of annex A.3 and table A.2.
+    /// The values of annex A.3 and table A.2, as a reference encoder writes them (GStreamer's
+    /// on an Intel Arc A380), but for general_non_packed_constraint_flag, 1 here: the third
+    /// bit of the constraints (B0 and BE, BC, where the reference writes 90 and 9E, 9C).
     #[test]
     fn profiles_are_written_as_the_standard_says() {
         assert_eq!(
             offered(Profile::Main),
-            (1, "60000000".into(), "900000000000".into())
+            (1, "60000000".into(), "B00000000000".into())
         );
         assert_eq!(
             offered(Profile::Main10),
-            (2, "20000000".into(), "900000000000".into())
+            (2, "20000000".into(), "B00000000000".into())
         );
         assert_eq!(
             offered(Profile::Main444),
-            (4, "08000000".into(), "9E0800000000".into())
+            (4, "08000000".into(), "BE0800000000".into())
         );
         assert_eq!(
             offered(Profile::Main444Ten),
-            (4, "08000000".into(), "9C0800000000".into())
+            (4, "08000000".into(), "BC0800000000".into())
         );
         // general_level_idc follows.
         assert_eq!(payload(&sequence(Profile::Main, 1920, 1080).sps())[18], 123);

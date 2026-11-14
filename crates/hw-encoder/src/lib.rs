@@ -334,6 +334,18 @@ impl Encoder {
         if buffer.width == 0 || buffer.height == 0 {
             return Err(Error::Frame("no pixels".into()));
         }
+        // The GPU would read past the buffer otherwise: rows as long as their pixels, every
+        // row within the buffer.
+        let row = u64::from(buffer.width) * 4;
+        let end = u64::from(buffer.offset)
+            + u64::from(buffer.stride) * u64::from(buffer.height - 1)
+            + row;
+        if u64::from(buffer.stride) < row || end > u64::from(buffer.size) {
+            return Err(Error::Frame(format!(
+                "{}x{} pixels in rows of {} bytes from {} do not fit {} bytes",
+                buffer.width, buffer.height, buffer.stride, buffer.offset, buffer.size
+            )));
+        }
         let surface = va::Surface::import(
             &self.display,
             buffer.fd,

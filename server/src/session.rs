@@ -939,7 +939,7 @@ mod tests {
             "tier-flag=0",
             "level-id=186",
             "profile-compatibility-indicator=60000000",
-            "interop-constraints=900000000000",
+            "interop-constraints=B00000000000",
         ] {
             assert!(
                 fmtp.split([' ', ';']).any(|p| p == parameter),
