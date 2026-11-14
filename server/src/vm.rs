@@ -327,12 +327,24 @@ async fn start_in(
     // otherwise its updates cost nothing. A viewer that comes or resumes asks for a keyframe,
     // which encodes the screen as it is.
     let recording = args.record.is_some();
-    let wanted = |console: u32| {
-        recording
-            || viewers
+    // How many screens the user's client shows (its monitor layout), once it said: the guest
+    // may keep a screen on that the client asked off (viogpu ignores it), and a screen nobody
+    // sees is not encoded.
+    // `usize::MAX` until the client says.
+    let shown_screens = std::sync::atomic::AtomicUsize::new(usize::MAX);
+    let mut layout_wanted = layout.wanted();
+    let in_layout = |console: u32| {
+        screen_of
+            .get(&console)
+            .is_none_or(|&screen| screen < shown_screens.load(std::sync::atomic::Ordering::Relaxed))
+    };
+    let watched = |console: u32| {
+        in_layout(console)
+            && viewers
                 .get(&console)
                 .is_some_and(|v| !v.lock().unwrap().is_empty())
     };
+    let wanted = |console: u32| recording || watched(console);
 
     let mut encoders: HashMap<u32, Encoder> = HashMap::new();
     // The size of each console's screen while it is on: the screens share the bitrate by it.
@@ -372,6 +384,23 @@ async fn start_in(
             .min();
         let event = tokio::select! {
             event = events.recv() => event,
+            Ok(()) = layout_wanted.changed() => {
+                let count = layout_wanted.borrow_and_update().as_ref().map(Vec::len);
+                let before: Vec<u32> = encoders.keys().copied().filter(|&c| in_layout(c)).collect();
+                shown_screens.store(count.unwrap_or(usize::MAX), std::sync::atomic::Ordering::Relaxed);
+                debug!(?count, "screens the client shows");
+                // A screen shown again needs a keyframe; the bitrate goes to the screens shown.
+                for (&console, encoder) in &encoders {
+                    if in_layout(console) && !before.contains(&console) && wanted(console) {
+                        last_keyframe.insert(console, Instant::now());
+                        if let Err(e) = encoder.keyframe() {
+                            warn!(console, error = %e, "keyframe not encoded");
+                        }
+                    }
+                }
+                share(&encoders, &sizes, &in_use, &in_layout, settings.bitrate);
+                continue;
+            }
             () = tokio::time::sleep(next_due.unwrap_or_default()), if next_due.is_some() => {
                 for console in std::mem::take(&mut due) {
                     if wanted(console)
@@ -388,13 +417,12 @@ async fn start_in(
                 let now_in_use = busy(&last_drawn);
                 if now_in_use != in_use {
                     in_use = now_in_use;
-                    share(&encoders, &sizes, &in_use, settings.bitrate);
+                    share(&encoders, &sizes, &in_use, &in_layout, settings.bitrate);
                 }
                 // A frame pushed just after a tick is a bit less than one interval old at the
                 // next one: hence the margin, or every other tick would be skipped.
                 for (console, encoder) in &encoders {
-                    let watched = viewers.get(console).is_some_and(|v| !v.lock().unwrap().is_empty());
-                    if watched && encoder.since_last_frame() >= STILL_FRAME_INTERVAL.mul_f32(0.8)
+                    if watched(*console) && encoder.since_last_frame() >= STILL_FRAME_INTERVAL.mul_f32(0.8)
                         && let Err(e) = encoder.frame()
                     {
                         warn!(console, error = %e, "still frame not encoded");
@@ -433,7 +461,7 @@ async fn start_in(
                             debug!(from = settings.bitrate, to = bitrate, "video bitrate");
                             settings.bitrate = bitrate;
                             bitrate_changed = Instant::now();
-                            share(&encoders, &sizes, &in_use, bitrate);
+                            share(&encoders, &sizes, &in_use, &in_layout, bitrate);
                         }
                     }
                     Request::TenBits(ten_bits) => {
@@ -447,7 +475,7 @@ async fn start_in(
                             }
                             // The new encoders start at the whole bitrate: each screen gets its
                             // share again.
-                            share(&encoders, &sizes, &in_use, settings.bitrate);
+                            share(&encoders, &sizes, &in_use, &in_layout, settings.bitrate);
                         }
                     }
                     Request::Keyframe { console } => {
@@ -711,7 +739,7 @@ async fn start_in(
             }
         }
         if rebalance {
-            share(&encoders, &sizes, &in_use, settings.bitrate);
+            share(&encoders, &sizes, &in_use, &in_layout, settings.bitrate);
         }
         if let Some(console) = drawn {
             *updates.entry(console).or_default() += 1;
@@ -795,17 +823,20 @@ fn busy(last_drawn: &HashMap<u32, Instant>) -> std::collections::BTreeSet<u32> {
         .collect()
 }
 
-/// Share the video bitrate, `total` kbit/s, among the screens that are on: an idle screen
+/// Share the video bitrate, `total` kbit/s, among the screens that are on and shown (see
+/// `in_layout`): an idle screen
 /// keeps `IDLE_BITRATE` (at most an even share), and the screens in use share the rest by
 /// their area; with none in use, all share it by area.
 fn share(
     encoders: &HashMap<u32, Encoder>,
     sizes: &HashMap<u32, (u32, u32)>,
     in_use: &std::collections::BTreeSet<u32>,
+    in_layout: &dyn Fn(u32) -> bool,
     total: u32,
 ) {
     let on: Vec<(u32, f64)> = encoders
         .keys()
+        .filter(|&&c| in_layout(c))
         .filter_map(|c| {
             sizes
                 .get(c)

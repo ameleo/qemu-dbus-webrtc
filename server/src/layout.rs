@@ -95,6 +95,11 @@ impl Layout {
         self.wanted.send_replace(Some(screens));
     }
 
+    /// The screens the user's client wants, as they change: none until it says.
+    pub fn wanted(&self) -> watch::Receiver<Option<Vec<Size>>> {
+        self.wanted.subscribe()
+    }
+
     /// Guest screen `screen` shows at this size now.
     pub fn shown(&self, screen: usize, width: u32, height: u32) {
         self.shown.send_modify(|shown| {
