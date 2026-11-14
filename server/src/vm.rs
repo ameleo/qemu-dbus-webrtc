@@ -74,6 +74,11 @@ fn stream_sink(
         None => None,
     };
     Ok(move |frame: &EncodedFrame| {
+        // What a keyframe weighs: a large one takes the pacer a while to send, during which
+        // no other frame of the screen goes.
+        if frame.keyframe {
+            info!(console, bytes = frame.data.len(), "keyframe");
+        }
         if let Some(viewers) = &viewers {
             transport::fan_out(viewers, frame);
         }
@@ -480,7 +485,11 @@ async fn start_in(
                     }
                     Request::Keyframe { console } => {
                         let due = last_keyframe.get(&console).is_none_or(|t| t.elapsed() >= KEYFRAME_INTERVAL);
+                        if !due {
+                            debug!(console, "keyframe request within the interval: dropped");
+                        }
                         if due && let Some(encoder) = encoders.get(&console) {
+                            info!(console, "keyframe requested");
                             last_keyframe.insert(console, Instant::now());
                             if let Err(e) = encoder.keyframe() {
                                 warn!(console, error = %e, "keyframe not encoded");

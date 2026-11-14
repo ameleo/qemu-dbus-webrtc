@@ -714,7 +714,7 @@ impl State {
                 if let Some(screen) = self.screen_mids.iter().position(|&m| m == request.mid)
                     && !self.paused.load(Ordering::Relaxed)
                 {
-                    debug!(screen, kind = ?request.kind, "keyframe requested by the client");
+                    info!(screen, kind = ?request.kind, "keyframe requested by the client");
                     (self.keyframe)(screen);
                 }
             }
