@@ -234,11 +234,14 @@ impl Peer {
                 )
             })
             .collect();
-        // The sound both ways: the client's microphone comes back on its track.
+        // The sound both ways: the client's microphone comes back on its track. In a stream of
+        // its own (its msid): a receiver synchronizes the sound with the video of its stream,
+        // holding the sound back as long as the video is late (libwebrtc's NetEq grew to
+        // 280 ms with it), where a remote desktop wants its sound as soon as it comes.
         let audio_mid = change.add_media(
             MediaKind::Audio,
             Direction::SendRecv,
-            stream.clone(),
+            Some("qdw-sound".to_owned()),
             Some("sound".to_owned()),
             None,
         );
@@ -945,6 +948,9 @@ mod tests {
                 .find(|l| l.starts_with("a=fmtp:96 "))
                 .unwrap_or_else(|| panic!("no fmtp in {offer}"));
             assert_eq!(fmtp, expected, "{codec:?}");
+            // The sound in a stream of its own, apart from the screens': not synchronized.
+            assert!(offer.contains("a=msid:qdw screen0"), "{offer}");
+            assert!(offer.contains("a=msid:qdw-sound sound"), "{offer}");
             // The cameras' H.264 comes first in each video track.
             assert!(
                 offer.contains("m=video 9 UDP/TLS/RTP/SAVPF 104 105 96 97"),
