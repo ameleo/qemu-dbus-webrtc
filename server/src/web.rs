@@ -644,9 +644,15 @@ const ESTIMATE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1)
 /// The sound's share of a connection, in kbit/s: Opus at 128 kbit/s, with its packet headers.
 const AUDIO_BITRATE: u32 = 150;
 
-/// The video bitrate for a bandwidth estimate, in kbit/s: what the sound leaves.
+/// The share of what the sound leaves that the video encoders aim at: the rest is room for
+/// what they send beyond their target and for the retransmissions. Measured on a 10 Mbit/s
+/// link, HEVC 4:4:4 at 3440x1440 sent 10 to 25 % more than its target, and the client asked
+/// thousands of packets again: aimed at the whole estimate, the link's queue filled.
+const VIDEO_SHARE: f64 = 0.85;
+
+/// The video bitrate for a bandwidth estimate, in kbit/s.
 fn video_bitrate(estimate: u32) -> u32 {
-    estimate.saturating_sub(AUDIO_BITRATE).max(1)
+    ((f64::from(estimate.saturating_sub(AUDIO_BITRATE)) * VIDEO_SHARE) as u32).max(1)
 }
 
 /// What a viewer has of the guest: its keyboard and pointer, the clipboard, its drives and
@@ -914,6 +920,13 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The video aims below the estimate, after the sound.
+    #[test]
+    fn the_video_leaves_room() {
+        assert_eq!(video_bitrate(10_150), 8_500);
+        assert_eq!(video_bitrate(100), 1);
+    }
 
     #[test]
     fn websockets_from_this_server_or_no_page() {
