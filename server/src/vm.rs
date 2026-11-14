@@ -325,6 +325,8 @@ async fn start_in(
     // The video bitrate, and when it last changed: new encoders start at it.
     let mut settings = args.settings.clone();
     let mut bitrate_changed = Instant::now();
+    // The video bitrate the user's last estimate allows, for the reports.
+    let mut estimated: Option<u32> = None;
     // When the guest last drew on each console, and the consoles in use at the last share.
     let mut last_drawn: HashMap<u32, Instant> = HashMap::new();
     let mut in_use: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
@@ -448,6 +450,11 @@ async fn start_in(
                 continue;
             }
             _ = report.tick() => {
+                // The user's bandwidth estimate, as the video bitrate it allows, and the video
+                // bitrate the screens share: they differ by a step not taken yet.
+                if let Some(estimated) = estimated {
+                    info!(estimated_kbit_per_second = estimated, video_kbit_per_second = settings.bitrate, "bitrate");
+                }
                 report_rates(&encoders, &mut updates, since.elapsed());
                 since = Instant::now();
                 continue;
@@ -455,6 +462,7 @@ async fn start_in(
             Some(request) = requests.recv() => {
                 match request {
                     Request::Bitrate { bitrate } => {
+                        estimated = Some(bitrate);
                         // The estimate as it is: it probes the link (str0m's GCC), so it does not
                         // rise without evidence while the screens send little.
                         let current = f64::from(settings.bitrate);
@@ -982,6 +990,8 @@ fn report_rates(
             updates_per_second = format!("{:.1}", f64::from(guest) / secs),
             frames_per_second = format!("{:.1}", produced.frames as f64 / secs),
             kbit_per_second = format!("{:.0}", produced.bytes as f64 * 8.0 / 1000.0 / secs),
+            // What it was asked for, its share of the video bitrate.
+            target_kbit_per_second = encoder.bitrate(),
             // From the frame asked for to its encoding handed to the transport: a guest that
             // draws faster than the frame rate waits up to a frame interval more, not counted.
             encode_ms = ms(produced.latency),

@@ -298,6 +298,8 @@ pub struct Encoder {
     counters: Counters,
     /// When the last frame went into the encoder.
     last_frame: std::cell::Cell<std::time::Instant>,
+    /// The bitrate it was last set to, in kbit/s.
+    bitrate: std::sync::atomic::AtomicU32,
 }
 
 impl Encoder {
@@ -316,6 +318,7 @@ impl Encoder {
             framebuffer: None,
             counters,
             last_frame: std::cell::Cell::new(std::time::Instant::now()),
+            bitrate: settings.bitrate.into(),
         })
     }
 
@@ -422,7 +425,13 @@ impl Encoder {
 
     /// Change the target bitrate, in kbit/s, from the next frame on, without a keyframe.
     pub fn set_bitrate(&self, bitrate: u32) {
+        self.bitrate.store(bitrate, Ordering::Relaxed);
         self.direct.set_bitrate(bitrate);
+    }
+
+    /// The bitrate it was last set to, in kbit/s.
+    pub fn bitrate(&self) -> u32 {
+        self.bitrate.load(Ordering::Relaxed)
     }
 
     /// The head is off: nothing to encode until the next framebuffer.
