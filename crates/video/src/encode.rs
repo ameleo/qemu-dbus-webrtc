@@ -444,6 +444,7 @@ impl Encoder {
             .allow(produced, self.bitrate(), std::time::Instant::now())
         {
             self.counters.dropped.fetch_add(1, Ordering::Relaxed);
+            self.direct.skip();
             return Ok(());
         }
         self.direct.frame(Picture {

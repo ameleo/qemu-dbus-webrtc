@@ -8,6 +8,9 @@
 //! ```
 //!
 //! The codec is `BENCH_CODEC`: `hevc` (the default), `av1`, `vp9`, or `vp9-cpu` for libvpx.
+//! `BENCH_VBR=1` encodes with a variable bitrate instead of a constant one.
+//! `BENCH_STILL=<seconds>` first sends an unchanged screen at 4 frames a second for that long, as
+//! the server's still frames do, then the scrolling page; each second's bitrate is printed.
 //!
 //! The frames come at `fps` a second (30 by default), as a desktop's would; the bitrate is
 //! halved for the third quarter of them. `frames.bgrx` gets the frames
@@ -95,8 +98,13 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let settings = Settings {
         full_chroma: number(3, 420) == 444,
         ten_bits: number(4, 8) == 10,
+        variable_bitrate: std::env::var_os("BENCH_VBR").is_some(),
         ..Settings::new(codec, bitrate)
     };
+    let still: f64 = std::env::var("BENCH_STILL")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
     let fps = number(8, 30).max(1);
     let mut encoder = if cpu {
         println!("libvpx");
@@ -114,6 +122,25 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut output = Vec::new();
     let mut source = Vec::new();
     let mut quarters = [(Duration::ZERO, 0usize); 4];
+    // Every frame's time and size, for the bitrate of each second.
+    let origin = Instant::now();
+    let mut sizes: Vec<(f64, usize)> = Vec::new();
+    if still > 0.0 {
+        let frame = Frame {
+            pixels: &page[..height as usize * stride],
+            format: PixelFormat::Bgrx,
+            width,
+            height,
+            stride,
+        };
+        for index in 0..(still * 4.0) as u32 {
+            let due = origin + Duration::from_millis(250 * u64::from(index));
+            std::thread::sleep(due.saturating_duration_since(Instant::now()));
+            let packet = encoder.encode(&frame, false)?;
+            sizes.push((origin.elapsed().as_secs_f64(), packet.data.len()));
+            output.extend_from_slice(&packet.data);
+        }
+    }
     let begin = Instant::now();
     for index in 0..frames {
         let quarter = (index * 4 / frames) as usize;
@@ -144,10 +171,27 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let packet = encoder.encode(&frame, false)?;
         quarters[quarter].0 += start.elapsed();
         quarters[quarter].1 += packet.data.len();
+        sizes.push((origin.elapsed().as_secs_f64(), packet.data.len()));
+        if still > 0.0 && index < 8 {
+            println!("motion frame {index}: {} bytes", packet.data.len());
+        }
         if index > 0 && packet.keyframe {
             println!("frame {index}: an unexpected keyframe");
         }
         output.extend_from_slice(&packet.data);
+    }
+    if still > 0.0 {
+        let seconds = sizes.last().map_or(0, |&(t, _)| t as usize + 1);
+        for second in 0..seconds {
+            let (count, bytes) = sizes
+                .iter()
+                .filter(|&&(t, _)| t as usize == second)
+                .fold((0, 0), |(c, b), &(_, size)| (c + 1, b + size));
+            println!(
+                "second {second}: {count} frames, {:.0} kbit/s",
+                bytes as f64 * 8.0 / 1000.0
+            );
+        }
     }
     for (quarter, (time, bytes)) in quarters.iter().enumerate() {
         let count = (frames / 4).max(1);

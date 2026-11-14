@@ -141,6 +141,10 @@ pub struct Settings {
     /// The most frames encoded in a second: what the stream says a decoder must be able to
     /// take, and what the rate control spreads the bitrate over.
     pub framerate: u32,
+    /// Variable bitrate (VBR) instead of constant (CBR): the bitrate is the maximum, and the
+    /// driver adds no filler data. Intel's CBR pads every frame up to bitrate / frame rate,
+    /// even a frame of an unchanged screen.
+    pub variable_bitrate: bool,
 }
 
 impl Settings {
@@ -153,6 +157,7 @@ impl Settings {
             bitrate,
             max_bitrate: bitrate,
             framerate: 60,
+            variable_bitrate: false,
         }
     }
 }
@@ -206,6 +211,14 @@ impl CodecEncoder {
             Self::Av1(codec) => codec.set_bitrate(bitrate),
             Self::Hevc(codec) => codec.set_bitrate(bitrate),
             Self::Vp9(codec) => codec.set_bitrate(bitrate),
+        }
+    }
+
+    fn skip(&mut self) {
+        match self {
+            Self::Av1(codec) => codec.skip(),
+            Self::Hevc(codec) => codec.skip(),
+            Self::Vp9(codec) => codec.skip(),
         }
     }
 
@@ -400,6 +413,14 @@ impl Encoder {
         self.settings.bitrate = bitrate.max(1);
         if let Some(session) = &mut self.session {
             session.codec.set_bitrate(self.settings.bitrate);
+        }
+    }
+
+    /// The caller dropped a frame instead of encoding it: it still counts in the frame rate
+    /// the bitrate is spread over.
+    pub fn skip_frame(&mut self) {
+        if let Some(session) = &mut self.session {
+            session.codec.skip();
         }
     }
 }

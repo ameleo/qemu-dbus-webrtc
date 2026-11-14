@@ -125,6 +125,7 @@ impl Hevc {
         common::check(
             display,
             va_profile,
+            common::rate_control_mode(settings),
             rt_format,
             headers,
             &format!("HEVC {stream_profile:?}"),
@@ -172,7 +173,10 @@ impl Hevc {
             ENTRYPOINT,
             &[
                 (sys::VAConfigAttribRTFormat, rt_format),
-                (sys::VAConfigAttribRateControl, sys::VA_RC_CBR),
+                (
+                    sys::VAConfigAttribRateControl,
+                    common::rate_control_mode(settings),
+                ),
                 (sys::VAConfigAttribEncPackedHeaders, headers),
             ],
         )?;
@@ -208,6 +212,11 @@ impl Hevc {
     /// Change the bitrate, in bit/s, from the next picture on.
     pub fn set_bitrate(&mut self, bitrate: u32) {
         self.rate.set_bitrate(bitrate);
+    }
+
+    /// A frame dropped instead of encoded: see [`RateControl::skip`].
+    pub fn skip(&mut self) {
+        self.rate.skip();
     }
 
     /// Encode the picture drawn in the input surface; as a keyframe when asked.

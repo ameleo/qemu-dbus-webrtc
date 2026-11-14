@@ -164,6 +164,11 @@ impl Engine {
             bitrate,
             max_bitrate: settings.max_bitrate.saturating_mul(1000).max(bitrate),
             framerate: FRAMERATE,
+            // Variable bitrate: Intel's CBR pads every frame up to bitrate / frame rate, a still
+            // screen included. Measured on an Arc A380, HEVC 4:4:4 at 3440x1440 and 25 Mbit/s,
+            // still frames at 4 fps: 25 Mbit/s of filler in CBR, 0.5 Mbit/s in VBR after a few
+            // seconds; the first frame of motion afterwards, 781 kB in CBR, 15 kB in VBR.
+            variable_bitrate: true,
         };
         if settings.software {
             if settings.codec != Codec::Vp9 {
@@ -192,6 +197,14 @@ impl Engine {
             encoder: Box::new(encoder),
             imported: None,
         })
+    }
+
+    /// A frame dropped instead of encoded. libvpx spreads its bitrate by the frames' times, not
+    /// their count: nothing to tell it.
+    fn skip(&mut self) {
+        if let Self::Gpu { encoder, .. } = self {
+            encoder.skip_frame();
+        }
     }
 
     fn set_bitrate(&mut self, bitrate: u32) {
@@ -272,6 +285,8 @@ struct Asked {
     /// The framebuffer to encode now.
     picture: Option<Picture>,
     keyframe: bool,
+    /// Frames dropped since the last one asked.
+    skipped: u32,
     /// In bit/s.
     bitrate: Option<u32>,
     /// Another encoder to go on with.
@@ -319,6 +334,13 @@ impl Direct {
     /// Encode `picture` as it is now.
     pub(crate) fn frame(&self, picture: Picture) {
         self.ask(|asked| asked.picture = Some(picture));
+    }
+
+    /// A frame was dropped instead of encoded: it counts in the encoder's frame rate. No need
+    /// to wake the thread.
+    pub(crate) fn skip(&self) {
+        let mut asked = self.shared.asked.lock().unwrap();
+        asked.skipped = asked.skipped.saturating_add(1);
     }
 
     /// Make the next frame a keyframe.
@@ -378,6 +400,9 @@ fn run(mut engine: Engine, shared: &Shared, sink: &Sink, counters: &Counters) {
             let Some(picture) = asked.picture.take() else {
                 continue;
             };
+            for _ in 0..std::mem::take(&mut asked.skipped) {
+                engine.skip();
+            }
             (picture, std::mem::take(&mut asked.keyframe))
         };
         let packet = match engine.encode(&picture, keyframe) {

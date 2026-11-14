@@ -90,14 +90,24 @@ impl Vp9 {
             "4:2:0"
         };
         // The driver writes the headers: none from here.
-        common::check(display, profile, rt_format, 0, &format!("VP9 {chroma}"))?;
+        common::check(
+            display,
+            profile,
+            common::rate_control_mode(settings),
+            rt_format,
+            0,
+            &format!("VP9 {chroma}"),
+        )?;
         let config = Config::new(
             display,
             profile,
             ENTRYPOINT,
             &[
                 (sys::VAConfigAttribRTFormat, rt_format),
-                (sys::VAConfigAttribRateControl, sys::VA_RC_CBR),
+                (
+                    sys::VAConfigAttribRateControl,
+                    common::rate_control_mode(settings),
+                ),
             ],
         )?;
         // Whole blocks of 8x8 samples: the converter fills them.
@@ -137,6 +147,11 @@ impl Vp9 {
     /// Change the bitrate, in bit/s, from the next frame on.
     pub fn set_bitrate(&mut self, bitrate: u32) {
         self.rate.set_bitrate(bitrate);
+    }
+
+    /// A frame dropped instead of encoded: see [`RateControl::skip`].
+    pub fn skip(&mut self) {
+        self.rate.skip();
     }
 
     /// Encode the frame drawn in the input surface; as a key frame when asked.

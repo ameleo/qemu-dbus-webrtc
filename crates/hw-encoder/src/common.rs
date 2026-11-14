@@ -19,9 +19,19 @@ pub(crate) const INTRA_PERIOD: u32 = 1024;
 /// Check that the GPU encodes `profile` with pictures of the family `rt_format`, at a
 /// constant bitrate, and takes `headers` (`VA_ENC_PACKED_HEADER_*`, none when 0) from the
 /// application; `what` names the codec and profile in the error.
+/// The VA rate control mode of `settings`.
+pub(crate) fn rate_control_mode(settings: &crate::Settings) -> u32 {
+    if settings.variable_bitrate {
+        sys::VA_RC_VBR
+    } else {
+        sys::VA_RC_CBR
+    }
+}
+
 pub(crate) fn check(
     display: &Display,
     profile: sys::VAProfile,
+    rate_control: u32,
     rt_format: u32,
     headers: u32,
     what: &str,
@@ -33,8 +43,13 @@ pub(crate) fn check(
     if attribute(sys::VAConfigAttribRTFormat).is_none_or(|formats| formats & rt_format == 0) {
         return Err(Error::Unsupported(format!("{what} pictures")));
     }
-    if attribute(sys::VAConfigAttribRateControl).is_none_or(|modes| modes & sys::VA_RC_CBR == 0) {
-        return Err(Error::Unsupported("constant bitrate".into()));
+    if attribute(sys::VAConfigAttribRateControl).is_none_or(|modes| modes & rate_control == 0) {
+        let mode = if rate_control == sys::VA_RC_VBR {
+            "variable"
+        } else {
+            "constant"
+        };
+        return Err(Error::Unsupported(format!("{mode} bitrate")));
     }
     if headers != 0
         && attribute(sys::VAConfigAttribEncPackedHeaders)
@@ -82,6 +97,8 @@ pub(crate) struct RateControl {
     told: (u32, u32),
     /// The bitrate changed since the encoder was last told.
     changed: bool,
+    /// Frames the guest drew but the caller did not encode (dropped) since the last frame.
+    skipped: u32,
 }
 
 impl RateControl {
@@ -100,6 +117,7 @@ impl RateControl {
             recent: [1.0 / f64::from(framerate); 3],
             told: (0, 0),
             changed: false,
+            skipped: 0,
         }
     }
 
@@ -116,13 +134,22 @@ impl RateControl {
         self.frame_at(Instant::now());
     }
 
+    /// A frame was dropped instead of encoded: it still counts in the frame rate. Otherwise a
+    /// frame dropper that skips most frames makes the measured rate fall, each frame's share
+    /// of the bitrate grow, and the frames larger, so that more are dropped: measured with a
+    /// GNOME guest, the stream stayed at the still-frame rate (4 fps) while the guest drew 30.
+    pub fn skip(&mut self) {
+        self.skipped = self.skipped.saturating_add(1);
+    }
+
     fn frame_at(&mut self, now: Instant) {
+        let frames = f64::from(std::mem::take(&mut self.skipped)) + 1.0;
         if let Some(last) = self.last_frame.replace(now) {
-            // Within the fastest the encoder was told and a frame a second, the slowest the
+            // The interval since the last encoded frame, shared with the frames dropped since,
+            // within the fastest the encoder was told and a frame a second, the slowest the
             // average takes in.
-            let dt = (now - last)
-                .as_secs_f64()
-                .clamp(1.0 / f64::from(self.framerate), 1.0);
+            let elapsed = (now - last).as_secs_f64();
+            let dt = (elapsed / frames).clamp(1.0 / f64::from(self.framerate), 1.0);
             self.recent = [self.recent[1], self.recent[2], dt];
             let mut sorted = self.recent;
             sorted.sort_by(f64::total_cmp);
@@ -133,11 +160,12 @@ impl RateControl {
             // told it again at each, and Intel's VP9 encoder, whose rate control starts again
             // each time it is told, starved those frames (8 to 14 kB at 1080p: the motion
             // showed late). A single early frame does not move the median. Down, over about
-            // `PACE_TIME_CONSTANT`.
+            // `PACE_TIME_CONSTANT` of real time (the time since the last encoded frame, which
+            // dropped frames divide).
             if median < self.interval {
                 self.interval = median;
             } else if dt > self.interval {
-                let weight = (dt / PACE_TIME_CONSTANT).min(1.0);
+                let weight = (elapsed / PACE_TIME_CONSTANT).min(1.0);
                 self.interval += (dt - self.interval) * weight;
             }
         }
@@ -297,6 +325,7 @@ mod tests {
             recent: [1.0 / f64::from(framerate); 3],
             told: (0, 0),
             changed: false,
+            skipped: 0,
         }
     }
 
@@ -342,6 +371,31 @@ mod tests {
         // A pause longer than a second counts as a second: one frame a second at the least.
         frames(&mut rate, now, Duration::from_secs(5), 20);
         assert_eq!(rate.told_framerate(), 1);
+    }
+
+    /// Dropped frames count in the frame rate: the guest draws 28 frames a second, one in
+    /// seven is encoded (every 250 ms), and the bitrate is still spread over 28 frames.
+    #[test]
+    fn dropped_frames_count_in_the_frame_rate() {
+        let mut rate = rate_control(60);
+        let start = Instant::now();
+        for i in 0..20u32 {
+            for _ in 0..6 {
+                rate.skip();
+            }
+            rate.frame_at(start + Duration::from_millis(250) * i);
+        }
+        assert!(
+            (26.0..30.0).contains(&rate.measured()),
+            "{}",
+            rate.measured()
+        );
+        // Without drops, the same encoded frames are 4 a second.
+        let mut rate = rate_control(60);
+        for i in 0..20u32 {
+            rate.frame_at(start + Duration::from_millis(250) * i);
+        }
+        assert!((3.5..4.5).contains(&rate.measured()), "{}", rate.measured());
     }
 
     #[test]
