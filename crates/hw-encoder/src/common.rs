@@ -52,8 +52,12 @@ pub(crate) fn coded_size(width: u32, height: u32) -> usize {
     width as usize * height as usize * 3 * 2 + (1 << 16)
 }
 
-/// How fast the measured frame rate follows the frames: about over this many seconds.
+/// How fast the measured frame rate follows the frames when they come slower: about over
+/// this many seconds.
 const PACE_TIME_CONSTANT: f64 = 0.5;
+
+/// How much of the way the measured frame interval goes to a shorter one, at each frame.
+const PACE_RISE: f64 = 0.5;
 
 /// The encoder is told a new bitrate when the one it should have moved by this share.
 const RETELL_SHARE: f64 = 0.1;
@@ -119,7 +123,18 @@ impl RateControl {
             let dt = (now - last)
                 .as_secs_f64()
                 .clamp(1.0 / f64::from(self.framerate), 1.0);
-            let weight = (dt / PACE_TIME_CONSTANT).min(1.0);
+            // Up, half the way at each frame: from a still screen (four frames a second), the
+            // rate is followed within a few frames once the guest draws, and the encoder does
+            // not spend for four frames a second meanwhile (measured on an Intel Arc A380 at
+            // 8 Mbit/s, 30 frames a second after 5 s still: 10 Mbit/s the first second in VP9,
+            // 12 in HEVC, rather than 37 and 31 at the pace of the way down). Not at once: a
+            // frame a little early would tell a rate the guest does not draw at, and the
+            // encoder would spend too little. Down, over about `PACE_TIME_CONSTANT`.
+            let weight = if dt < self.interval {
+                PACE_RISE
+            } else {
+                (dt / PACE_TIME_CONSTANT).min(1.0)
+            };
             self.interval += (dt - self.interval) * weight;
         }
     }
@@ -303,6 +318,22 @@ mod tests {
         assert_eq!(rate.told_framerate(), 60);
         let now = frames(&mut rate, now, Duration::from_millis(5), 3);
         assert_eq!(rate.told_framerate(), 60);
+        // From a still screen, four frames a second, a few frames at 30 a second bring the
+        // rate up near it.
+        let now = frames(&mut rate, now, Duration::from_millis(250), 5);
+        assert_eq!(rate.told_framerate(), 4);
+        let now = frames(&mut rate, now, Duration::from_micros(33_333), 0);
+        let mut later = now;
+        for _ in 0..6 {
+            later += Duration::from_micros(33_333);
+            rate.frame_at(later);
+        }
+        assert!(
+            (26..=30).contains(&rate.told_framerate()),
+            "{}",
+            rate.told_framerate()
+        );
+        let now = later;
         // A pause longer than a second counts as a second: one frame a second at the least.
         frames(&mut rate, now, Duration::from_secs(5), 20);
         assert_eq!(rate.told_framerate(), 1);
