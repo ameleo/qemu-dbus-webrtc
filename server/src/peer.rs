@@ -194,6 +194,10 @@ impl Peer {
             },
         );
         let mut rtc = config.build(Instant::now());
+        // The capacity the estimation probes for: up to the most the video may take. No
+        // minimum: a still desktop sends little, and padding it up would only load the link.
+        rtc.bwe()
+            .set_bitrate(Bitrate::ZERO, Bitrate::kbps(u64::from(bitrates.max)));
 
         // A host candidate on each address of the host, in a socket of its own: the answer's
         // checks say which one reaches the client.

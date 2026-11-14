@@ -260,8 +260,6 @@ pub(crate) struct Counters {
     pub(crate) encoded: Arc<AtomicU64>,
     /// Bytes out of the encoder.
     pub(crate) bytes: Arc<AtomicU64>,
-    /// Bytes out of the encoder since it started.
-    pub(crate) output: Arc<AtomicU64>,
     /// The time from a frame asked for to its encoding handed to the viewers, added over
     /// the frames, and the longest, in microseconds.
     pub(crate) latency: Arc<AtomicU64>,
@@ -430,11 +428,6 @@ impl Encoder {
     /// The head is off: nothing to encode until the next framebuffer.
     pub fn clear_framebuffer(&mut self) {
         self.framebuffer = None;
-    }
-
-    /// Bytes encoded since the encoder started.
-    pub fn output(&self) -> u64 {
-        self.counters.output.load(Ordering::Relaxed)
     }
 
     /// The latency of the frames since the last call (see [`Produced::latency`]): the mean

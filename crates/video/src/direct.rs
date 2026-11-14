@@ -409,7 +409,6 @@ fn run(mut engine: Engine, shared: &Shared, sink: &Sink, counters: &Counters) {
         let latency = picture.asked.elapsed().as_micros() as u64;
         counters.encoded.fetch_add(1, Ordering::Relaxed);
         counters.bytes.fetch_add(size, Ordering::Relaxed);
-        counters.output.fetch_add(size, Ordering::Relaxed);
         counters.latency.fetch_add(latency, Ordering::Relaxed);
         counters.latency_max.fetch_max(latency, Ordering::Relaxed);
         counters.recent_frames.fetch_add(1, Ordering::Relaxed);

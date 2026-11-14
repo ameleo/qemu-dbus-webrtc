@@ -38,13 +38,13 @@ const BITRATE_STEP: f64 = 0.05;
 /// frames to settle.
 const BITRATE_INTERVAL: Duration = Duration::from_millis(500);
 const BITRATE_DROP: f64 = 0.15;
-/// The bitrate never goes beyond this many times what the encoder produced over the last
-/// `OUTPUT_WINDOW`: on a quiet screen, the encoder sends less than the estimate, and the
-/// estimate rises with no evidence of the bandwidth (GCC sees no delay on a link that is never
-/// full); at the first large motion, the encoder would send far more than the link takes.
-/// From a quiet screen, the bitrate climbs back by this ratio at each step.
-const OUTPUT_HEADROOM: f64 = 1.25;
-const OUTPUT_WINDOW: Duration = Duration::from_secs(1);
+
+/// A screen the guest has not drawn on for this long is idle: it keeps `IDLE_BITRATE`, and
+/// the screens in use share the rest.
+const IDLE_AFTER: Duration = Duration::from_secs(2);
+/// An idle screen's bitrate, in kbit/s: its still frames are nearly empty. At its first
+/// update, it is in use again and gets its share at once.
+const IDLE_BITRATE: u32 = 500;
 
 /// How often the VM is asked whether it still runs: QEMU's listeners do not say when it goes.
 const ALIVE_INTERVAL: Duration = Duration::from_secs(1);
@@ -320,8 +320,9 @@ async fn start_in(
     // The video bitrate, and when it last changed: new encoders start at it.
     let mut settings = args.settings.clone();
     let mut bitrate_changed = Instant::now();
-    // What each encoder produced, sampled at each still frame tick, over `OUTPUT_WINDOW`.
-    let mut output: HashMap<u32, std::collections::VecDeque<(Instant, u64)>> = HashMap::new();
+    // When the guest last drew on each console, and the consoles in use at the last share.
+    let mut last_drawn: HashMap<u32, Instant> = HashMap::new();
+    let mut in_use: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
     // A console is encoded when someone watches it (a paused viewer does not) or records it:
     // otherwise its updates cost nothing. A viewer that comes or resumes asks for a keyframe,
     // which encodes the screen as it is.
@@ -383,16 +384,15 @@ async fn start_in(
                 continue;
             }
             _ = still.tick() => {
-                // Only the encoders there are count in what they produced.
-                output.retain(|console, _| encoders.contains_key(console));
+                // A screen that turned idle gives its share back.
+                let now_in_use = busy(&last_drawn);
+                if now_in_use != in_use {
+                    in_use = now_in_use;
+                    share(&encoders, &sizes, &in_use, settings.bitrate);
+                }
                 // A frame pushed just after a tick is a bit less than one interval old at the
                 // next one: hence the margin, or every other tick would be skipped.
                 for (console, encoder) in &encoders {
-                    let samples = output.entry(*console).or_default();
-                    samples.push_back((Instant::now(), encoder.output()));
-                    while samples.front().is_some_and(|(at, _)| at.elapsed() > OUTPUT_WINDOW) {
-                        samples.pop_front();
-                    }
                     let watched = viewers.get(console).is_some_and(|v| !v.lock().unwrap().is_empty());
                     if watched && encoder.since_last_frame() >= STILL_FRAME_INTERVAL.mul_f32(0.8)
                         && let Err(e) = encoder.frame()
@@ -422,22 +422,8 @@ async fn start_in(
             Some(request) = requests.recv() => {
                 match request {
                     Request::Bitrate { bitrate } => {
-                        // Within reach of what the encoders produced lately.
-                        let produced: Option<f64> = output
-                            .values()
-                            .map(|samples| {
-                                let (&(first, from), &(last, to)) = (samples.front()?, samples.back()?);
-                                let span = last.duration_since(first).as_secs_f64();
-                                (span >= OUTPUT_WINDOW.as_secs_f64() / 2.)
-                                    .then(|| to.saturating_sub(from) as f64 * 8. / 1000. / span)
-                            })
-                            .sum();
-                        let bitrate = match produced {
-                            Some(produced) => bitrate
-                                .min((produced * OUTPUT_HEADROOM) as u32)
-                                .max(args.bitrates.min),
-                            None => bitrate,
-                        };
+                        // The estimate as it is: it probes the link (str0m's GCC), so it does not
+                        // rise without evidence while the screens send little.
                         let current = f64::from(settings.bitrate);
                         let change = (f64::from(bitrate) - current).abs() / current;
                         let congested = f64::from(bitrate) <= current * (1.0 - BITRATE_DROP);
@@ -447,7 +433,7 @@ async fn start_in(
                             debug!(from = settings.bitrate, to = bitrate, "video bitrate");
                             settings.bitrate = bitrate;
                             bitrate_changed = Instant::now();
-                            share(&encoders, &sizes, bitrate, args.bitrates.min);
+                            share(&encoders, &sizes, &in_use, bitrate);
                         }
                     }
                     Request::TenBits(ten_bits) => {
@@ -461,7 +447,7 @@ async fn start_in(
                             }
                             // The new encoders start at the whole bitrate: each screen gets its
                             // share again.
-                            share(&encoders, &sizes, settings.bitrate, args.bitrates.min);
+                            share(&encoders, &sizes, &in_use, settings.bitrate);
                         }
                     }
                     Request::Keyframe { console } => {
@@ -716,8 +702,16 @@ async fn start_in(
                 }
             }
         }
+        if let Some(console) = drawn {
+            last_drawn.insert(console, Instant::now());
+            // A screen in use again gets its share before its frame.
+            if !in_use.contains(&console) {
+                in_use = busy(&last_drawn);
+                rebalance = true;
+            }
+        }
         if rebalance {
-            share(&encoders, &sizes, settings.bitrate, args.bitrates.min);
+            share(&encoders, &sizes, &in_use, settings.bitrate);
         }
         if let Some(console) = drawn {
             *updates.entry(console).or_default() += 1;
@@ -792,14 +786,23 @@ async fn gone(peer: zbus::fdo::PeerProxy<'static>) {
     }
 }
 
-/// Share `total` kbit/s among the screens that are on: each gets a floor (its share of
-/// `min_total`, or of `total` when it is lower), and the rest goes by area, so that the sum
-/// stays within `total`.
+/// The consoles the guest drew on within `IDLE_AFTER`.
+fn busy(last_drawn: &HashMap<u32, Instant>) -> std::collections::BTreeSet<u32> {
+    last_drawn
+        .iter()
+        .filter(|(_, at)| at.elapsed() < IDLE_AFTER)
+        .map(|(&console, _)| console)
+        .collect()
+}
+
+/// Share the video bitrate, `total` kbit/s, among the screens that are on: an idle screen
+/// keeps `IDLE_BITRATE` (at most an even share), and the screens in use share the rest by
+/// their area; with none in use, all share it by area.
 fn share(
     encoders: &HashMap<u32, Encoder>,
     sizes: &HashMap<u32, (u32, u32)>,
+    in_use: &std::collections::BTreeSet<u32>,
     total: u32,
-    min_total: u32,
 ) {
     let on: Vec<(u32, f64)> = encoders
         .keys()
@@ -809,22 +812,41 @@ fn share(
                 .map(|&(w, h)| (*c, f64::from(w) * f64::from(h)))
         })
         .collect();
-    let Ok(count) = u32::try_from(on.len()) else {
-        return;
-    };
-    if count == 0 {
-        return;
-    }
-    let floor = (min_total / count).min(total / count);
-    let rest = total.saturating_sub(floor * count);
-    let area: f64 = on.iter().map(|(_, a)| a).sum();
-    for (console, a) in on {
-        let bitrate = floor + (f64::from(rest) * a / area.max(1.)) as u32;
+    for (console, bitrate) in shares(&on, in_use, total) {
         debug!(console, bitrate, "screen bitrate");
         if let Some(encoder) = encoders.get(&console) {
             encoder.set_bitrate(bitrate.max(1));
         }
     }
+}
+
+/// The bitrate of each screen that is on, given by its console and area: see [`share`].
+fn shares(
+    on: &[(u32, f64)],
+    in_use: &std::collections::BTreeSet<u32>,
+    total: u32,
+) -> Vec<(u32, u32)> {
+    let Ok(count) = u32::try_from(on.len()) else {
+        return Vec::new();
+    };
+    if count == 0 {
+        return Vec::new();
+    }
+    let active = |c: &u32| in_use.is_empty() || in_use.contains(c);
+    let idle = on.iter().filter(|(c, _)| !active(c)).count() as u32;
+    let idle_bitrate = IDLE_BITRATE.min(total / count);
+    let rest = total.saturating_sub(idle_bitrate * idle);
+    let area: f64 = on.iter().filter(|(c, _)| active(c)).map(|(_, a)| a).sum();
+    on.iter()
+        .map(|&(console, a)| {
+            let bitrate = if active(&console) {
+                (f64::from(rest) * a / area.max(1.)) as u32
+            } else {
+                idle_bitrate
+            };
+            (console, bitrate)
+        })
+        .collect()
 }
 
 /// Where a console's new framebuffer is.
@@ -926,4 +948,24 @@ fn report_rates(
         );
     }
     updates.clear();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The screens in use share what the idle ones leave, by area; with none in use, all do.
+    #[test]
+    fn idle_screens_keep_little() {
+        let on = [(0, 3440. * 1440.), (1, 1920. * 1200.)];
+        let in_use: std::collections::BTreeSet<u32> = [0].into();
+        assert_eq!(shares(&on, &in_use, 20_000), [(0, 19_500), (1, 500)]);
+        // Both in use, or neither: by area.
+        let both: std::collections::BTreeSet<u32> = [0, 1].into();
+        let by_area = shares(&on, &both, 20_000);
+        assert_eq!(by_area, shares(&on, &Default::default(), 20_000));
+        assert_eq!(by_area, [(0, 13_650), (1, 6_349)]);
+        // Never more than an even share for an idle screen, nor more than the total.
+        assert_eq!(shares(&on, &in_use, 600), [(0, 300), (1, 300)]);
+    }
 }
