@@ -1,9 +1,9 @@
 # Architecture
 
-qemu-dbus-webrtc runs on the host, next to QEMU. It attaches to a running VM through QMP and
-QEMU's D-Bus display (`-display dbus`), encodes the guest display on the host GPU and serves it
-to a browser over WebRTC. It does not manage the VM's lifecycle: the VM manager (Proxmox VE,
-libvirt, plain QEMU) starts and stops it.
+qemu-dbus-webrtc runs on the host, next to QEMU. It attaches to running VMs through QMP and
+QEMU's D-Bus display (`-display dbus`), encodes the guest display on the host GPU and streams it
+to clients over WebRTC. It does not manage the VM lifecycle: the VM manager (Proxmox VE,
+libvirt, plain QEMU) starts and stops VMs.
 
 ```
  browser ── WebRTC (video, audio, data channels) ── qemu-dbus-webrtc ── D-Bus / QMP ── QEMU
@@ -13,246 +13,247 @@ libvirt, plain QEMU) starts and stops it.
 
 ## Components
 
-- **VMs:** one server serves every VM of its host. Providers find them, one per VM manager:
-  libvirt through libvirt-dbus (every domain with a D-Bus display, running or not, by UUID and
-  name; the bus of a running one's display from its live definition; and starting one that is
-  off, when `[libvirt] start` allows it), Proxmox VE (QMP sockets and VM configurations), and
-  VMs given by hand. A VM's page is `/vm/<uuid>/`, its signalling `/vm/<uuid>/signal`, a name
-  in place of the UUID as well; the VM is looked for only once the client logged in and is
-  known to decode the video, so that which VMs the host runs is said to no one else. The server attaches to a VM when its first client comes, after
-  checking the VM's UUID, and detaches when the last one left: five seconds after a clean
-  close (time to reload a page), a minute after a client cut off, which may come back; at once
-  when the VM stops, which it sees by asking it every second whether it runs. A VM nobody
-  watches costs nothing. Stopped, the server ends every session and detaches from every VM
-  before it exits. The server does not otherwise manage the VMs.
-- **Sessions' end:** the server always ends a session by closing the WebSocket cleanly, so that
-  a client takes a clean close for an end (a native client closes its windows) and a connection
-  lost without one for a failure to recover from. `Ended` says why when there is more to say:
-  another client took the session over, or the server stops (it may come back). A client
-  leaving closes cleanly too.
-- **QEMU attachment:** the D-Bus display (a libvirt bus, or peer to peer through QMP) for
+- **VM discovery:** one server handles all VMs of its host, discovered by providers, one per VM
+  manager: libvirt through libvirt-dbus (all domains with a D-Bus display, running or not, by
+  UUID and name; the display bus of a running domain from its live definition; starting a
+  stopped domain when `[libvirt] start` allows it), Proxmox VE (QMP sockets and VM
+  configurations), and a static list. A VM's page is `/vm/<uuid>/` and its signaling endpoint
+  `/vm/<uuid>/signal`; the VM name can replace the UUID. The VM is only looked up once the
+  client has authenticated and announced the codecs it decodes, so the list of VMs is never
+  disclosed to anyone else. The server attaches to a VM when its first client connects, after
+  checking the VM's UUID, and detaches when the last client leaves: 5 s after a clean close
+  (enough to reload the page), one minute after a lost connection (the client may reconnect),
+  and immediately when the VM stops, which it detects by polling every second. A VM without
+  clients costs nothing. On shutdown, the server ends all sessions and detaches from all VMs
+  before exiting.
+- **Session termination:** the server always ends a session with a clean WebSocket close, so
+  that clients treat a clean close as a deliberate end (the native client closes its windows)
+  and a lost connection as a failure to recover from. An `Ended` message gives the reason when
+  there is one: another client took over the session, or the server is shutting down (and may
+  come back). Clients also close cleanly when they leave.
+- **QEMU attachment:** the D-Bus display (on a libvirt bus, or peer-to-peer through QMP) for
   scanouts (DMA-BUF, `ScanoutDMABUF2`), cursor, keyboard, mouse, audio and clipboard.
-- **Video:** the `qdw-hw-encoder` crate, with no media framework: VA-API on the GPU (AV1,
-  HEVC, VP9), libvpx on the CPU (VP9, for hosts without a GPU). On the GPU, the guest
-  framebuffer, a linear DMA-BUF, is imported as a VA surface and converted to YUV where it is
-  (with virgl it is in the GPU's own memory, which the CPU would read through the bus at a
-  frame or two a second); a framebuffer in memory shared with QEMU is copied to the GPU first.
-  The crate writes the AV1 and HEVC headers (VP9's driver writes its own), so that a keyframe
-  or a bitrate change comes with the very next frame and the stream says what its colours are.
-  Up to 60 frames a second per screen: the encoders measure the frame rate the guest draws at,
-  and spread the bitrate over it.
-- **Transport:** str0m (`peer.rs`), WebRTC in Rust without a media framework, with congestion
-  control (GCC) driving the encoder bitrate. A task per session owns str0m's state and its UDP
-  sockets (one host candidate per address of the host, loopback aside), packetizes the frames,
-  paces them to its GCC estimate (with probes), retransmits what the client misses (NACK, RTX),
-  carries the data channels, decodes the microphone's Opus with libopus and relays the
-  cameras' H.264.
-- **Transport, per viewer:** each viewer has its own session, fed with the encoded frames of the
-  console it watches, shared without a copy: one encoder per console, whatever the number of
-  viewers. A viewer that loses a frame asks for a keyframe (PLI), which goes back to the
+- **Video encoding:** the `qdw-hw-encoder` crate, without a media framework: VA-API on the GPU
+  (AV1, HEVC, VP9) and libvpx on the CPU (VP9, for hosts without a GPU encoder). On the GPU, the
+  guest framebuffer, a linear DMA-BUF, is imported as a VA surface and converted to YUV in
+  place. With virgl, it lives in GPU memory, which the CPU could only read over the bus at one
+  or two frames per second. A framebuffer in memory shared with QEMU is uploaded to the GPU
+  first. The crate writes the AV1 and HEVC headers itself (the VP9 driver writes its own), so
+  keyframes and bitrate changes apply on the next frame and the streams signal their color
+  description. Up to 60 fps per screen: the encoders measure the guest's frame rate and spread
+  the bitrate over it.
+- **Transport:** str0m (`peer.rs`), a Rust WebRTC implementation without a media framework, with
+  Google Congestion Control (GCC) driving the encoder bitrate. Each session has a task that owns
+  the str0m state and its UDP sockets (one host candidate per host address, loopback excluded).
+  str0m packetizes the frames, paces them at its GCC estimate (with probing), handles
+  retransmissions (NACK, RTX) and the SCTP data channels. The session decodes the microphone's
+  Opus with libopus and relays the client cameras' H.264.
+- **Per-viewer sessions:** each viewer has its own session, fed with the encoded frames of the
+  screens it watches, shared without copying: one encoder per screen, whatever the number of
+  viewers. A viewer that loses a frame requests a keyframe (PLI), which is forwarded to the
   encoder.
-- **Pause:** a client whose window is hidden pauses its video (data channel `control`): it
-  leaves the viewers its console's encoder feeds, and a console nobody watches is not encoded
-  at all. The sound goes on. On resume, a keyframe brings the picture back at once.
-- **Signalling:** a WebSocket carrying the SDP offer and answer and ICE candidates. The client's
-  hello carries the server's user and password (`[auth] method = "password"`, the default, the
-  password an Argon2id hash in the configuration), checked before the server starts the VM or
-  attaches to it, whatever runs the VMs; a wrong one waits a second for its answer. They open
-  the server's door; the guest's logon still guards the guest. Other methods are to come next
-  to it: client certificates, security keys (FIDO), a broker's token. The guest keeps its own
-  logon, as a PC does: the server does not log on to Windows.
-- **Protocol:** the messages between the server and its clients are Protocol Buffers, defined
-  in `crates/protocol/proto/qdw.proto`. Clients in any language generate their code from it;
-  the browser page carries a small hand-written codec for the few messages it needs. Device
-  channels keep their RDP formats (see below).
+- **Pause:** a client whose window is hidden pauses its video (`control` data channel): it is
+  removed from the screen's viewers, and a screen without viewers is not encoded. Audio
+  continues. On resume, a keyframe restores the picture immediately.
+- **Signaling:** a WebSocket carrying the SDP offer and answer and the ICE candidates. The
+  client's hello carries the server's username and password (`[auth] method = "password"`, the
+  default, with an Argon2id hash in the configuration), checked before the server starts or
+  attaches to the VM, whatever the VM manager; a wrong password is answered after one second.
+  This protects access to the server; the guest still requires its own logon. Other methods are
+  planned: client certificates, FIDO security keys, broker tokens. The server never logs on to
+  Windows.
+- **Client protocol:** messages between the server and its clients are Protocol Buffers,
+  defined in `crates/protocol/proto/qdw.proto`. Clients in any language generate their code from
+  it; the browser page embeds a small hand-written codec for the few messages it needs. Device
+  channels reuse the RDP formats (see below).
 
 ## Source layout
 
 | Directory | Crate | Role |
 |---|---|---|
-| `crates/protocol` | `qdw-protocol` | the `.proto` file and the Rust types generated from it |
-| `crates/qemu` | `qdw-qemu` | attachment to QEMU: QMP, the D-Bus display and sound, the guest agent |
-| `crates/video` | `qdw-video` | the encoding of a console's framebuffer, on a thread of its own, recording |
-| `crates/hw-encoder` | `qdw-hw-encoder` | encoding on the GPU's own API (VA-API), with the codecs' headers written from their standards |
-| `crates/audio` | `qdw-audio` | Opus encoding of the guest's sound |
-| `server` | `qemu-dbus-webrtc` | the server: the VMs and their providers (`providers.rs`, `libvirt.rs`, `vms.rs`), a VM's display loop (`vm.rs`), viewer sessions, signalling, the browser page |
+| `crates/protocol` | `qdw-protocol` | the `.proto` file and the generated Rust types |
+| `crates/qemu` | `qdw-qemu` | QEMU attachment: QMP, D-Bus display and audio, the guest agent |
+| `crates/video` | `qdw-video` | per-screen encoding on a dedicated thread, frame dropping, recording |
+| `crates/hw-encoder` | `qdw-hw-encoder` | VA-API encoding, with the codec headers written from their specifications |
+| `crates/audio` | `qdw-audio` | Opus encoding of the guest audio, microphone decoding |
+| `server` | `qemu-dbus-webrtc` | the server: VM providers (`providers.rs`, `libvirt.rs`, `vms.rs`), the per-VM display loop (`vm.rs`), viewer sessions (`peer.rs`), signaling, the browser page |
 
-A native client will sit next to them and share `qdw-protocol`.
+The native client lives in a separate repository and implements the same protocol.
 
 ## Clients
 
-Two clients, one protocol: the browser, and a native client built on libwebrtc, the WebRTC
-engine of Chromium and Safari. Both then share the same transport behaviour (feedback for
-congestion control, retransmission, jitter buffer, SCTP data channels), so a problem seen in one
-is seen in the other. Bitrate estimation runs on the sending side, in this server, whatever the
+Two clients, one protocol: the browser, and a native client based on libwebrtc, the WebRTC
+engine of Chromium and Safari. Both have the same transport behavior (congestion control
+feedback, retransmission, jitter buffer, SCTP data channels), so a problem seen with one is seen
+with the other. Bandwidth estimation runs on the sender side, in the server, whatever the
 client.
 
-Each connection estimates its bandwidth with Google Congestion Control (str0m's, from the
-client's transport-wide congestion control reports, with probes when the desktop sends little),
-which also paces its packets and probes up to the maximum bitrate. The user's estimate, as it
-is, sets the bitrate of the video, which all viewers share, within 4 and 30 Mbit/s
-(`--bitrate`), starting at 10; each client gets its own estimate on the `control` channel,
-and, once a second, how long each screen's frames took on the server (`EncodeLatency`), which
-with its own figures gives the latency from the guest to its screen. The
-encoders take a new bitrate with the next frame, without a keyframe.
+Each connection estimates its bandwidth with str0m's GCC implementation, from the client's
+transport-wide congestion control feedback, which also paces the packets and probes up to the
+maximum bitrate. The video bitrate is 85 % of the user's estimate minus the audio, between 4
+and 30 Mbit/s (`--bitrate` sets the maximum), starting at 10 Mbit/s, and is shared by all
+viewers. When an encoder runs ahead of its bitrate, a leaky-bucket frame dropper skips frames
+rather than letting the sender queue grow. Each client receives its own estimate on the
+`control` channel and, once per second, the server-side encoding latency of each screen
+(`EncodeLatency`), from which it computes the guest-to-display latency. Bitrate changes apply on
+the next frame, without a keyframe.
 
-What differs is decoding: the native client brings its own decoders and can take what browsers
-may not (VP9 4:4:4). The codec is negotiated in SDP, from the best the client offers down to
-VP9 4:2:0, which every current browser decodes. H.264 is left out: the project targets current
-hardware, and the royalty-free codecs cover it.
+Decoding is where clients differ: the native client brings its own decoders and supports formats
+browsers may not (VP9 4:4:4). The codec is negotiated in SDP, from the best one the client
+supports down to VP9 4:2:0, which all current browsers decode. H.264 is not offered: the project
+targets current hardware, which the royalty-free codecs cover.
 
-One client uses the session at a time, as with RDP: its keyboard and pointer, clipboard,
-microphone, drives and printers go to the guest, and the guest's screen takes the size of its
-window. A new client takes the session over, and the last one's ends with a reason. Shadow
-clients (`shadow` in their hello) only watch and listen, as many as wanted, and go when the user
-leaves (not when another takes the session over); handing them the keyboard and pointer on
-request comes later.
+One client controls the session at a time, as with RDP: its keyboard and pointer, clipboard,
+microphone, drives and printers are connected to the guest, and the guest resolution follows its
+window. A new client takes over the session, and the previous one is ended with a reason. Shadow
+clients (`shadow` in their hello) are view-only, unlimited in number, and are disconnected when
+the user leaves (not on a takeover); handing them keyboard and mouse control is planned.
 
-The size follows the user's window: once a size has settled (300 ms), the server asks the guest
-for it (`SetUIInfo`, even and within 200 to 8192 pixels). A request sent while the guest boots
-is lost, its display driver restoring the mode Windows remembered: the size stays the goal,
-asked again when the guest still shows another 3 s after, three times at most. The guest keeps
-the size when the user goes.
+The guest resolution follows the user's window: once the size has been stable for 300 ms, the
+server requests it from the guest (`SetUIInfo`, rounded to even values between 200 and 8192
+pixels). A request sent while the guest boots is lost, as its display driver restores the mode
+Windows remembered, so the server requests it again if the guest still shows another size 3 s
+later, up to three times. The guest keeps the resolution after the user leaves.
 
-With several monitors (native client), the user's client sends them all, with where they are
-among each other and their size in millimetres. The guest gets one screen per monitor, in
-order, at its size and place (`SetUIInfo` with the offsets), and its other screens are turned
-off: the guest's desktop is arranged as the client's, and the pointer goes from one screen to
-the next as on the client. Each guest screen (a graphic console, by head, four at most) has its
-own encoder and its own video track, all in the same payload type, told apart by their mid; the
-offer gives the screens first, in order. The sound is in the screens' stream (their msid): the
-client keeps it in step with the video, as a video call in the guest needs. The
-bitrate the user's bandwidth allows is shared among the screens that are on and that the
-client shows: a screen the guest has not drawn on for 2 s keeps 500 kbit/s, and the screens
-in use share the rest by area (all of them by area when none is in use). A screen past the
-client's layout is not encoded, even when the guest keeps it on (Windows' viogpu ignores a
-screen turned off); it comes back with a keyframe when the client shows it again. The pointer goes through the guest agent (`Mouse1`), which places
-it on the head the client names; the QEMU tablet knows a single surface, and serves the first
-screen when there is no agent. The guest pointer's shape names its screen, and the client shows
-it there only. The browser page shows the first screen.
+With several monitors (native client), the client sends its monitor layout with each monitor's
+position and physical size in millimeters. The guest gets one screen per monitor, in order, at
+its size and position (`SetUIInfo` with offsets), and its other screens are disabled: the guest
+desktop mirrors the client's layout, and the pointer moves between screens as on the client.
+Each guest screen (a graphic console per head, up to four) has its own encoder and video track,
+all with the same payload type and distinguished by their mid; the offer lists the screens
+first, in order. Audio shares the screens' media stream (msid), so the client keeps it in sync
+with the video, as video calls in the guest require. The bitrate is shared between the screens
+that are enabled and displayed by the client: a screen without guest updates for 2 s keeps
+500 kbit/s, and active screens share the rest in proportion to their area (all screens by area
+when none is active). A screen outside the client's layout is not encoded, even if the guest
+keeps it enabled (Windows' viogpu driver ignores disabled screens); it resumes with a keyframe
+when the client displays it again. The pointer goes through the guest agent (`Mouse1`), which
+places it on the head named by the client; the QEMU tablet only knows a single surface and
+serves the first screen when there is no agent. The cursor shape carries its screen, and the
+client draws it on that screen only. The browser page displays the first screen.
 
 ## Codecs
 
 | Codec | Chroma | Royalties | Use |
 |---|---|---|---|
-| AV1 | 4:2:0 | royalty-free licence | default: the most efficient at low bitrates |
-| VP9 | 4:4:4 (profile 1) or 4:2:0 (profile 0) | royalty-free licence | 4:4:4 as the text quality mode, when the bandwidth allows; 4:2:0 as the fallback every browser decodes |
-| HEVC (H.265) | 4:4:4 or 4:2:0 | patent pools | optional, off by default |
+| AV1 | 4:2:0 | royalty-free license | default: most efficient at low bitrates |
+| VP9 | 4:4:4 (profile 1) or 4:2:0 (profile 0) | royalty-free license | 4:4:4 for text quality when bandwidth allows; 4:2:0 as the fallback all browsers decode |
+| HEVC (H.265) | 4:4:4 or 4:2:0 | patent pools | optional, disabled by default |
 
-4:2:0 keeps the luma, and so black-on-white text, at full resolution, but halves the chroma
-resolution: coloured text and thin coloured lines blur. Measured on an Intel Arc A380 with a
-scrolling code editor at fixed quantizers, the chroma of every 4:2:0 codec stops improving at
-about 43 dB however high the bitrate, while 4:4:4 keeps climbing; at low bitrates, AV1 4:2:0
-needs about a fifth fewer bits than VP9 4:4:4 for the same RGB quality. Hence AV1 when the
-bandwidth is short, VP9 4:4:4 above. Full chroma comes from the codec's own 4:4:4 profile,
+4:2:0 subsampling keeps the luma, and therefore black-on-white text, at full resolution but
+halves the chroma resolution: colored text and thin colored lines blur. Measured on an Intel Arc
+A380 with a scrolling code editor at fixed quantizers, the chroma PSNR of every 4:2:0 codec
+plateaus around 43 dB regardless of bitrate, while 4:4:4 keeps improving; at low bitrates, AV1
+4:2:0 needs about 20 % fewer bits than VP9 4:4:4 for the same RGB quality. Hence AV1 when
+bandwidth is scarce and VP9 4:4:4 above that. Full chroma uses the codec's own 4:4:4 profile,
 encoded in hardware: Intel GPUs encode VP9 profile 1, but AV1 in 4:2:0 only.
 
-The guest's RGB is converted to YUV with BT.601's matrix, limited range: what decoders assume
-when a stream does not say. The AV1 and HEVC streams say it (with BT.709 primaries and the
-sRGB transfer, the desktop's), libvpx's VP9 too; the VP9 of Intel's VA driver leaves the colour
-space unknown (measured on the A380), which decoders take for BT.601.
+RGB is converted to YUV with the BT.601 matrix in limited range, which decoders assume when a
+stream does not signal otherwise. The AV1 and HEVC streams signal it (with BT.709 primaries and
+the sRGB transfer function, the desktop's), as does libvpx's VP9; Intel's VA driver leaves the
+color space of its VP9 streams unspecified (measured on the A380), which decoders treat as
+BT.601.
 
-> **Patent royalties.** AV1 and VP9 come with royalty-free patent licences (from the Alliance
-> for Open Media and Google); third-party pools also claim patents on them, aimed mainly at
-> device makers. HEVC is covered by patents licensed through patent pools, whose licensing can
-> apply to services that stream it. HEVC is therefore off by default,
-> and turning it on is the deployer's decision. This project codes no picture itself: the host
-> GPU's hardware encoder does, through VA-API (this project writes the AV1 and HEVC headers that
-> describe the stream), or libvpx for VP9 on the CPU; decoding happens in the user's browser or
-> operating system. Whether your deployment needs a patent license depends on
-> your use and jurisdiction; this is not legal advice.
+> **Patent royalties.** AV1 and VP9 come with royalty-free patent licenses (from the Alliance
+> for Open Media and Google); third-party pools also claim patents on them, mostly targeting
+> device makers. HEVC is covered by patents licensed through patent pools, whose terms can apply
+> to streaming services. HEVC is therefore disabled by default, and enabling it is the
+> deployer's decision. This project does not encode pictures itself: the host GPU's hardware
+> encoder does, through VA-API (the project writes the AV1 and HEVC headers that describe the
+> stream), or libvpx for VP9 on the CPU; decoding happens in the user's browser or operating
+> system. Whether a deployment needs a patent license depends on its use and jurisdiction; this
+> is not legal advice.
 
-Audio is Opus, 128 kbit/s in 10 ms frames, encoded once for every viewer with libopus, on a
-thread of its own that makes a frame every 10 ms: silence completes what the guest does not
-play, which keeps the stream going (a WebRTC sender needs the audio to flow before it can make
-its offer). The guest's samples are converted to 48 kHz stereo (rubato resamples other rates)
-and wait 20 ms in a queue that absorbs QEMU's jitter; the frames are stamped by their count, not
-on arrival, and each viewer keeps the encoder's timestamps: they become the RTP timestamps, from which the receiver places
-the samples. Browsers play sound only after the user did something on the page: the page
-starts muted and unmutes on the first click or key.
+Audio is Opus at 128 kbit/s in 10 ms frames, encoded once for all viewers with libopus on a
+dedicated thread that emits a frame every 10 ms, filling gaps with silence to keep the stream
+flowing (a WebRTC sender needs audio flowing before it can make its offer). Guest samples are
+converted to 48 kHz stereo (rubato resamples other rates) and buffered 20 ms to absorb QEMU's
+jitter. Frames are timestamped by sample count rather than on arrival, and these timestamps
+become the RTP timestamps the receiver uses to place the samples. Browsers only play audio after
+a user interaction: the page starts muted and unmutes on the first click or key press.
 
-The client's microphone comes back on the sound's track, which is two-way: the server decodes it
-and feeds the guest's microphone through QEMU (`AudioInListener`). QEMU reads the samples from
-its main loop and waits for the answer, so the server keeps them ready in the guest's format,
-100 ms at most so that the delay cannot grow. One viewer speaks at a time: the one sending
-sound, until it has been silent for a second.
+The client's microphone comes back on the bidirectional audio track: the server decodes it and
+feeds the guest's microphone through QEMU (`AudioInListener`). QEMU reads the samples from its
+main loop and waits for them, so the server keeps them ready in the guest's format, buffering
+at most 100 ms to bound the delay. One viewer speaks at a time: the one sending audio, until it
+has been silent for one second.
 
-The client opens its microphone only while the guest records, as for the camera: QEMU says when
-an application in the guest opens or closes it (`SetEnabled`), and the server tells the user's
-client (`Microphone` on the control channel), waiting two seconds before it says the guest
-stopped, since applications close and open the microphone again within moments. The audio
-track stays negotiated. In the browser page, a button allows the microphone (browsers want a
-click and a permission); it then opens only while the guest records.
+As for cameras, the client only opens its microphone while the guest records: QEMU reports when
+a guest application opens or closes it (`SetEnabled`), and the server notifies the user's client
+(`Microphone` on the control channel), waiting two seconds before reporting a stop, since
+applications often close and reopen the microphone within moments. The audio track stays
+negotiated throughout. In the browser page, a button grants microphone access (browsers require
+a click and a permission); the microphone then only opens while the guest records.
 
 ## Devices: RDP channel formats over data channels
 
 WebRTC carries video and audio natively, including the browser's camera and microphone
-(`getUserMedia`). For everything else, the project reuses the device redirection formats of the
-Remote Desktop Protocol, unchanged, each on its own reliable, ordered data channel. They are
-specified, proven, and implemented on the client side by the IronRDP crates (MIT/Apache-2.0).
-Only channels with no patent listed in Microsoft's Open Specifications patent map are used.
+(`getUserMedia`). For everything else, the project reuses the Remote Desktop Protocol's device
+redirection formats, each on its own reliable, ordered data channel. They are specified, proven
+in production, and implemented on the client side by the IronRDP crates (MIT/Apache-2.0). Only
+channels without a patent listed in Microsoft's Open Specifications patent map are used.
 
-| Function | Format | Data channel | Browser | Native client (later) |
+| Function | Format | Data channel | Browser | Native client |
 |---|---|---|---|---|
-| Clipboard | project format, modelled on MS-RDPECLIP | `clipboard` | text, images (HTTPS) | full, files later |
-| Drives | project format, modelled on MS-RDPEFS | `drive` | no | full |
-| Printers | project format, modelled on MS-RDPEPC and MS-RDPEXPS | `printer` | no | full |
-| Cameras | project format, modelled on MS-RDPECAM; video on WebRTC tracks | `camera` | yes | full |
-| Monitor layout, resize | project format, modelled on MS-RDPEDISP | `control` | one monitor | several |
-| Smart cards | MS-RDPESC | `rdpdr` | no | yes |
-| USB | MS-RDPEUSB | `urbdrc` | no | yes |
-| Keyboard, mouse | project format, modelled on RDP | `input` | yes | yes |
-| Guest pointer shape | project format | `pointer` | yes | yes |
+| Clipboard | project format, modeled on MS-RDPECLIP | `clipboard` | text, images (HTTPS) | full, files included |
+| Drives | project format, modeled on MS-RDPEFS | `drive` | no | full |
+| Printers | project format, modeled on MS-RDPEPC and MS-RDPEXPS | `printer` | no | full |
+| Cameras | project format, modeled on MS-RDPECAM; video on WebRTC tracks | `camera` | yes | full |
+| Monitor layout, resize | project format, modeled on MS-RDPEDISP | `control` | one monitor | several |
+| Smart cards | MS-RDPESC | `rdpdr` | no | planned |
+| USB | MS-RDPEUSB | `urbdrc` | no | planned |
+| Keyboard, mouse | project format, modeled on RDP | `input` | yes | yes |
+| Cursor shape | project format | `pointer` | yes | yes |
 
-Keyboard and mouse follow what RDP does: keys travel as scancodes, by their position, and the
-guest applies its own layout; the lock keys are synchronised when the client gets the focus;
-everything pressed is released when it loses it, and by the server when a viewer goes; the
-wheel counts in 1/120 of a notch. The guest pointer is not in the video (virtio-gpu draws it
-on a plane of its own): its shape goes to the client, which draws it as its own cursor, free of
-the video latency.
+Keyboard and mouse input follows RDP: keys are sent as scancodes, by position, and the guest
+applies its own layout; lock key state is synchronized when the client gains focus; all pressed
+keys are released when it loses focus, and by the server when a viewer disconnects; wheel
+movement is counted in 1/120 of a notch. The cursor is not part of the video (virtio-gpu renders
+it on its own plane): its shape is sent to the client, which uses it as its own cursor,
+independently of video latency.
 
 Touch input does not use MS-RDPEI, which has a listed patent.
 
-The clipboard follows RDP's model: whoever copied last owns it and announces the types it holds,
-and the data move only when someone pastes. In the guest, the guest agent ([ameleo-display-agent-windows](https://github.com/ameleo/ameleo-display-agent-windows)) holds the
-Windows clipboard. A browser page cannot watch the local clipboard: it reads it when it gets the
-focus, and offers it to the guest if it changed; and browsers give the clipboard only to pages
-served in HTTPS, which the server always is.
+The clipboard follows RDP's model: whoever copied last owns the clipboard and announces the
+formats it holds, and the data are only transferred on paste. In the guest, the guest agent
+([ameleo-display-agent-windows](https://github.com/ameleo/ameleo-display-agent-windows)) owns
+the Windows clipboard. A browser page cannot monitor the local clipboard: it reads it when it
+gains focus and offers it to the guest if it changed. Browsers only expose the clipboard to pages
+served over HTTPS, which the server always uses.
 
-Drives follow RDP's drive redirection: a client announces its drives, the guest agent
-mounts each on a drive letter (with Dokany), and every file operation of a guest application
-comes to the client as it happens, with Windows' own parameters and the client's NTSTATUS in
-return; nothing of the client's files stays in the guest. The server refuses paths through `..`
-before asking the client, and removes a viewer's drives when it goes. A read or a write carries
-up to 1 MiB: larger than a data channel message, it goes in fragments.
+Drive redirection follows RDP: a client announces its drives, the guest agent mounts each one on
+a drive letter (with Dokany), and every file operation of a guest application is forwarded to
+the client as it happens, with Windows' own parameters and the client's NTSTATUS in return;
+none of the client's files are cached in the guest. The server rejects paths containing `..`
+before forwarding them, and removes a viewer's drives when it disconnects. A read or write
+carries up to 1 MiB, fragmented across data channel messages.
 
-Printers follow RDP's Easy Print: a client announces its printers with their driver's
-PrintCapabilities and default PrintTicket (Print Schema XML, as Windows' PrintTicket API gives
-them), and the guest agent makes each a virtual printer of its Print Support App, with
-the same options, on Windows' inbox driver. A guest job comes to the client as it is printed:
-OpenXPS with its PrintTicket inside, for the client's own driver, sent a window of 1 MiB ahead
-of the client's acknowledgements; the guest learns whether the client could print it. The
-driver's own settings dialog opens on the client, and the guest keeps what the user chose
-there. Capabilities, tickets and pieces of a job go in fragments, as drive reads do.
+Printer redirection follows RDP's Easy Print: a client announces its printers with their
+driver's PrintCapabilities and default PrintTicket (Print Schema XML, as returned by Windows'
+PrintTicket API), and the guest agent creates a matching virtual printer in its Print Support
+App, on Windows' inbox driver. A guest print job is sent to the client as it is printed, as
+OpenXPS with its PrintTicket, for the client's own driver, with a 1 MiB window ahead of the
+client's acknowledgments; the guest is told whether the client could print it. The driver's
+settings dialog opens on the client, and the guest keeps the user's choices. Capabilities,
+tickets and job data are fragmented like drive reads.
 
-Cameras follow RDP's camera redirection: the user's client announces its cameras, with their
-H.264 formats and controls (numbered as in MS-RDPECAM), and the guest agent shows each in
-the guest. The pictures themselves go as WebRTC video: the offer keeps four receive-only H.264
-tracks for the cameras, which the client sets to send when it answers; when a guest application
-opens a camera, the server names the track and the format, and relays the H.264 as it comes,
-with no transcoding. The client keeps the camera's resolution from the first frame (WebRTC's
-default lowers it while its bandwidth estimate ramps up, which the guest's decoder, set for the
-format, refuses).
+Camera redirection follows RDP: the user's client announces its cameras with their H.264
+formats and controls (numbered as in MS-RDPECAM), and the guest agent exposes each one in the
+guest. The video itself is sent as WebRTC media: the offer reserves four receive-only H.264
+tracks for the cameras, which the client sets to send in its answer. When a guest application
+opens a camera, the server tells the client which track and format to use, and relays the H.264
+as received, without transcoding. The client keeps the camera resolution from the first frame
+(WebRTC would otherwise lower it while its bandwidth estimate ramps up, which the guest decoder,
+configured for the announced format, rejects).
 
-Only the channel crates of IronRDP are used: `ironrdp-displaycontrol` (and `ironrdp-rdpeusb`
-later), with their base crates. They do no I/O:
-bytes received on a data channel go in, the messages to send come out. The RDP server, connection
-and graphics crates are not needed: WebRTC provides the transport, security and media.
+Of IronRDP, only the channel crates are used: `ironrdp-displaycontrol` (and later
+`ironrdp-rdpeusb`) with their base crates. They do no I/O: bytes received on a data channel go
+in, messages to send come out. The RDP server, connection and graphics crates are not needed:
+WebRTC provides the transport, security and media.
 
-In the guest, the optional guest agent (D-Bus over a QEMU character device, its contract in
-[ameleo-display-protocol](https://github.com/ameleo/ameleo-display-protocol)) provides what
-QEMU alone cannot: the clipboard, printers, drives and cameras as native Windows
-devices.
+In the guest, the optional guest agent (D-Bus over a QEMU character device, its contract defined
+in [ameleo-display-protocol](https://github.com/ameleo/ameleo-display-protocol)) provides what
+QEMU alone cannot: clipboard, printer, drive and camera redirection as native Windows devices.
 
 ## Milestones
 
@@ -262,7 +263,7 @@ Each milestone is validated on real hardware before the next one starts.
    followed.
 2. **Encode:** VA-API AV1, VP9 (4:4:4 and 4:2:0) and HEVC; streams checked with a reference
    decoder, frame rate measured.
-3. **Browser:** signalling and WebRTC video in Chrome and Firefox.
+3. **Browser:** signaling and WebRTC video in Chrome and Firefox.
 4. **Input:** keyboard and mouse over the `input` data channel.
 5. **Audio:** Opus playback, then the microphone.
 6. **Network and display:** congestion control, pause and resume, multi-monitor, resize,
