@@ -260,6 +260,10 @@ pub(crate) struct Counters {
     pub(crate) encoded: Arc<AtomicU64>,
     /// Bytes out of the encoder.
     pub(crate) bytes: Arc<AtomicU64>,
+    /// Bytes out of the encoder since it started, for the frame dropper.
+    pub(crate) output: Arc<AtomicU64>,
+    /// Frames not encoded, the encoder ahead of its bitrate.
+    pub(crate) dropped: Arc<AtomicU64>,
     /// The time from a frame asked for to its encoding handed to the viewers, added over
     /// the frames, and the longest, in microseconds.
     pub(crate) latency: Arc<AtomicU64>,
@@ -270,11 +274,48 @@ pub(crate) struct Counters {
     pub(crate) recent_latency_max: Arc<AtomicU64>,
 }
 
+/// Frames are dropped while the encoder is ahead of its bitrate, as libwebrtc's frame dropper
+/// does: a leaky bucket that what the encoder produced fills and its bitrate drains, a frame
+/// dropped while the bucket holds more than `FrameDropper::WINDOW` of the bitrate. Where the
+/// link is narrower than what the encoder can produce at its coarsest (measured: HEVC 4:4:4 at
+/// 3440x1440 and 24 frames a second stays above 6 Mbit/s whatever its target, 15 to 40 % over
+/// it), fewer frames go rather than the sender's queue filling, which delayed the frames and
+/// the sound by more than a second.
+pub(crate) struct FrameDropper {
+    /// The bits the bitrate drained, up to now: never more than the encoder produced, so a
+    /// still screen saves no room for a burst.
+    drained: f64,
+    last: std::time::Instant,
+}
+
+impl FrameDropper {
+    /// What the bucket may hold beyond what was drained: a keyframe goes, the next frames wait.
+    const WINDOW: std::time::Duration = std::time::Duration::from_millis(100);
+
+    pub(crate) fn new(now: std::time::Instant) -> Self {
+        Self {
+            drained: 0.0,
+            last: now,
+        }
+    }
+
+    /// Whether a frame may be encoded now: `produced` bytes so far, at `bitrate` kbit/s.
+    pub(crate) fn allow(&mut self, produced: u64, bitrate: u32, now: std::time::Instant) -> bool {
+        let rate = f64::from(bitrate) * 1000.0;
+        let produced = produced as f64 * 8.0;
+        self.drained = (self.drained + rate * (now - self.last).as_secs_f64()).min(produced);
+        self.last = now;
+        produced - self.drained <= rate * Self::WINDOW.as_secs_f64()
+    }
+}
+
 /// What an encoder produced over a while.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Produced {
     pub frames: u64,
     pub bytes: u64,
+    /// Frames not encoded, the encoder ahead of its bitrate (see [`FrameDropper`]).
+    pub dropped: u64,
     /// From a frame asked for (the guest drew) to its encoding handed to the viewers: the
     /// mean over the frames, and the longest.
     pub latency: std::time::Duration,
@@ -300,6 +341,7 @@ pub struct Encoder {
     last_frame: std::cell::Cell<std::time::Instant>,
     /// The bitrate it was last set to, in kbit/s.
     bitrate: std::sync::atomic::AtomicU32,
+    dropper: std::cell::RefCell<FrameDropper>,
 }
 
 impl Encoder {
@@ -319,6 +361,7 @@ impl Encoder {
             counters,
             last_frame: std::cell::Cell::new(std::time::Instant::now()),
             bitrate: settings.bitrate.into(),
+            dropper: std::cell::RefCell::new(FrameDropper::new(std::time::Instant::now())),
         })
     }
 
@@ -392,6 +435,17 @@ impl Encoder {
         let Some(fb) = &self.framebuffer else {
             return Ok(());
         };
+        // Ahead of its bitrate: not now. The picture goes at the next frame allowed (a still
+        // frame comes 250 ms after the last one at most), a keyframe asked meanwhile with it.
+        let produced = self.counters.output.load(Ordering::Relaxed);
+        if !self
+            .dropper
+            .borrow_mut()
+            .allow(produced, self.bitrate(), std::time::Instant::now())
+        {
+            self.counters.dropped.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        }
         self.direct.frame(Picture {
             asked: std::time::Instant::now(),
             source: fb.source.clone(),
@@ -463,6 +517,7 @@ impl Encoder {
         Produced {
             frames,
             bytes: counters.bytes.swap(0, Ordering::Relaxed),
+            dropped: counters.dropped.swap(0, Ordering::Relaxed),
             latency: std::time::Duration::from_micros(total.checked_div(frames).unwrap_or(0)),
             latency_max: std::time::Duration::from_micros(max),
         }
@@ -477,6 +532,39 @@ impl Encoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The dropper lets the bitrate through, a burst of `WINDOW` beyond it, and drops while the
+    /// encoder is ahead; a still screen saves no room.
+    #[test]
+    fn frames_are_dropped_ahead_of_the_bitrate() {
+        let start = std::time::Instant::now();
+        let at = |ms: u64| start + std::time::Duration::from_millis(ms);
+        let mut dropper = FrameDropper::new(start);
+        // 8 Mbit/s: 1 MB a second, 100 kB in the window.
+        assert!(dropper.allow(0, 8000, at(0)));
+        // A 150 kB keyframe: 50 kB beyond the window, until 50 ms drain it.
+        assert!(!dropper.allow(150_000, 8000, at(10)));
+        assert!(!dropper.allow(150_000, 8000, at(40)));
+        assert!(dropper.allow(150_000, 8000, at(50)));
+        // Then frames at the bitrate go on: 40 kB every 40 ms.
+        for n in 1..10u64 {
+            assert!(dropper.allow(150_000 + 40_000 * n, 8000, at(50 + 40 * n)));
+        }
+        // Twice the bitrate: every other frame dropped, about.
+        let mut produced = 150_000 + 40_000 * 9;
+        let mut sent = 0;
+        for n in 0..50u64 {
+            if dropper.allow(produced, 8000, at(410 + 40 * n)) {
+                produced += 80_000;
+                sent += 1;
+            }
+        }
+        assert!((24..=27).contains(&sent), "{sent} of 50");
+        // A still screen for a minute saves nothing: the next large frames wait as before.
+        let later = at(60_000);
+        assert!(dropper.allow(produced, 8000, later));
+        assert!(!dropper.allow(produced + 150_000, 8000, later));
+    }
 
     #[test]
     fn framebuffers_fit_their_file() {

@@ -994,7 +994,7 @@ fn report_rates(
     for (&console, encoder) in encoders {
         let produced = encoder.take_counters();
         let guest = updates.remove(&console).unwrap_or(0);
-        if guest == 0 && produced.frames == 0 {
+        if guest == 0 && produced.frames == 0 && produced.dropped == 0 {
             continue;
         }
         let ms = |d: Duration| format!("{:.1}", d.as_secs_f64() * 1000.0);
@@ -1002,6 +1002,7 @@ fn report_rates(
             console,
             updates_per_second = format!("{:.1}", f64::from(guest) / secs),
             frames_per_second = format!("{:.1}", produced.frames as f64 / secs),
+            dropped_per_second = format!("{:.1}", produced.dropped as f64 / secs),
             kbit_per_second = format!("{:.0}", produced.bytes as f64 * 8.0 / 1000.0 / secs),
             // What it was asked for, its share of the video bitrate.
             target_kbit_per_second = encoder.bitrate(),
