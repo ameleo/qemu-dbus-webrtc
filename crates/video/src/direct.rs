@@ -16,7 +16,7 @@ use anyhow::{Context, Result, anyhow};
 use gstreamer as gst;
 use gstreamer_video as gst_video;
 use qdw_hw_encoder as hw;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::encode::{Codec, Counters, Settings, Sink};
 
@@ -162,6 +162,12 @@ impl Direct {
     /// the library, does not encode them.
     pub(crate) fn new(settings_: &Settings, sink: Sink, counters: Counters) -> Result<Self> {
         let encoder = hw::Encoder::open(None, settings(settings_)?)?;
+        info!(
+            driver = %encoder.driver(),
+            full_chroma = settings_.full_chroma,
+            ten_bits = settings_.ten_bits,
+            "HEVC encoded on the GPU's own API"
+        );
         let shared = Arc::new(Shared {
             asked: Mutex::new(Asked::default()),
             wake: Condvar::new(),
