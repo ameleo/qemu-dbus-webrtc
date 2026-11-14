@@ -91,6 +91,17 @@ fn stream_sink(
     })
 }
 
+/// Log a console's new scanout: at info level when it differs from the previous one (size,
+/// format, layout), at debug level otherwise.
+fn log_scanout(described: &mut HashMap<u32, String>, console: u32, description: String) {
+    if described.get(&console) == Some(&description) {
+        debug!(console, scanout = %description, "scanout");
+    } else {
+        info!(console, scanout = %description, "scanout");
+        described.insert(console, description);
+    }
+}
+
 /// A fourcc as its four characters.
 fn fourcc(code: u32) -> String {
     code.to_le_bytes()
@@ -327,6 +338,9 @@ async fn start_in(
     let mut bitrate_changed = Instant::now();
     // The video bitrate the user's last estimate allows, for the reports.
     let mut estimated: Option<u32> = None;
+    // The last scanout of each console, as logged: virgl sends a new DMA-BUF scanout with every
+    // frame, logged at info level only when its description changes.
+    let mut described: HashMap<u32, String> = HashMap::new();
     // When the guest last drew on each console, and the consoles in use at the last share.
     let mut last_drawn: HashMap<u32, Instant> = HashMap::new();
     let mut in_use: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
@@ -530,12 +544,10 @@ async fn start_in(
                 pixman_format,
                 data,
             } => {
-                info!(
+                log_scanout(
+                    &mut described,
                     console,
-                    size = %format!("{width}x{height}"),
-                    stride,
-                    format = %format!("{pixman_format:#x}"),
-                    "scanout (copied)"
+                    format!("copied, {width}x{height}, stride {stride}, pixman {pixman_format:#x}"),
                 );
                 fresh.insert(console);
                 if let Some(&screen) = screen_of.get(&console) {
@@ -580,12 +592,10 @@ async fn start_in(
                 stride,
                 pixman_format,
             } => {
-                info!(
+                log_scanout(
+                    &mut described,
                     console,
-                    size = %format!("{width}x{height}"),
-                    stride,
-                    format = %format!("{pixman_format:#x}"),
-                    "scanout (shared memory)"
+                    format!("shared memory, {width}x{height}, stride {stride}, pixman {pixman_format:#x}"),
                 );
                 fresh.insert(console);
                 copies.remove(&console);
@@ -624,16 +634,15 @@ async fn start_in(
                 modifier,
                 y0_top,
             } => {
-                info!(
+                log_scanout(
+                    &mut described,
                     console,
-                    size = %format!("{width}x{height}"),
-                    fourcc = %fourcc(code),
-                    modifier = %format!("{modifier:#x}"),
-                    planes = planes.len(),
-                    offsets = ?planes.iter().map(|p| p.offset).collect::<Vec<_>>(),
-                    strides = ?planes.iter().map(|p| p.stride).collect::<Vec<_>>(),
-                    y0_top,
-                    "scanout (DMA-BUF)"
+                    format!(
+                        "DMA-BUF, {width}x{height}, {}, modifier {modifier:#x}, offsets {:?}, strides {:?}, y0_top {y0_top}",
+                        fourcc(code),
+                        planes.iter().map(|p| p.offset).collect::<Vec<_>>(),
+                        planes.iter().map(|p| p.stride).collect::<Vec<_>>(),
+                    ),
                 );
                 fresh.insert(console);
                 copies.remove(&console);
