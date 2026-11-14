@@ -13,7 +13,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
-use gstreamer as gst;
 use qdw_hw_encoder as hw;
 pub use qdw_hw_encoder::PixelFormat;
 
@@ -96,44 +95,11 @@ impl Codec {
             && parts.any(|p| p.eq_ignore_ascii_case("bit-depth=10"))
     }
 
-    /// The caps of the encoded stream, as the viewers' pipelines take it: an AV1 temporal
-    /// unit of OBUs with their sizes, a VP9 frame (no hidden frame: one picture each), an HEVC
-    /// access unit in Annex B.
-    pub fn stream_caps(self) -> &'static str {
-        match self {
-            Self::Av1 => "video/x-av1,stream-format=obu-stream,alignment=tu,parsed=true",
-            Self::Vp9 => "video/x-vp9,alignment=super-frame,parsed=true",
-            Self::Hevc => "video/x-h265,stream-format=byte-stream,alignment=au,parsed=true",
-        }
-    }
-
-    /// The RTP payloader and the codec's RTP encoding name.
-    pub fn rtp(self) -> (&'static str, &'static str) {
-        match self {
-            Self::Av1 => ("rtpav1pay", "AV1"),
-            // The Rust payloader: the C one cannot parse the frames of the VA encoder.
-            Self::Vp9 => ("rtpvp9pay2", "VP9"),
-            Self::Hevc => (
-                "rtph265pay config-interval=-1 aggregate-mode=zero-latency",
-                "H265",
-            ),
-        }
-    }
-
-    /// What the RTP caps add for this codec, as the offer's fmtp line will say it: VP9 in 4:4:4
-    /// is profile 1, which a client must decode to take the offer.
-    pub fn rtp_extra(self, full_chroma: bool) -> &'static str {
-        match (self, full_chroma) {
-            (Self::Vp9, true) => ",profile-id=(string)1",
-            _ => "",
-        }
-    }
-
-    /// The fmtp parameters of the stream (RFC 7798 7.1), as caps fields, for HEVC: the offer
-    /// must say what the stream is, for an absent parameter means a default (profile-id 1,
-    /// level-id 93) that ours may not be. Taken from the bitstream the encoder writes
-    /// (`general_profile_idc`, the 32 `general_profile_compatibility_flag`s and the 48 bits
-    /// from `general_progressive_source_flag` on, in the order of the bitstream, base16), and
+    /// The fmtp parameters of the stream (RFC 7798 7.1), for HEVC: the offer must say what the
+    /// stream is, for an absent parameter means a default (profile-id 1, level-id 93) that ours
+    /// may not be. Taken from the bitstream the encoder writes (`general_profile_idc`, the 32
+    /// `general_profile_compatibility_flag`s and the 48 bits from
+    /// `general_progressive_source_flag` on, in the order of the bitstream, base16), and
     /// checked against a real encoding by a test. interop-constraints is the default the RFC
     /// infers without it (B0...: progressive, non-packed, frame only), which the stream also
     /// says, so that an answer that leaves it out keeps it, as 7.2.2 asks; for 4:4:4, the
@@ -143,12 +109,8 @@ impl Codec {
     /// follows the screen's size, which changes during a session. An answer may lower level-id
     /// (7.2.2); it is not read: a client whose decoder stops below the screen's level fails
     /// to decode it.
-    pub fn rtp_fmtp(self, full_chroma: bool, ten_bits: bool) -> Option<String> {
-        if self != Self::Hevc {
-            return None;
-        }
-        // (profile-id, profile-compatibility-indicator, interop-constraints)
-        let (profile, compatibility, constraints) = match (full_chroma, ten_bits) {
+    pub fn hevc_fmtp(full_chroma: bool, ten_bits: bool) -> HevcFmtp {
+        let (profile_id, compatibility, constraints) = match (full_chroma, ten_bits) {
             // Main: compatible with Main and Main 10.
             (false, false) => (1, "60000000", "B00000000000"),
             // Main 10.
@@ -157,11 +119,12 @@ impl Codec {
             (true, false) => (4, "08000000", "BE0800000000"),
             (true, true) => (4, "08000000", "BC0800000000"),
         };
-        Some(format!(
-            "profile-id=(string){profile},tier-flag=(string)0,level-id=(string)186,\
-             profile-compatibility-indicator=(string){compatibility},\
-             interop-constraints=(string){constraints}"
-        ))
+        HevcFmtp {
+            profile_id,
+            level_id: 186,
+            compatibility,
+            constraints,
+        }
     }
 
     /// Whether a client that announces `codec` (a media type, with its fmtp parameters after a
@@ -192,6 +155,36 @@ impl Codec {
             Self::Hevc => "video/H265",
         }
     }
+}
+
+/// The fmtp parameters of an HEVC stream: see [`Codec::hevc_fmtp`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HevcFmtp {
+    pub profile_id: u8,
+    /// Of the Main tier.
+    pub level_id: u8,
+    pub compatibility: &'static str,
+    pub constraints: &'static str,
+}
+
+impl std::fmt::Display for HevcFmtp {
+    /// As an fmtp line says them.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "profile-id={};tier-flag=0;level-id={};profile-compatibility-indicator={};\
+             interop-constraints={}",
+            self.profile_id, self.level_id, self.compatibility, self.constraints
+        )
+    }
+}
+
+/// An encoded frame: an access unit in Annex B for HEVC, a VP9 frame, an AV1 temporal unit.
+#[derive(Debug, Clone)]
+pub struct EncodedFrame {
+    pub data: std::sync::Arc<[u8]>,
+    /// Decodable on its own.
+    pub keyframe: bool,
 }
 
 /// Encoder settings.
@@ -258,7 +251,7 @@ pub fn pixman_format(code: u32) -> Option<PixelFormat> {
 }
 
 /// Where the encoded frames go.
-pub(crate) type Sink = Arc<std::sync::Mutex<Box<dyn FnMut(&gst::Buffer) + Send>>>;
+pub(crate) type Sink = Arc<std::sync::Mutex<Box<dyn FnMut(&EncodedFrame) + Send>>>;
 
 /// What an encoder produced.
 #[derive(Default, Clone)]
@@ -315,7 +308,7 @@ impl Encoder {
     /// Annex B for HEVC, a VP9 frame, an AV1 temporal unit), on the encoder's thread.
     pub fn new(
         settings: &Settings,
-        sink: impl FnMut(&gst::Buffer) + Send + 'static,
+        sink: impl FnMut(&EncodedFrame) + Send + 'static,
     ) -> Result<Self> {
         let counters = Counters::default();
         let sink: Sink = Arc::new(std::sync::Mutex::new(Box::new(sink)));
@@ -500,7 +493,6 @@ mod tests {
     /// `software`: a keyframe, a frame after a change of bitrate, and the keyframe of a
     /// restart, each with whether it is a delta unit. `None` where no GPU encodes `codec`.
     fn encoded(codec: Codec, full_chroma: bool, software: bool) -> Option<Vec<(Vec<u8>, bool)>> {
-        gst::init().unwrap();
         let (width, height) = (320, 240);
         let file = rustix::fs::memfd_create("fb", rustix::fs::MemfdFlags::CLOEXEC).unwrap();
         rustix::fs::ftruncate(&file, u64::from(width * height * 4)).unwrap();
@@ -513,9 +505,8 @@ mod tests {
             max_bitrate: 4000,
         };
         let (tx, rx) = std::sync::mpsc::channel();
-        let Ok(mut encoder) = Encoder::new(&settings, move |frame: &gst::Buffer| {
-            let delta = frame.flags().contains(gst::BufferFlags::DELTA_UNIT);
-            let _ = tx.send((frame.map_readable().unwrap().to_vec(), delta));
+        let Ok(mut encoder) = Encoder::new(&settings, move |frame: &EncodedFrame| {
+            let _ = tx.send((frame.data.to_vec(), !frame.keyframe));
         }) else {
             eprintln!("no {codec:?} encoder: skipped");
             return None;
@@ -710,16 +701,14 @@ mod tests {
             };
             let stream = encoder.encode(&frame, true).unwrap().data;
             let (idc, compatibility, constraints) = sps_profile(&stream);
-            let fmtp = Codec::Hevc.rtp_fmtp(full_chroma, ten_bits).unwrap();
-            let expected = (
-                format!("profile-id=(string){idc},"),
-                format!("profile-compatibility-indicator=(string){compatibility},"),
-                format!("interop-constraints=(string){constraints}"),
-            );
+            let fmtp = Codec::hevc_fmtp(full_chroma, ten_bits);
+            let expected = (idc, compatibility, constraints);
             assert!(
-                fmtp.contains(&expected.0)
-                    && fmtp.contains(&expected.1)
-                    && fmtp.contains(&expected.2),
+                (
+                    u32::from(fmtp.profile_id),
+                    fmtp.compatibility,
+                    fmtp.constraints
+                ) == (idc, expected.1.as_str(), expected.2.as_str()),
                 "4:4:4 {full_chroma}, 10 bits {ten_bits}: the encoder writes {expected:?}, the \
                  offer says {fmtp}"
             );

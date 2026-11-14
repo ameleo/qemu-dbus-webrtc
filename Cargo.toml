@@ -21,11 +21,6 @@ anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 # TLS with ring: no C toolchain beyond what ring itself needs.
 axum-server = { version = "0.9", default-features = false, features = ["tls-rustls-no-provider"] }
-gstreamer = "0.24"
-gstreamer-app = "0.24"
-gstreamer-sdp = "0.24"
-gstreamer-video = "0.24"
-gstreamer-webrtc = "0.24"
 if-addrs = "0.15"
 base64 = "0.22"
 bindgen = "0.72"

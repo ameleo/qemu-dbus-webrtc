@@ -62,13 +62,6 @@ min = 4000
 start = 10000
 max = 30000
 
-[webrtc]
-# The WebRTC stack of the connections: "webrtcbin" (GStreamer, the default) or "str0m" (in
-# Rust, without a media framework, being tried before it replaces webrtcbin). With str0m, the
-# server offers a host candidate on each address of the host but loopback, on a UDP port of its
-# own for each session.
-# stack = "webrtcbin"
-
 # Where the VMs are found: every VM manager enabled, then the VMs given by hand.
 
 [libvirt]

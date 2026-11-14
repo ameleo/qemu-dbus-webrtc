@@ -10,7 +10,6 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-gstreamer.workspace = true
 rubato = { version = "5.1", default-features = false, features = ["fft_resampler"] }
 tracing.workspace = true
 

@@ -10,7 +10,6 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-gstreamer.workspace = true
 qdw-hw-encoder.workspace = true
 rustix = { workspace = true, features = ["fs", "mm"] }
 tracing.workspace = true

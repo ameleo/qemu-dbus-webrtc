@@ -21,8 +21,8 @@ use tracing::{Instrument, debug, info, warn};
 
 use qdw_protocol::Message;
 use qdw_protocol::v1::{
-    BandwidthEstimate, ClientMessage, ControlMessage, EncodeLatency, Ended, Error, IceCandidate,
-    Input, Microphone, MonitorLayout, PointerMode, ServerMessage, SessionDescription, VideoPause,
+    BandwidthEstimate, ClientMessage, ControlMessage, EncodeLatency, Ended, Error, Input,
+    Microphone, MonitorLayout, PointerMode, ServerMessage, SessionDescription, VideoPause,
     client_message, control_message, ended, server_message,
 };
 use qdw_video::encode::Codec;
@@ -38,7 +38,7 @@ use crate::input::{AgentMouse, ViewerInput};
 use crate::layout::{Layout, Size};
 use crate::pointer::{self, Pointer};
 use crate::printers::{Printers, PrintersFollow, ViewerPrinters};
-use crate::transport::{Bitrates, Channel, Session, Signal, Stack, Start, Viewers};
+use crate::transport::{Bitrates, Channel, Session, Signal, SoundViewers, Start, VideoViewers};
 use crate::vms::{Client, Vms};
 
 const PAGE: &str = include_str!("../web/index.html");
@@ -64,7 +64,7 @@ pub struct Shared {
     /// The guest's screens, in order: what the viewers get, one video track each.
     pub screens: Vec<Screen>,
     /// The viewers of the guest's sound.
-    pub audio_viewers: Viewers,
+    pub audio_viewers: SoundViewers,
     /// The guest's microphone.
     pub mic: Arc<Mic>,
     pub requests: mpsc::UnboundedSender<Request>,
@@ -89,8 +89,6 @@ pub struct Shared {
     pub user: Arc<User>,
     /// The bounds of the bandwidth estimation.
     pub bitrates: Bitrates,
-    /// The WebRTC stack of the sessions.
-    pub stack: Stack,
     /// Which viewers decode the video in 10 bits.
     pub depths: Arc<Depths>,
 }
@@ -101,7 +99,7 @@ pub struct Shared {
 pub struct Screen {
     pub console: u32,
     pub head: u32,
-    pub viewers: Viewers,
+    pub viewers: VideoViewers,
 }
 
 /// Which viewers decode the video in 10 bits. The video is shared: it is in 10 bits only when
@@ -511,14 +509,12 @@ async fn viewer(
     let requests = shared.requests.clone();
     let consoles: Vec<u32> = shared.screens.iter().map(|s| s.console).collect();
     let started = Session::start(
-        shared.stack,
         Start {
             codec: shared.codec,
             full_chroma: shared.full_chroma,
             // The depth the encoders take now. A known limit: when it changes later (another
-            // viewer comes or goes), the stream's HEVC profile changes and the offer does not
-            // say it: webrtcbin 1.26 cannot change the format of a track in a new offer
-            // (measured).
+            // viewer comes or goes), the stream's HEVC profile changes and the offer, made once,
+            // does not say it: the session does not renegotiate.
             ten_bits,
             viewers: shared.screens.iter().map(|s| s.viewers.clone()).collect(),
             audio_viewers: shared.audio_viewers.clone(),
@@ -757,10 +753,6 @@ async fn run(
             signal = signals.recv() => match signal {
                 Some(Signal::Offer(sdp)) => {
                     send(socket, server_message::Message::Offer(SessionDescription { sdp })).await?
-                }
-                Some(Signal::IceCandidate { mline_index, candidate }) => {
-                    let ice = IceCandidate { candidate, sdp_mline_index: mline_index };
-                    send(socket, server_message::Message::Ice(ice)).await?
                 }
                 Some(Signal::Message(Channel::Input | Channel::Clipboard | Channel::Drive | Channel::Printer | Channel::Camera, _)) if !user => {}
                 Some(Signal::Message(Channel::Camera, bytes)) => {

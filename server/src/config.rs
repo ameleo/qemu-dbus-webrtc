@@ -12,13 +12,13 @@ use qdw_video::encode::{Codec, Settings};
 use serde::Deserialize;
 
 use crate::providers::{self, Providers, Source};
-use crate::transport::{self, Stack};
+use crate::transport;
 use crate::web;
 
 pub const USAGE: &str = "usage: qemu-dbus-webrtc [--config <file.toml>] \
                          [--qmp <QMP socket> | --dbus <D-Bus address> | --domain <libvirt domain>]... \
                          [--codec av1|vp9|hevc] [--chroma 420|444] [--software] [--bitrate <max kbit/s>] \
-                         [--record <path prefix>] [--listen <address:port>] [--stack webrtcbin|str0m] \
+                         [--record <path prefix>] [--listen <address:port>] \
                          --tls <certificate.pem> <key.pem>\n       \
                          qemu-dbus-webrtc --codecs   (what the GPUs encode)";
 
@@ -55,7 +55,6 @@ struct File {
     listen: Listen,
     video: Video,
     bitrate: Bitrate,
-    webrtc: Webrtc,
     libvirt: Libvirt,
     proxmox: ProxmoxFile,
     vm: Vec<Vm>,
@@ -118,14 +117,6 @@ struct Bitrate {
     max: Option<u32>,
 }
 
-/// The WebRTC connections.
-#[derive(Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct Webrtc {
-    /// "webrtcbin" (the default) or "str0m".
-    stack: Option<String>,
-}
-
 /// The VMs of libvirt: on by default.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -161,8 +152,6 @@ pub struct VmConfig {
     /// A codec was asked for: no other codec in its place.
     pub codec_given: bool,
     pub bitrates: transport::Bitrates,
-    /// The WebRTC stack of the sessions.
-    pub stack: Stack,
     /// Record each console's stream to `<prefix>-<vm uuid>-<console>.<extension>`.
     pub record: Option<String>,
 }
@@ -230,7 +219,6 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
     let bitrate = file.bitrate;
     let mut max_bitrate = bitrate.max;
     let mut vms = file.vm;
-    let mut stack = file.webrtc.stack;
 
     let mut args = args.into_iter();
     while let Some(option) = args.next() {
@@ -260,7 +248,6 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
             "--chroma" => video.chroma = Some(value),
             "--bitrate" => max_bitrate = Some(value.parse().context(USAGE)?),
             "--record" => video.record = Some(value),
-            "--stack" => stack = Some(value),
             "--listen" => listen.address = Some(value.parse().context(USAGE)?),
             "--tls" => {
                 let Some(key) = args.next() else { bail!(USAGE) };
@@ -331,10 +318,6 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
     let max = max_bitrate.unwrap_or(MAX_BITRATE).max(min);
     let start = bitrate.start.unwrap_or(START_BITRATE).clamp(min, max);
     let bitrates = transport::Bitrates { min, start, max };
-    let stack = match stack {
-        Some(name) => Stack::parse(&name)?,
-        None => Stack::default(),
-    };
 
     // With ACME, the certificate is the one it gets, where [listen] says or by default.
     if file.acme.is_some() {
@@ -402,7 +385,6 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
             },
             codec_given,
             bitrates,
-            stack,
             record: video.record,
         },
         listen,
@@ -477,16 +459,6 @@ mod tests {
             .unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(error.to_string().contains("above 0"), "{error}");
-    }
-
-    #[test]
-    fn webrtcbin_by_default_str0m_on_demand() {
-        assert_eq!(parse(args("--qmp /q")).unwrap().vm.stack, Stack::Webrtcbin);
-        assert_eq!(
-            parse(args("--qmp /q --stack str0m")).unwrap().vm.stack,
-            Stack::Str0m
-        );
-        assert!(parse(args("--qmp /q --stack other")).is_err());
     }
 
     #[test]

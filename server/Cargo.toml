@@ -33,11 +33,6 @@ x509-parser.workspace = true
 zbus.workspace = true
 axum.workspace = true
 axum-server.workspace = true
-gstreamer.workspace = true
-gstreamer-app.workspace = true
-gstreamer-sdp.workspace = true
-gstreamer-video.workspace = true
-gstreamer-webrtc = { workspace = true, features = ["v1_22"] }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true

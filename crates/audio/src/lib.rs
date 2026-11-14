@@ -22,15 +22,19 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
-use gstreamer as gst;
 use tracing::warn;
 
 pub use opus::Decoder;
 pub use pcm::Pcm;
 use resample::Resampler;
 
-/// The caps of the encoded stream, to feed it to another pipeline.
-pub const STREAM_CAPS: &str = "audio/x-opus,channel-mapping-family=0,rate=48000,channels=2";
+/// An Opus frame of 10 ms, 48 kHz stereo.
+#[derive(Debug, Clone)]
+pub struct OpusFrame {
+    pub data: Arc<[u8]>,
+    /// Its time from the encoder's start.
+    pub pts: Duration,
+}
 
 /// The Opus bitrate, in bit/s.
 const BITRATE: u32 = 128_000;
@@ -69,7 +73,7 @@ pub struct AudioEncoder {
 impl AudioEncoder {
     /// Start the encoder. Its output goes to `sink`, called once per Opus frame (10 ms), on
     /// the encoder's thread.
-    pub fn new(sink: impl FnMut(&gst::Buffer) + Send + 'static) -> Result<Self> {
+    pub fn new(sink: impl FnMut(&OpusFrame) + Send + 'static) -> Result<Self> {
         let encoder = opus::Encoder::new(BITRATE)?;
         let shared = Arc::new(Mutex::new(Shared {
             queue: VecDeque::new(),
@@ -170,7 +174,7 @@ fn run(
     mut encoder: opus::Encoder,
     shared: &Mutex<Shared>,
     stop: &AtomicBool,
-    mut sink: impl FnMut(&gst::Buffer),
+    mut sink: impl FnMut(&OpusFrame),
 ) {
     let start = Instant::now();
     let mut count: u64 = 0;
@@ -186,17 +190,10 @@ fn run(
         }
         let samples = next_frame(shared);
         match encoder.encode(&samples) {
-            Ok(packet) => {
-                let mut buffer = gst::Buffer::from_slice(packet);
-                {
-                    let buffer = buffer.get_mut().expect("a buffer just made");
-                    buffer.set_pts(gst::ClockTime::from_nseconds(
-                        count * FRAME.as_nanos() as u64,
-                    ));
-                    buffer.set_duration(gst::ClockTime::from_nseconds(FRAME.as_nanos() as u64));
-                }
-                sink(&buffer);
-            }
+            Ok(packet) => sink(&OpusFrame {
+                data: packet.into(),
+                pts: Duration::from_nanos(count * FRAME.as_nanos() as u64),
+            }),
             Err(error) => warn!(%error, "sound not encoded"),
         }
         count += 1;
@@ -249,10 +246,9 @@ mod tests {
     /// Frames come out every 10 ms, stamped by their count, with or without the guest.
     #[test]
     fn frames_flow_without_the_guest() {
-        gst::init().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
-        let encoder = AudioEncoder::new(move |frame: &gst::Buffer| {
-            let _ = tx.send(frame.pts());
+        let encoder = AudioEncoder::new(move |frame: &OpusFrame| {
+            let _ = tx.send(frame.pts);
         })
         .unwrap();
         let stamps: Vec<_> = (0..5)
@@ -260,14 +256,13 @@ mod tests {
             .collect();
         drop(encoder);
         for (i, stamp) in stamps.into_iter().enumerate() {
-            assert_eq!(stamp, Some(gst::ClockTime::from_mseconds(10 * i as u64)));
+            assert_eq!(stamp, Duration::from_millis(10 * i as u64));
         }
     }
 
     #[test]
     fn formats_without_sound_are_refused() {
-        gst::init().unwrap();
-        let encoder = AudioEncoder::new(|_: &gst::Buffer| {}).unwrap();
+        let encoder = AudioEncoder::new(|_: &OpusFrame| {}).unwrap();
         let pcm = Pcm {
             bits: 16,
             signed: true,

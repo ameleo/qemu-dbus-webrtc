@@ -21,7 +21,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use gstreamer as gst;
 use str0m::bwe::{Bitrate, BweKind};
 use str0m::change::{SdpAnswer, SdpPendingOffer};
 use str0m::channel::ChannelId;
@@ -36,10 +35,14 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use qdw_protocol::MAX_CAMERA_STREAMS;
-use qdw_video::encode::Codec;
+use qdw_video::encode::{Codec, HevcFmtp};
 
 use crate::audio::Mic;
-use crate::transport::{Bitrates, Channel, MAX_SCREENS, Signal, Start, Viewer, Viewers, leave};
+use crate::transport::{
+    Bitrates, Channel, MAX_SCREENS, Signal, SoundViewers, Start, VideoViewers, Viewer, leave,
+};
+use qdw_audio::OpusFrame;
+use qdw_video::encode::EncodedFrame;
 
 /// The payload types: the screens' video (all its tracks in the same codec), its
 /// retransmissions, the clients' cameras in H.264 and theirs, the sound. str0m tells the tracks
@@ -67,13 +70,13 @@ enum Command {
     Video {
         screen: usize,
         at: Instant,
-        data: Vec<u8>,
+        data: Arc<[u8]>,
     },
-    /// An Opus frame of the guest's sound, stamped by the encoder, in nanoseconds.
+    /// An Opus frame of the guest's sound, stamped by the encoder.
     Audio {
         at: Instant,
-        pts: u64,
-        data: Vec<u8>,
+        pts: Duration,
+        data: Arc<[u8]>,
     },
     Send(Channel, Vec<u8>),
     Answer(String),
@@ -93,8 +96,8 @@ pub struct Peer {
     task: tokio::task::JoinHandle<()>,
     /// The viewers of each screen's encoder and of the sound, where the session is the viewer
     /// `id`.
-    viewers: Vec<Viewers>,
-    audio_viewers: Viewers,
+    viewers: Vec<VideoViewers>,
+    audio_viewers: SoundViewers,
     id: u64,
     /// The client paused the video: it is out of the viewers.
     paused: Arc<AtomicBool>,
@@ -137,13 +140,14 @@ impl Peer {
         codecs.add_h264(CAMERA_PT.into(), Some(CAMERA_RTX_PT.into()), true, 0x42e01f);
         match codec {
             Codec::Hevc => {
-                let profile = match (full_chroma, ten_bits) {
-                    (false, false) => 1,
-                    (false, true) => 2,
-                    (true, _) => 4,
-                };
-                // Level 6.2, the highest the encoder reaches: see `Codec::rtp_fmtp`.
-                codecs.add_h265(VIDEO_PT.into(), Some(VIDEO_RTX_PT.into()), profile, 0, 186);
+                let fmtp = Codec::hevc_fmtp(full_chroma, ten_bits);
+                codecs.add_h265(
+                    VIDEO_PT.into(),
+                    Some(VIDEO_RTX_PT.into()),
+                    fmtp.profile_id,
+                    0,
+                    fmtp.level_id,
+                );
             }
             Codec::Av1 => codecs.add_config(
                 VIDEO_PT.into(),
@@ -242,10 +246,11 @@ impl Peer {
             .map(|&channel| (change.add_channel(channel.label().to_owned()), channel))
             .collect();
         let (offer, pending) = change.apply().context("no offer")?;
-        let offer = with_fmtp_extras(
-            offer.to_sdp_string(),
-            codec.rtp_fmtp(full_chroma, ten_bits).as_deref(),
-        );
+        let offer = offer.to_sdp_string();
+        let offer = match codec {
+            Codec::Hevc => with_hevc_fmtp(offer, Codec::hevc_fmtp(full_chroma, ten_bits)),
+            _ => offer,
+        };
         let _ = signals.send(Signal::Offer(offer));
 
         let (commands_tx, commands) = mpsc::unbounded_channel();
@@ -296,7 +301,7 @@ impl Peer {
             let _ = signals.send(Signal::Closed);
         });
 
-        let id = Viewer::next_id();
+        let id = crate::transport::viewer_id();
         for (screen, viewers) in viewers.iter().enumerate().take(screens) {
             viewers
                 .lock()
@@ -362,7 +367,8 @@ impl Peer {
         Ok(())
     }
 
-    pub fn add_ice_candidate(&self, candidate: &str) {
+    /// A candidate of the client: str0m takes it for the whole bundle, whatever its m-line.
+    pub fn add_ice_candidate(&self, _mline_index: u32, candidate: &str) {
         let _ = self.commands.send(Command::Candidate(candidate.to_owned()));
     }
 }
@@ -378,30 +384,27 @@ impl Drop for Peer {
 }
 
 /// A viewer of a screen's video, for the session's task.
-fn video_viewer(id: u64, screen: usize, commands: mpsc::UnboundedSender<Command>) -> Viewer {
-    Viewer::new(id, move |frame: &gst::Buffer| {
-        let at = Instant::now();
-        if let Ok(map) = frame.map_readable() {
-            let _ = commands.send(Command::Video {
-                screen,
-                at,
-                data: map.to_vec(),
-            });
-        }
+fn video_viewer(
+    id: u64,
+    screen: usize,
+    commands: mpsc::UnboundedSender<Command>,
+) -> Viewer<EncodedFrame> {
+    Viewer::new(id, move |frame: &EncodedFrame| {
+        let _ = commands.send(Command::Video {
+            screen,
+            at: Instant::now(),
+            data: frame.data.clone(),
+        });
     })
 }
 
 /// A viewer of the guest's sound, for the session's task.
-fn audio_viewer(id: u64, commands: mpsc::UnboundedSender<Command>) -> Viewer {
-    Viewer::new(id, move |frame: &gst::Buffer| {
-        let at = Instant::now();
-        let (Some(pts), Ok(map)) = (frame.pts(), frame.map_readable()) else {
-            return;
-        };
+fn audio_viewer(id: u64, commands: mpsc::UnboundedSender<Command>) -> Viewer<OpusFrame> {
+    Viewer::new(id, move |frame: &OpusFrame| {
         let _ = commands.send(Command::Audio {
-            at,
-            pts: pts.nseconds(),
-            data: map.to_vec(),
+            at: Instant::now(),
+            pts: frame.pts,
+            data: frame.data.clone(),
         });
     })
 }
@@ -422,26 +425,17 @@ fn host_addresses() -> Result<Vec<IpAddr>> {
         .collect())
 }
 
-/// The HEVC fmtp parameters str0m does not write (profile-compatibility-indicator,
-/// interop-constraints: see `Codec::rtp_fmtp`), added to the video's fmtp line of the offer.
-fn with_fmtp_extras(sdp: String, fmtp: Option<&str>) -> String {
-    let Some(fmtp) = fmtp else { return sdp };
-    let extras: String = fmtp
-        .split(',')
-        .filter_map(|field| field.split_once('='))
-        .filter(|(key, _)| {
-            matches!(
-                key.trim(),
-                "profile-compatibility-indicator" | "interop-constraints"
-            )
-        })
-        .map(|(key, value)| format!(";{}={}", key.trim(), value.trim_start_matches("(string)")))
-        .collect();
+/// The video's fmtp line of the offer, for HEVC: with the parameters str0m does not write
+/// (profile-compatibility-indicator, interop-constraints: see `Codec::hevc_fmtp`).
+fn with_hevc_fmtp(sdp: String, fmtp: HevcFmtp) -> String {
     let prefix = format!("a=fmtp:{VIDEO_PT} ");
     sdp.split_inclusive("\r\n")
-        .map(|line| match line.strip_suffix("\r\n") {
-            Some(content) if content.starts_with(&prefix) => format!("{content}{extras}\r\n"),
-            _ => line.to_owned(),
+        .map(|line| {
+            if line.starts_with(&prefix) {
+                format!("{prefix}{fmtp}\r\n")
+            } else {
+                line.to_owned()
+            }
         })
         .collect()
 }
@@ -618,7 +612,7 @@ impl State {
             }
             Command::Audio { at, pts, data } => {
                 let time = MediaTime::new(
-                    (u128::from(pts) * 48_000 / 1_000_000_000) as u64,
+                    (pts.as_nanos() * 48_000 / 1_000_000_000) as u64,
                     Frequency::FORTY_EIGHT_KHZ,
                 );
                 if let Some(writer) = self.rtc.writer(self.audio_mid)
@@ -882,13 +876,12 @@ mod tests {
         );
     }
 
-    /// The HEVC extras go on the video's fmtp line, and only there.
+    /// The HEVC parameters go on the video's fmtp line, and only there.
     #[test]
-    fn fmtp_extras() {
+    fn hevc_fmtp() {
         let sdp = "v=0\r\na=fmtp:96 profile-id=4;tier-flag=0;level-id=186\r\na=fmtp:104 x=1\r\n";
-        let fmtp = Codec::Hevc.rtp_fmtp(true, false);
         assert_eq!(
-            with_fmtp_extras(sdp.to_owned(), fmtp.as_deref()),
+            with_hevc_fmtp(sdp.to_owned(), Codec::hevc_fmtp(true, false)),
             "v=0\r\na=fmtp:96 profile-id=4;tier-flag=0;level-id=186;\
              profile-compatibility-indicator=08000000;interop-constraints=BE0800000000\r\n\
              a=fmtp:104 x=1\r\n"
@@ -927,8 +920,8 @@ mod tests {
                     codec,
                     full_chroma,
                     ten_bits,
-                    viewers: vec![Viewers::default()],
-                    audio_viewers: Viewers::default(),
+                    viewers: vec![VideoViewers::default()],
+                    audio_viewers: SoundViewers::default(),
                     mic: None,
                     bitrates: Bitrates {
                         min: 1000,
@@ -961,9 +954,8 @@ mod tests {
     /// session asks for at the start, the bandwidth estimate.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_client_connects() {
-        gst::init().unwrap();
-        let viewers = Viewers::default();
-        let audio_viewers = Viewers::default();
+        let viewers = VideoViewers::default();
+        let audio_viewers = SoundViewers::default();
         let (signals_tx, mut signals) = mpsc::unbounded_channel();
         let keyframes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let asked = keyframes.clone();
@@ -1006,7 +998,7 @@ mod tests {
             .accept_offer(str0m::change::SdpOffer::from_sdp_string(&offer).unwrap())
             .unwrap();
         peer.apply_answer(&answer.to_sdp_string()).unwrap();
-        peer.add_ice_candidate(&candidate.to_sdp_string());
+        peer.add_ice_candidate(0, &candidate.to_sdp_string());
 
         // Frames flow from the start: those before the connection are lost.
         let feeder = std::thread::spawn({
@@ -1016,12 +1008,15 @@ mod tests {
                     // A VP9 keyframe's first byte (frame marker, profile 0), then filler.
                     let mut frame = vec![0x82; 3000];
                     frame[1] = i as u8;
-                    crate::transport::fan_out(&viewers, &gst::Buffer::from_slice(frame));
-                    let mut sound = gst::Buffer::from_slice(vec![0xfc, 0xff, 0xfe]);
-                    sound
-                        .get_mut()
-                        .unwrap()
-                        .set_pts(gst::ClockTime::from_mseconds(10 * i));
+                    let frame = EncodedFrame {
+                        data: frame.into(),
+                        keyframe: true,
+                    };
+                    crate::transport::fan_out(&viewers, &frame);
+                    let sound = OpusFrame {
+                        data: vec![0xfc, 0xff, 0xfe].into(),
+                        pts: Duration::from_millis(10 * i),
+                    };
                     crate::transport::fan_out(&audio_viewers, &sound);
                     std::thread::sleep(Duration::from_millis(10));
                 }

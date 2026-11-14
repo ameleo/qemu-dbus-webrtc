@@ -41,14 +41,16 @@ libvirt, plain QEMU) starts and stops it.
   or a bitrate change comes with the very next frame and the stream says what its colours are.
   Up to 60 frames a second per screen: the encoders measure the frame rate the guest draws at,
   and spread the bitrate over it.
-- **Transport:** GStreamer `webrtcbin`, with congestion control (GCC) driving the encoder bitrate;
-  or, with `[webrtc] stack = "str0m"`, str0m (`peer.rs`), being tried to replace it: a task per
-  session owns its state and its UDP sockets (one host candidate per address of the host),
-  packetizes the frames, paces them to its GCC estimate (with probes), retransmits what the
-  client misses (NACK, RTX), carries the data channels and decodes the microphone's Opus.
-- **Transport, per viewer:** each viewer has its own `webrtcbin`, fed with the encoded frames
-  of the console it watches: one encoder per console, whatever the number of viewers. A viewer
-  that loses a frame asks for a keyframe (PLI), which goes back to the encoder.
+- **Transport:** str0m (`peer.rs`), WebRTC in Rust without a media framework, with congestion
+  control (GCC) driving the encoder bitrate. A task per session owns str0m's state and its UDP
+  sockets (one host candidate per address of the host, loopback aside), packetizes the frames,
+  paces them to its GCC estimate (with probes), retransmits what the client misses (NACK, RTX),
+  carries the data channels, decodes the microphone's Opus with libopus and relays the
+  cameras' H.264.
+- **Transport, per viewer:** each viewer has its own session, fed with the encoded frames of the
+  console it watches, shared without a copy: one encoder per console, whatever the number of
+  viewers. A viewer that loses a frame asks for a keyframe (PLI), which goes back to the
+  encoder.
 - **Pause:** a client whose window is hidden pauses its video (data channel `control`): it
   leaves the viewers its console's encoder feeds, and a console nobody watches is not encoded
   at all. The sound goes on. On resume, a keyframe brings the picture back at once.
@@ -85,16 +87,14 @@ congestion control, retransmission, jitter buffer, SCTP data channels), so a pro
 is seen in the other. Bitrate estimation runs on the sending side, in this server, whatever the
 client.
 
-Each connection estimates its bandwidth with Google Congestion Control (`rtpgccbwe`, from the
-client's transport-wide congestion control reports), which also paces its packets. The user's
+Each connection estimates its bandwidth with Google Congestion Control (str0m's, from the
+client's transport-wide congestion control reports, with probes when the desktop sends little),
+which also paces its packets. The user's
 estimate sets the bitrate of the video, which all viewers share, within 4 and 30 Mbit/s
 (`--bitrate`), starting at 10; each client gets its own estimate on the `control` channel,
 and, once a second, how long each screen's frames took on the server (`EncodeLatency`), which
 with its own figures gives the latency from the guest to its screen. The
-encoders take a new bitrate with the next frame, without a keyframe. A fix to GStreamer goes
-with it, to be offered upstream: `rtpgccbwe` holds its estimate when the sender uses less than
-two thirds of it (by default, it grows with no evidence until losses show it far above the
-link).
+encoders take a new bitrate with the next frame, without a keyframe.
 
 What differs is decoding: the native client brings its own decoders and can take what browsers
 may not (VP9 4:4:4). The codec is negotiated in SDP, from the best the client offers down to
@@ -119,9 +119,8 @@ among each other and their size in millimetres. The guest gets one screen per mo
 order, at its size and place (`SetUIInfo` with the offsets), and its other screens are turned
 off: the guest's desktop is arranged as the client's, and the pointer goes from one screen to
 the next as on the client. Each guest screen (a graphic console, by head, four at most) has its
-own encoder and its own video track, with its own payload type (96, 98, 100, 102), which is how
-webrtcbin and browsers tell the streams of a bundle apart; the offer gives the screens first,
-in order. The bitrate the user's bandwidth allows is shared among the screens that are on: a
+own encoder and its own video track, all in the same payload type, told apart by their mid; the
+offer gives the screens first, in order. The bitrate the user's bandwidth allows is shared among the screens that are on: a
 floor each, the rest by area. The pointer goes through the guest agent (`Mouse1`), which places
 it on the head the client names; the QEMU tablet knows a single surface, and serves the first
 screen when there is no agent. The guest pointer's shape names its screen, and the client shows

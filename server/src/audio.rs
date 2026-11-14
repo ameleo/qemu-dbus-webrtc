@@ -14,7 +14,7 @@ use qdw_qemu::audio::{self, AudioEvent, Format, Recorder};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
-use crate::transport::{self, Viewers};
+use crate::transport::{self, SoundViewers};
 
 /// How long a viewer keeps the microphone after it stopped sending sound.
 const SPEAKER_HOLD: Duration = Duration::from_secs(1);
@@ -41,7 +41,7 @@ impl Drop for Audio {
 
 /// Start encoding the guest's sound for `viewers`. Without sound on the VM, the viewers get
 /// silence.
-pub async fn start(vm: &zbus::Connection, viewers: Viewers) -> Result<Audio> {
+pub async fn start(vm: &zbus::Connection, viewers: SoundViewers) -> Result<Audio> {
     let encoder = AudioEncoder::new(move |frame| transport::fan_out(&viewers, frame))?;
     let (events_tx, mut events) = mpsc::unbounded_channel();
     let listener = match audio::listen(vm, events_tx).await {

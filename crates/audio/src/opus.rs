@@ -69,8 +69,7 @@ impl Encoder {
         let encoder = Self(encoder);
         for (request, value) in [
             (sys::OPUS_SET_BITRATE_REQUEST, bitrate as c_int),
-            // A constant bitrate, as before with GStreamer's opusenc: a steady share of the
-            // connection.
+            // A constant bitrate: a steady share of the connection.
             (sys::OPUS_SET_VBR_REQUEST, 0),
         ] {
             // SAFETY: both requests take an opus_int32, which is a C int here.

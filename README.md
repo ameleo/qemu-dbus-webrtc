@@ -78,13 +78,10 @@ Coming next: automatic logon to the guest, and single sign-on (OpenBao, OIDC).
 ## Running it
 
 It needs libva with the GPU's VA driver (Intel's `iHD`, or Mesa's for AMD) and libvpx for the
-video, libopus for the sound; GStreamer 1.26 for the transport (`webrtcbin`, and `rtpgccbwe`,
-`rtpvp9pay2` of gst-plugins-rs; it also decodes the microphone's Opus for now);
-libvirt-dbus for libvirt's VMs; and VMs started with `-display dbus` (libvirt:
-`<graphics type='dbus'/>`). Building it also needs the development files of libva, libvpx and
-libopus, and libclang, which generates the bindings to them. A fix to
-GStreamer, to be offered upstream, makes the congestion control smoother: as released,
-`rtpgccbwe` raises its estimate far above the link while the desktop sends little.
+video, libopus for the sound; libvirt-dbus for libvirt's VMs; and VMs started with
+`-display dbus` (libvirt: `<graphics type='dbus'/>`). WebRTC is in Rust (str0m), without a
+media framework. Building it also needs the development files of libva, libvpx and libopus,
+and libclang, which generates the bindings to them.
 One server serves every VM of its host. It finds them through their VM manager: libvirt (the
 domains with `<graphics type='dbus'/>`, through libvirt-dbus, which also lets it start a VM
 that is off), Proxmox VE (not tried yet), or VMs given by hand. Build it with Cargo and start
@@ -129,7 +126,7 @@ file), and VMs by hand: `--domain <libvirt domain>`, `--dbus <address>`, `--qmp 
 ## Design
 
 See [ARCHITECTURE.md](ARCHITECTURE.md): video encoded straight through VA-API (or libvpx on the
-CPU), WebRTC through GStreamer `webrtcbin`, royalty-free AV1 by default and VP9 4:4:4 for sharp
+CPU), WebRTC through str0m, royalty-free AV1 by default and VP9 4:4:4 for sharp
 coloured text, and the device redirection formats of the Remote
 Desktop Protocol carried over WebRTC data channels.
 

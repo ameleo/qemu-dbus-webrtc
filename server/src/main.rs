@@ -22,7 +22,6 @@ mod peer;
 mod pointer;
 mod printers;
 mod providers;
-mod session;
 mod tools;
 mod transport;
 mod vm;
@@ -48,7 +47,6 @@ async fn main() -> Result<()> {
         )
         .init();
     if std::env::args().nth(1).as_deref() == Some("--codecs") {
-        gstreamer::init()?;
         print!("{}", gpus::report(&gpus::gpus()));
         return Ok(());
     }
@@ -57,7 +55,6 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     let mut config = config::parse_args()?;
-    gstreamer::init()?;
     let found = gpus::gpus();
     let vm = &mut config.vm;
     // Without a GPU, encode on the CPU: VP9, unless another codec was asked for.

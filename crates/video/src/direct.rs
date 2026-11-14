@@ -15,11 +15,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
 use anyhow::{Context, Result, anyhow};
-use gstreamer as gst;
 use qdw_hw_encoder as hw;
 use tracing::{info, warn};
 
-use crate::encode::{Codec, Counters, PixelFormat, Settings, Sink};
+use crate::encode::{Codec, Counters, EncodedFrame, PixelFormat, Settings, Sink};
 
 /// The most frames a second a console sends. The encoders measure how many really come, and
 /// spread the bitrate over them.
@@ -401,14 +400,11 @@ fn run(mut engine: Engine, shared: &Shared, sink: &Sink, counters: &Counters) {
         last_error = None;
         let size = packet.data.len() as u64;
         let keyframe = packet.keyframe;
-        let mut buffer = gst::Buffer::from_slice(packet.data);
-        if !keyframe {
-            buffer
-                .get_mut()
-                .expect("a buffer just made")
-                .set_flags(gst::BufferFlags::DELTA_UNIT);
-        }
-        (sink.lock().unwrap())(&buffer);
+        let frame = EncodedFrame {
+            data: packet.data.into(),
+            keyframe,
+        };
+        (sink.lock().unwrap())(&frame);
         // From the guest's drawing to the frame handed to the viewers' pipelines.
         let latency = picture.asked.elapsed().as_micros() as u64;
         counters.encoded.fetch_add(1, Ordering::Relaxed);

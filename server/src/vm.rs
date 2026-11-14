@@ -11,13 +11,12 @@ use anyhow::{Context, Result, bail};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{Instrument, debug, info, info_span, warn};
 
-use gstreamer as gst;
 use qdw_qemu::display::{self, Attach, DisplayEvent, VmProxy};
-use qdw_video::encode::{Encoder, Settings};
+use qdw_video::encode::{EncodedFrame, Encoder, Settings};
 use qdw_video::record;
 
 use crate::config::VmConfig;
-use crate::transport::{self, Viewers};
+use crate::transport::{self, SoundViewers, VideoViewers};
 use crate::web::{self, Request};
 use crate::{agent, audio, cameras, clipboard, copied, drives, input, layout, pointer, printers};
 
@@ -61,8 +60,8 @@ const RATE_INTERVAL: Duration = Duration::from_secs(5);
 fn stream_sink(
     args: &VmConfig,
     console: u32,
-    viewers: Option<Viewers>,
-) -> Result<impl FnMut(&gst::Buffer) + Send + 'static> {
+    viewers: Option<VideoViewers>,
+) -> Result<impl FnMut(&EncodedFrame) + Send + 'static> {
     let mut recorder = match &args.record {
         Some(prefix) => {
             let path = format!("{prefix}-{console}.{}", args.settings.codec.extension());
@@ -74,19 +73,15 @@ fn stream_sink(
         }
         None => None,
     };
-    Ok(move |frame: &gst::Buffer| {
+    Ok(move |frame: &EncodedFrame| {
         if let Some(viewers) = &viewers {
             transport::fan_out(viewers, frame);
         }
-        if let Some(r) = &mut recorder {
-            let written = frame
-                .map_readable()
-                .map_err(|e| std::io::Error::other(e.to_string()))
-                .and_then(|map| r.write(&map));
-            if let Err(e) = written {
-                warn!(console, error = %e, "recording stopped");
-                recorder = None;
-            }
+        if let Some(r) = &mut recorder
+            && let Err(e) = r.write(&frame.data)
+        {
+            warn!(console, error = %e, "recording stopped");
+            recorder = None;
         }
     })
 }
@@ -236,11 +231,11 @@ async fn start_in(
         .map(|&(head, console, _)| web::Screen {
             console,
             head,
-            viewers: Viewers::default(),
+            viewers: VideoViewers::default(),
         })
         .collect();
     info!(screens = ?screens.iter().map(|s| s.console).collect::<Vec<_>>(), "guest screens");
-    let viewers: HashMap<u32, Viewers> = screens
+    let viewers: HashMap<u32, VideoViewers> = screens
         .iter()
         .map(|s| (s.console, s.viewers.clone()))
         .collect();
@@ -253,7 +248,7 @@ async fn start_in(
     let first = screens[0].console;
     let (requests_tx, mut requests) = mpsc::unbounded_channel();
     // The guest's sound, encoded once for every viewer.
-    let audio_viewers = Viewers::default();
+    let audio_viewers = SoundViewers::default();
     let audio = audio::start(&vm_connection, audio_viewers.clone()).await?;
     let (pointer_tx, pointer_rx) =
         tokio::sync::watch::channel(vec![pointer::Pointer::default(); screens.len()]);
@@ -307,7 +302,6 @@ async fn start_in(
         layout: layout.clone(),
         user: Default::default(),
         bitrates: args.bitrates,
-        stack: args.stack,
         depths: Default::default(),
     };
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
@@ -853,7 +847,7 @@ enum Source<'a> {
 /// A console has a new framebuffer: encode it from now on, with a new encoder if it has none.
 #[allow(clippy::too_many_arguments)]
 fn scanout(
-    viewers: Option<Viewers>,
+    viewers: Option<VideoViewers>,
     args: &VmConfig,
     settings: &Settings,
     encoders: &mut HashMap<u32, Encoder>,
