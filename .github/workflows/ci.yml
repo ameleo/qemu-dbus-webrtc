@@ -15,11 +15,13 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - name: GStreamer development files
+      - name: GStreamer development files and plugins
         if: hashFiles('Cargo.toml') != ''
+        # The tests build real pipelines (sound, microphone, VP9 on the CPU, WebRTC): the
+        # plugins must be there, not only the development files.
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev libva-dev libclang-dev
+          sudo apt-get install -y --no-install-recommends libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev libva-dev libclang-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-nice
       - name: Format
         if: hashFiles('Cargo.toml') != ''
         run: cargo fmt --all -- --check
@@ -28,4 +30,5 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests
         if: hashFiles('Cargo.toml') != ''
-        run: cargo test --workspace
+        # Every crate's tests, even after one fails.
+        run: cargo test --workspace --no-fail-fast
