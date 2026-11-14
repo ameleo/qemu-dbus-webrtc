@@ -47,12 +47,6 @@ const BITRATE_DROP: f64 = 0.15;
 const OUTPUT_HEADROOM: f64 = 1.25;
 const OUTPUT_WINDOW: Duration = Duration::from_secs(1);
 
-/// At most this many frames a second per console. The VA encoders take a variable frame rate
-/// for 30 frames a second and give each frame a thirtieth of their bitrate: more frames would
-/// send more than the bitrate, beyond the bandwidth estimate.
-const MAX_FPS: u32 = 30;
-const FRAME_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / MAX_FPS as u64);
-
 /// How often the VM is asked whether it still runs: QEMU's listeners do not say when it goes.
 const ALIVE_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -343,7 +337,8 @@ async fn start_in(
     let mut sizes: HashMap<u32, (u32, u32)> = HashMap::new();
     // The framebuffers QEMU copies in its calls rather than share, by console.
     let mut copies: HashMap<u32, copied::Copied> = HashMap::new();
-    // An update that comes sooner than `FRAME_INTERVAL` after the last frame is not dropped:
+    // An update that comes sooner than the encoder's frame interval after the last frame is
+    // not dropped:
     // the console waits in `due`, and its latest framebuffer is encoded as soon as the frame
     // rate allows, so the last picture always goes out.
     let mut due: std::collections::HashSet<u32> = std::collections::HashSet::new();
@@ -365,7 +360,9 @@ async fn start_in(
             .iter()
             .map(|console| {
                 encoders.get(console).map_or(Duration::ZERO, |encoder| {
-                    FRAME_INTERVAL.saturating_sub(encoder.since_last_frame())
+                    encoder
+                        .frame_interval()
+                        .saturating_sub(encoder.since_last_frame())
                 })
             })
             .min();
@@ -710,7 +707,7 @@ async fn start_in(
             if wanted(console)
                 && let Some(encoder) = encoders.get(&console)
             {
-                if encoder.since_last_frame() < FRAME_INTERVAL {
+                if encoder.since_last_frame() < encoder.frame_interval() {
                     due.insert(console);
                 } else if let Err(e) = encoder.frame() {
                     warn!(console, error = %e, "frame not encoded");

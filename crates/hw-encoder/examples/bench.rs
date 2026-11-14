@@ -4,10 +4,11 @@
 //! and what came out.
 //!
 //! ```text
-//! bench [width height [frames [420|444 [8|10 [kbit/s [output.h265 [frames.bgrx]]]]]]]
+//! bench [width height [frames [420|444 [8|10 [kbit/s [output.h265 [frames.bgrx [fps]]]]]]]]
 //! ```
 //!
-//! The bitrate is halved for the third quarter of the frames. `frames.bgrx` gets the frames
+//! The frames come at `fps` a second (30 by default), as a desktop's would; the bitrate is
+//! halved for the third quarter of them. `frames.bgrx` gets the frames
 //! as they went in, to compare with the decoded ones.
 
 use std::time::{Duration, Instant};
@@ -63,9 +64,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ten_bits: number(4, 8) == 10,
         ..Settings::new(Codec::Hevc, bitrate)
     };
+    let fps = number(8, 30).max(1);
     let mut encoder = Encoder::open(None, settings)?;
     println!("{}", encoder.driver());
-    println!("{width}x{height}, {settings:?}");
+    println!("{width}x{height}, {fps} frames a second, {settings:?}");
 
     let rows = height * 3;
     let page = page(width, rows);
@@ -73,6 +75,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut output = Vec::new();
     let mut source = Vec::new();
     let mut quarters = [(Duration::ZERO, 0usize); 4];
+    let begin = Instant::now();
     for index in 0..frames {
         let quarter = (index * 4 / frames) as usize;
         if index == frames / 2 {
@@ -93,9 +96,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             height,
             stride,
         };
-        if args.len() > 7 {
+        if args.get(7).is_some_and(|path| !path.is_empty()) {
             source.extend_from_slice(frame.pixels);
         }
+        let due = begin + Duration::from_secs_f64(f64::from(index) / f64::from(fps));
+        std::thread::sleep(due.saturating_duration_since(Instant::now()));
         let start = Instant::now();
         let packet = encoder.encode(&frame, false)?;
         quarters[quarter].0 += start.elapsed();
@@ -108,17 +113,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (quarter, (time, bytes)) in quarters.iter().enumerate() {
         let count = (frames / 4).max(1);
         println!(
-            "quarter {}: {:.2} ms a frame, {:.0} kbit/s at 30 frames a second",
+            "quarter {}: {:.2} ms a frame, {:.0} kbit/s at {fps} frames a second",
             quarter + 1,
             time.as_secs_f64() * 1000.0 / f64::from(count),
-            *bytes as f64 * 8.0 * 30.0 / f64::from(count) / 1000.0,
+            *bytes as f64 * 8.0 * f64::from(fps) / f64::from(count) / 1000.0,
         );
     }
-    if let Some(path) = args.get(6) {
+    if let Some(path) = args.get(6).filter(|path| !path.is_empty()) {
         std::fs::write(path, &output)?;
         println!("{path}: {} bytes", output.len());
     }
-    if let Some(path) = args.get(7) {
+    if let Some(path) = args.get(7).filter(|path| !path.is_empty()) {
         std::fs::write(path, &source)?;
     }
     Ok(())

@@ -212,6 +212,7 @@ impl Hevc {
 
     /// Encode the picture drawn in the input surface; as a keyframe when asked.
     pub fn encode(&mut self, keyframe: bool) -> Result<Packet> {
+        self.rate.frame();
         let order = match self.order {
             Some(order) if !keyframe && order < MAX_ORDER => order,
             _ => 0,
@@ -227,7 +228,7 @@ impl Hevc {
         self.context.render(&self.input, &buffers)?;
         self.input.sync()?;
         let data = self.coded.read_coded()?;
-        self.rate.told();
+        self.rate.told(picture.idr);
         self.current ^= 1;
         self.order = Some(order + 1);
         Ok(Packet {

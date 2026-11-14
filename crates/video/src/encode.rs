@@ -342,6 +342,9 @@ const LATEST: &str = "leaky-type=downstream max-buffers=1";
 /// three, 128 ms with one, about the time the encoder takes for a frame).
 const QUEUE: &str = "queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream";
 
+/// The most frames a second a pipeline encodes: see [`Encoder::frame_interval`].
+const PIPELINE_FRAMERATE: u32 = 30;
+
 /// Where the encoded frames go.
 pub(crate) type Sink = Arc<std::sync::Mutex<Box<dyn FnMut(&gst::Buffer) + Send>>>;
 
@@ -698,6 +701,17 @@ impl Encoder {
         }
         self.last_frame.set(std::time::Instant::now());
         Ok(())
+    }
+
+    /// The shortest time between two frames. The VA elements of GStreamer spread their
+    /// bitrate over 30 frames a second whatever comes: more frames would send more than the
+    /// bitrate. The GPU's own API measures the frame rate, and takes up to 60.
+    pub fn frame_interval(&self) -> std::time::Duration {
+        let fps = match self.backend {
+            Backend::Pipeline { .. } => PIPELINE_FRAMERATE,
+            Backend::Direct(_) => crate::direct::FRAMERATE,
+        };
+        std::time::Duration::from_nanos(1_000_000_000 / u64::from(fps))
     }
 
     /// How long ago the last frame went into the encoder.

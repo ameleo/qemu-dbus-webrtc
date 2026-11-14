@@ -225,6 +225,7 @@ impl Av1 {
 
     /// Encode the frame drawn in the input surface; as a key frame when asked.
     pub fn encode(&mut self, keyframe: bool) -> Result<Packet> {
+        self.rate.frame();
         let count = match self.count {
             Some(count) if !keyframe => count,
             _ => 0,
@@ -243,7 +244,7 @@ impl Av1 {
         self.context.render(&self.input, &buffers)?;
         self.input.sync()?;
         let coded = self.coded.read_coded()?;
-        self.rate.told();
+        self.rate.told(frame.key);
         self.current ^= 1;
         self.count = Some(count.wrapping_add(1).max(1));
         // A temporal unit: the delimiter, then what the encoder made of the headers and the

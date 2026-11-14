@@ -23,9 +23,9 @@ use tracing::{info, warn};
 
 use crate::encode::{Codec, Counters, Settings, Sink};
 
-/// The most frames a second the stream is said to carry, and what the rate control spreads
-/// the bitrate over: what the VA encoders of GStreamer assume as well.
-const FRAMERATE: u32 = 30;
+/// The most frames a second a console sends. The encoder measures how many really come, and
+/// spreads the bitrate over them.
+pub(crate) const FRAMERATE: u32 = 60;
 
 /// A framebuffer in memory shared with QEMU, mapped in this process for as long as it is the
 /// console's.
