@@ -120,8 +120,8 @@ order, at its size and place (`SetUIInfo` with the offsets), and its other scree
 off: the guest's desktop is arranged as the client's, and the pointer goes from one screen to
 the next as on the client. Each guest screen (a graphic console, by head, four at most) has its
 own encoder and its own video track, all in the same payload type, told apart by their mid; the
-offer gives the screens first, in order. The sound has a stream of its own (its msid), so that
-the client plays it as soon as it comes instead of holding it back to the video's pace. The
+offer gives the screens first, in order. The sound is in the screens' stream (their msid): the
+client keeps it in step with the video, as a video call in the guest needs. The
 bitrate the user's bandwidth allows is shared among the screens that are on and that the
 client shows: a screen the guest has not drawn on for 2 s keeps 500 kbit/s, and the screens
 in use share the rest by area (all of them by area when none is in use). A screen past the
