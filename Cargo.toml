@@ -12,6 +12,7 @@ publish = false
 
 [workspace.dependencies]
 qdw-audio = { path = "crates/audio" }
+qdw-hw-encoder = { path = "crates/hw-encoder" }
 qdw-protocol = { path = "crates/protocol" }
 qdw-qemu = { path = "crates/qemu" }
 qdw-video = { path = "crates/video" }
@@ -28,11 +29,13 @@ gstreamer-sdp = "0.24"
 gstreamer-video = "0.24"
 gstreamer-webrtc = "0.24"
 base64 = "0.22"
+bindgen = "0.72"
 futures-util = "0.3"
 instant-acme = { version = "0.8", default-features = false, features = ["ring", "hyper-rustls", "rcgen"] }
 prost = "0.14"
 prost-build = "0.14"
 protox = "0.10"
+pkg-config = "0.3"
 ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rpassword = "7"

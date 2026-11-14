@@ -1,0 +1,13 @@
+[package]
+name = "qdw-hw-encoder"
+description = "Low-latency hardware video encoding of a desktop, straight on the GPU's own API"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[build-dependencies]
+bindgen.workspace = true
+pkg-config.workspace = true

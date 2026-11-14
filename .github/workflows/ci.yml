@@ -19,7 +19,7 @@ jobs:
         if: hashFiles('Cargo.toml') != ''
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev
+          sudo apt-get install -y --no-install-recommends libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev libva-dev libclang-dev
       - name: Format
         if: hashFiles('Cargo.toml') != ''
         run: cargo fmt --all -- --check

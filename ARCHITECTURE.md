@@ -61,6 +61,7 @@ libvirt, plain QEMU) starts and stops it.
 | `crates/protocol` | `qdw-protocol` | the `.proto` file and the Rust types generated from it |
 | `crates/qemu` | `qdw-qemu` | attachment to QEMU: QMP, the D-Bus display and sound, the guest agent |
 | `crates/video` | `qdw-video` | hardware encoding of a framebuffer, recording |
+| `crates/hw-encoder` | `qdw-hw-encoder` | encoding on the GPU's own API (VA-API), with the codecs' headers written from their standards |
 | `crates/audio` | `qdw-audio` | Opus encoding of the guest's sound |
 | `server` | `qemu-dbus-webrtc` | the server: the VMs and their providers (`providers.rs`, `libvirt.rs`, `vms.rs`), a VM's display loop (`vm.rs`), viewer sessions, signalling, the browser page |
 
