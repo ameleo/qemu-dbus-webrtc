@@ -19,7 +19,7 @@ use qdw_protocol::v1::{
     CameraAdded, CameraControl, CameraControlValue, CameraFormat, CameraMessage, CameraStart,
     CameraStop, camera_message::Message,
 };
-use qdw_qemu::agent::{CameraProxy, camera};
+use qdw_qemu::agent::{CameraProxy, camera, camera_control};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -94,7 +94,7 @@ struct Camera {
     client_id: u32,
     name: String,
     formats: Vec<(u32, u32, u32, u32)>,
-    controls: Vec<camera::Control>,
+    controls: Vec<camera_control::Control>,
     calls: mpsc::UnboundedSender<CameraCall>,
     /// To tell the viewer what became of its camera, again when the agent comes back.
     outgoing: mpsc::UnboundedSender<Vec<u8>>,
@@ -280,7 +280,7 @@ fn format(f: &CameraFormat) -> Option<(u32, u32, u32, u32)> {
 }
 
 /// A client's control as the agent takes it, if its numbers fit.
-fn control(c: &CameraControl) -> Option<camera::Control> {
+fn control(c: &CameraControl) -> Option<camera_control::Control> {
     Some((
         u8::try_from(c.set).ok()?,
         u8::try_from(c.property).ok()?,
@@ -443,7 +443,7 @@ impl ViewerCameras {
             .controls
             .iter()
             .filter_map(control)
-            .take(camera::MAX_CONTROLS)
+            .take(camera_control::MAX_CONTROLS)
             .collect();
         if formats.len() != announce.formats.len() || formats.is_empty() {
             let why = "a format the guest does not take (even sizes up to 3840x2160)";
@@ -468,7 +468,7 @@ impl ViewerCameras {
                 .any(|c| c.viewer == self.id && c.client_id == client_id);
             if announced {
                 Err("this camera id is announced already")
-            } else if cameras.len() >= camera::MAX_CAMERAS {
+            } else if cameras.len() >= camera::MAX_CAMERAS as usize {
                 Err("too many cameras")
             } else {
                 let id = self.cameras.next_id.fetch_add(1, Ordering::Relaxed);

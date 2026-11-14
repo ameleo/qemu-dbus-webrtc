@@ -302,7 +302,7 @@ impl ViewerDrives {
                 .any(|d| d.viewer == self.id && d.client_id == client_id);
             if announced {
                 Err("this drive id is announced already")
-            } else if drives.len() >= drive::MAX_DRIVES {
+            } else if drives.len() >= drive::MAX_DRIVES as usize {
                 Err("too many drives")
             } else {
                 let id = self.drives.next_id.fetch_add(1, Ordering::Relaxed);
@@ -373,7 +373,7 @@ impl ViewerDrives {
 
 /// `fr.ameleo.Host.Drive1`: the guest's file operations on the client drives. Each answers the
 /// client's NTSTATUS first; a D-Bus error means the client could not be asked.
-struct HostDrive {
+pub(crate) struct HostDrive {
     drives: Arc<Drives>,
 }
 
@@ -614,12 +614,15 @@ mod tests {
         let drives = Drives::new();
         let (mut viewer, _follow) = drives.viewer();
         let (mut other, mut follow) = drives.viewer();
-        for id in 0..drive::MAX_DRIVES as u32 {
+        for id in 0..drive::MAX_DRIVES {
             viewer.announce(id, format!("d{id}"), String::new());
         }
         viewer.announce(0, "again".into(), String::new());
         other.announce(0, "late".into(), String::new());
-        assert_eq!(drives.drives.lock().unwrap().len(), drive::MAX_DRIVES);
+        assert_eq!(
+            drives.drives.lock().unwrap().len(),
+            drive::MAX_DRIVES as usize
+        );
         // The refusal reaches the viewer that announced; the guest got no more drives.
         let refused = follow.outgoing.recv().await.unwrap();
         let refused = qdw_protocol::drive::Reassembler::default()

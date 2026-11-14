@@ -10,6 +10,7 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+ameleo-display-protocol.workspace = true
 futures-util.workspace = true
 rustix = { workspace = true, features = ["net"] }
 serde_json.workspace = true

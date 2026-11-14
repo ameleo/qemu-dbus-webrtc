@@ -47,6 +47,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ameleo-display-protocol"
+version = "0.1.0"
+source = "git+https://github.com/ameleo/ameleo-display-protocol?tag=v0.1.0#16cc7ac783a1dc5bf6543b483077a9e6420ddf9f"
+dependencies = [
+ "zbus",
+]
+
+[[package]]
 name = "anyhow"
 version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2026,6 +2034,7 @@ dependencies = [
 name = "qdw-qemu"
 version = "0.1.1"
 dependencies = [
+ "ameleo-display-protocol",
  "anyhow",
  "futures-util",
  "rustix",

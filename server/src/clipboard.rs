@@ -847,6 +847,24 @@ fn answer(id: u32, data: Option<(String, Vec<u8>)>) -> Outgoing {
 mod tests {
     use super::*;
 
+    /// The interfaces the server serves to the agent have the names of the agent's contract:
+    /// zbus takes them as literals, which could drift from `ameleo-display-protocol`.
+    #[test]
+    fn host_interfaces_are_the_contract_s() {
+        use qdw_qemu::agent::iface;
+        use zbus::object_server::Interface;
+        assert_eq!(HostClipboard::name().as_str(), iface::HOST_CLIPBOARD);
+        assert_eq!(
+            HostFileClipboard::name().as_str(),
+            iface::HOST_FILE_CLIPBOARD
+        );
+        assert_eq!(crate::drives::HostDrive::name().as_str(), iface::HOST_DRIVE);
+        assert_eq!(
+            crate::printers::HostPrinter::name().as_str(),
+            iface::HOST_PRINTER
+        );
+    }
+
     #[test]
     fn chunking() {
         let pieces = |n: usize| {

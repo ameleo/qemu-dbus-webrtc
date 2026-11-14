@@ -18,6 +18,8 @@ qdw-qemu = { path = "crates/qemu" }
 qdw-video = { path = "crates/video" }
 argon2 = { version = "0.5", features = ["std"] }
 anyhow = "1"
+# The D-Bus contract of the guest agent, shared with it.
+ameleo-display-protocol = { git = "https://github.com/ameleo/ameleo-display-protocol", tag = "v0.1.0" }
 axum = { version = "0.8", features = ["ws"] }
 # TLS with ring: no C toolchain beyond what ring itself needs.
 axum-server = { version = "0.9", default-features = false, features = ["tls-rustls-no-provider"] }

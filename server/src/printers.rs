@@ -379,7 +379,7 @@ impl ViewerPrinters {
                 .any(|p| p.viewer == self.id && p.client_id == client_id);
             if announced {
                 Err("this printer id is announced already")
-            } else if printers.len() >= printer::MAX_PRINTERS {
+            } else if printers.len() >= printer::MAX_PRINTERS as usize {
                 Err("too many printers")
             } else {
                 let id = self.printers.next_id.fetch_add(1, Ordering::Relaxed);
@@ -447,7 +447,7 @@ impl ViewerPrinters {
 
 /// `fr.ameleo.Host.Printer1`: the guest's jobs on the client printers. A D-Bus error means the
 /// client could not take the job.
-struct HostPrinter {
+pub(crate) struct HostPrinter {
     printers: Arc<Printers>,
 }
 
@@ -645,19 +645,19 @@ mod tests {
         let announce = |viewer: &mut ViewerPrinters, id| {
             viewer.announce(id, format!("p{id}"), false, String::new(), String::new())
         };
-        for id in 0..printer::MAX_PRINTERS as u32 {
+        for id in 0..printer::MAX_PRINTERS {
             announce(&mut viewer, id);
         }
         assert_eq!(
             printers.printers.lock().unwrap().len(),
-            printer::MAX_PRINTERS
+            printer::MAX_PRINTERS as usize
         );
         let (mut other, mut other_follow) = printers.viewer();
         announce(&mut other, 0);
         announce(&mut viewer, 0);
         assert_eq!(
             printers.printers.lock().unwrap().len(),
-            printer::MAX_PRINTERS
+            printer::MAX_PRINTERS as usize
         );
         let error = |bytes: Vec<u8>| {
             let message = Reassembler::default().push(&bytes).unwrap().unwrap();
