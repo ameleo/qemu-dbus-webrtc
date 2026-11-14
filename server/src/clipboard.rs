@@ -266,7 +266,7 @@ impl Clipboard {
             data: HashMap::new(),
             files: HashMap::new(),
             file_index: None,
-            locks: HashMap::new(),
+            locks: std::collections::HashSet::new(),
             next_request: 0,
             open: false,
         };
@@ -425,9 +425,10 @@ pub struct ViewerClipboard {
     /// For each file of the list the guest got from this viewer, its index in the viewer's;
     /// `None` until the guest got one.
     file_index: Option<Vec<u32>>,
-    /// The clipboard contents the guest locked on this viewer, by id, with the file index of
-    /// the list the guest had then: a later list does not change what a lock reads.
-    locks: HashMap<u32, Option<Vec<u32>>>,
+    /// The clipboard contents the guest locked on this viewer, by id. The guest locks when the
+    /// clipboard changes, before it gets the file list, as RDP clients do: the list it then gets
+    /// is the one its reads under the lock name.
+    locks: std::collections::HashSet<u32>,
     next_request: u32,
     /// Whether the clipboard data channel is open.
     open: bool,
@@ -490,11 +491,11 @@ impl ViewerClipboard {
             HostCall::File { mut request, reply } => {
                 // The guest's index, in the list it got, to the viewer's: a file of no list the
                 // guest got is none of the viewer's.
-                let index = match request.clip_data_id.and_then(|id| self.locks.get(&id)) {
-                    Some(locked) => locked.as_ref(),
-                    None => self.file_index.as_ref(),
-                };
-                match index.and_then(|kept| kept.get(request.index as usize)) {
+                match self
+                    .file_index
+                    .as_ref()
+                    .and_then(|kept| kept.get(request.index as usize))
+                {
                     Some(&index) => request.index = index,
                     None => {
                         warn!(
@@ -535,13 +536,11 @@ impl ViewerClipboard {
                     length: request.length,
                     // A lock the guest never took here means nothing to the client: ask for the
                     // current content. (The Windows agent may cite one it took on its side.)
-                    clip_data_id: request
-                        .clip_data_id
-                        .filter(|id| self.locks.contains_key(id)),
+                    clip_data_id: request.clip_data_id.filter(|id| self.locks.contains(id)),
                 })
             }
             HostCall::Lock(clip_data_id) => {
-                self.locks.insert(clip_data_id, self.file_index.clone());
+                self.locks.insert(clip_data_id);
                 Message::Lock(ClipboardLock { clip_data_id })
             }
             HostCall::Unlock(clip_data_id) => {
@@ -1034,37 +1033,6 @@ mod tests {
         // Unlocked, the lock routes nothing.
         assert!(clipboard.unlock(7).is_some());
         assert!(clipboard.calls_for(Some(7)).is_none());
-    }
-
-    /// A lock reads the file list the guest had when it locked, not a later one.
-    #[test]
-    fn a_lock_keeps_its_file_list() {
-        let clipboard = Clipboard::new();
-        let (mut viewer, _follow) = clipboard.viewer();
-        let request = |viewer: &mut ViewerClipboard, index, clip_data_id| {
-            let (reply, _answer) = oneshot::channel();
-            let request = FilePiece {
-                index,
-                size: true,
-                offset: 0,
-                length: 0,
-                clip_data_id,
-            };
-            let sent = viewer.host_call(HostCall::File { request, reply });
-            match ClipboardMessage::decode(sent[0].as_slice())
-                .unwrap()
-                .message
-            {
-                Some(Message::FileRequest(r)) => (r.index, r.clip_data_id),
-                _ => panic!("not a file request"),
-            }
-        };
-        viewer.file_index = Some(vec![0, 2]);
-        viewer.host_call(HostCall::Lock(5));
-        // The viewer copies another list, which the guest gets.
-        viewer.file_index = Some(vec![9]);
-        assert_eq!(request(&mut viewer, 1, Some(5)), (2, Some(5)));
-        assert_eq!(request(&mut viewer, 0, None), (9, None));
     }
 
     /// A file list from a viewer reaches the agent in the Windows format, and back.
