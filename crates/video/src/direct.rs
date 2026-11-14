@@ -384,5 +384,12 @@ fn run(mut engine: Engine, shared: &Shared, sink: &Sink, counters: &Counters) {
         counters.output.fetch_add(size, Ordering::Relaxed);
         counters.latency.fetch_add(latency, Ordering::Relaxed);
         counters.latency_max.fetch_max(latency, Ordering::Relaxed);
+        counters.recent_frames.fetch_add(1, Ordering::Relaxed);
+        counters
+            .recent_latency
+            .fetch_add(latency, Ordering::Relaxed);
+        counters
+            .recent_latency_max
+            .fetch_max(latency, Ordering::Relaxed);
     }
 }

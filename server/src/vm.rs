@@ -50,6 +50,9 @@ const OUTPUT_WINDOW: Duration = Duration::from_secs(1);
 /// How often the VM is asked whether it still runs: QEMU's listeners do not say when it goes.
 const ALIVE_INTERVAL: Duration = Duration::from_secs(1);
 
+/// How often the clients are told the latency of each screen's frames on the server.
+const LATENCY_INTERVAL: Duration = Duration::from_secs(1);
+
 /// How often the rates of each console are reported.
 const RATE_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -276,6 +279,8 @@ async fn start_in(
     // How the guest takes the pointer: relative without its agent nor a tablet.
     let input = qdw_qemu::input::Input::new(&vm_connection, first).await?;
     let (mode_tx, pointer_mode) = tokio::sync::watch::channel(false);
+    // Each screen's latency on the server over the last second, for the clients.
+    let (latency_tx, encode_latency) = tokio::sync::watch::channel(vec![None; screens.len()]);
     let mode = Aborted(tokio::spawn(
         input::follow_mode(input.mouse.clone(), agent_mouse.present(), mode_tx)
             .instrument(span.clone()),
@@ -294,6 +299,7 @@ async fn start_in(
         agent_mouse,
         pointer: pointer_rx,
         pointer_mode: pointer_mode.clone(),
+        encode_latency,
         clipboard: clipboard.clone(),
         drives: drives.clone(),
         printers: printers.clone(),
@@ -353,6 +359,8 @@ async fn start_in(
     let mut report = tokio::time::interval(RATE_INTERVAL);
     let mut gone = gone;
     let mut still = tokio::time::interval(STILL_FRAME_INTERVAL);
+    let mut latency_tick = tokio::time::interval(LATENCY_INTERVAL);
+    latency_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     still.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         // When the first console waiting for its frame rate may be encoded.
@@ -396,6 +404,18 @@ async fn start_in(
                     {
                         warn!(console, error = %e, "still frame not encoded");
                     }
+                }
+                continue;
+            }
+            _ = latency_tick.tick() => {
+                let mut latencies = vec![None; screen_of.len()];
+                for (console, encoder) in &encoders {
+                    if let Some(&screen) = screen_of.get(console) {
+                        latencies[screen] = encoder.take_latency();
+                    }
+                }
+                if latencies.iter().any(Option::is_some) {
+                    latency_tx.send_replace(latencies);
                 }
                 continue;
             }

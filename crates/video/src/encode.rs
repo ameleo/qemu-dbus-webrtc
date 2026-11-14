@@ -268,6 +268,10 @@ pub(crate) struct Counters {
     /// the frames, and the longest, in microseconds.
     pub(crate) latency: Arc<AtomicU64>,
     pub(crate) latency_max: Arc<AtomicU64>,
+    /// The same, with the frames they count, for [`Encoder::take_latency`].
+    pub(crate) recent_frames: Arc<AtomicU64>,
+    pub(crate) recent_latency: Arc<AtomicU64>,
+    pub(crate) recent_latency_max: Arc<AtomicU64>,
 }
 
 /// What an encoder produced over a while.
@@ -433,6 +437,21 @@ impl Encoder {
     /// Bytes encoded since the encoder started.
     pub fn output(&self) -> u64 {
         self.counters.output.load(Ordering::Relaxed)
+    }
+
+    /// The latency of the frames since the last call (see [`Produced::latency`]): the mean
+    /// and the longest; none without a frame.
+    pub fn take_latency(&self) -> Option<(std::time::Duration, std::time::Duration)> {
+        let counters = &self.counters;
+        let frames = counters.recent_frames.swap(0, Ordering::Relaxed);
+        let total = counters.recent_latency.swap(0, Ordering::Relaxed);
+        let max = counters.recent_latency_max.swap(0, Ordering::Relaxed);
+        (frames > 0).then(|| {
+            (
+                std::time::Duration::from_micros(total / frames),
+                std::time::Duration::from_micros(max),
+            )
+        })
     }
 
     /// What the encoder produced since the last call.

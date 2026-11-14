@@ -84,7 +84,9 @@ client.
 Each connection estimates its bandwidth with Google Congestion Control (`rtpgccbwe`, from the
 client's transport-wide congestion control reports), which also paces its packets. The user's
 estimate sets the bitrate of the video, which all viewers share, within 4 and 30 Mbit/s
-(`--bitrate`), starting at 10; each client gets its own estimate on the `control` channel. The
+(`--bitrate`), starting at 10; each client gets its own estimate on the `control` channel,
+and, once a second, how long each screen's frames took on the server (`EncodeLatency`), which
+with its own figures gives the latency from the guest to its screen. The
 encoders take a new bitrate with the next frame, without a keyframe. A fix to GStreamer goes
 with it, to be offered upstream: `rtpgccbwe` holds its estimate when the sender uses less than
 two thirds of it (by default, it grows with no evidence until losses show it far above the

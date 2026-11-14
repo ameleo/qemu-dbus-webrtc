@@ -143,11 +143,16 @@ pc.ondatachannel = ({ channel }) => {
   if (channel.label === "control") {
     control.channel = channel;
     channel.onopen = () => { control.videoPause(); control.layout(); };
-    // ControlMessage: bandwidth_estimate = 3, microphone = 4, pointer_mode = 5;
-    // BandwidthEstimate: kbps = 1; Microphone: wanted = 1; PointerMode: relative = 1.
+    // ControlMessage: bandwidth_estimate = 3, microphone = 4, pointer_mode = 5,
+    // encode_latency = 6; BandwidthEstimate: kbps = 1; Microphone: wanted = 1; PointerMode:
+    // relative = 1; EncodeLatency: screen = 1, mean_us = 2, max_us = 3.
     channel.onmessage = (event) => {
       const message = pb.parse(new Uint8Array(event.data));
       if (message.has(3)) control.estimate = uint(pb.parse(message.get(3)[0]), 1);
+      if (message.has(6)) {
+        const latency = pb.parse(message.get(6)[0]);
+        control.latency[uint(latency, 1)] = { mean: uint(latency, 2) / 1000, max: uint(latency, 3) / 1000 };
+      }
       if (message.has(5)) pointer.setRelative(uint(pb.parse(message.get(5)[0]), 1) === 1);
       if (message.has(4)) {
         mic.wanted = uint(pb.parse(message.get(4)[0]), 1) === 1;
@@ -699,6 +704,8 @@ const control = {
   channel: null,
   // The server's estimate of the bandwidth to this page, in kbit/s.
   estimate: null,
+  // The server's latency for each screen's frames over the last second, in ms: { mean, max }.
+  latency: [],
   videoPause() {
     if (this.channel?.readyState !== "open") return;
     const paused = document.hidden;
@@ -719,15 +726,25 @@ control.layout = function () {
 };
 window.addEventListener("resize", () => control.layout());
 
-// Once a second: what is decoded, and how well.
+// Once a second: what is decoded, and how well, for the screen shown.
 let last = null, lastAudio = null;
+// The mean of `total` per `count` over the last second, from two reports of a statistic.
+const perUnit = (now, before, total, count) => {
+  if (!before) return null;
+  const n = now[count] - before[count];
+  return n > 0 ? (now[total] - before[total]) / n : null;
+};
 setInterval(async () => {
   if (stats.className === "error") return;
   const report = await pc.getStats();
-  let inbound = null, audio = null;
+  let inbound = null, audio = null, pair = null;
   const codecs = new Map();
+  // The video statistics of the screen shown, the first: not of another screen's track.
+  const shown = pc.getTransceivers().find((t) => t.receiver.track.kind === "video");
   report.forEach((s) => {
-    if (s.type === "inbound-rtp" && s.kind === "video") inbound = s;
+    if (s.type === "inbound-rtp" && s.kind === "video"
+      && (!shown || s.trackIdentifier === shown.receiver.track.id)) inbound = s;
+    if (s.type === "candidate-pair" && s.nominated && s.state === "succeeded") pair = s;
     if (s.type === "inbound-rtp" && s.kind === "audio") audio = s;
     if (s.type === "codec") codecs.set(s.id, s);
   });
@@ -735,6 +752,17 @@ setInterval(async () => {
   const codec = codecs.get(inbound.codecId);
   let kbps = 0;
   if (last) kbps = (8 * (inbound.bytesReceived - last.bytesReceived)) / (inbound.timestamp - last.timestamp);
+  // From the guest's drawing to the decoded picture, over the last second, in ms: the server's
+  // share, half the round trip, then here from the first packet of a frame to its decoding
+  // (the jitter buffer within it). The display is not counted.
+  const server = control.latency[0];
+  const network = pair?.currentRoundTripTime != null ? (pair.currentRoundTripTime * 1000) / 2 : null;
+  const processing = perUnit(inbound, last, "totalProcessingDelay", "framesDecoded");
+  const buffered = perUnit(inbound, last, "jitterBufferDelay", "jitterBufferEmittedCount");
+  const decoding = perUnit(inbound, last, "totalDecodeTime", "framesDecoded");
+  const ms = (v, scale = 1000) => (v == null ? "?" : (v * scale).toFixed(1));
+  const total = server && network != null && processing != null
+    ? (server.mean + network + processing * 1000).toFixed(1) : "?";
   last = inbound;
   // The sound over the last second: the share of samples the browser made up for packets
   // late or lost, and how long its jitter buffer holds them.
@@ -758,6 +786,9 @@ setInterval(async () => {
     `bitrate  ${kbps.toFixed(0)} kbit/s, estimate ${control.estimate ?? "?"} kbit/s`,
     `lost     ${inbound.packetsLost || 0} packets, ${inbound.pliCount || 0} PLI, ${inbound.freezeCount || 0} freezes`,
     `jitter   ${((inbound.jitter || 0) * 1000).toFixed(1)} ms`,
+    `latency  ${total} ms: server ${server ? server.mean.toFixed(1) : "?"} (max `
+      + `${server ? server.max.toFixed(1) : "?"}), network ${ms(network, 1)}, here `
+      + `${ms(processing)} (buffer ${ms(buffered)}, decoding ${ms(decoding)})`,
     sound,
   ].join("\n");
 }, 1000);

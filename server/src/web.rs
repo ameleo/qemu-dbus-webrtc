@@ -21,8 +21,8 @@ use tracing::{Instrument, debug, info, warn};
 
 use qdw_protocol::Message;
 use qdw_protocol::v1::{
-    BandwidthEstimate, ClientMessage, ControlMessage, Ended, Error, IceCandidate, Input,
-    Microphone, MonitorLayout, PointerMode, ServerMessage, SessionDescription, VideoPause,
+    BandwidthEstimate, ClientMessage, ControlMessage, EncodeLatency, Ended, Error, IceCandidate,
+    Input, Microphone, MonitorLayout, PointerMode, ServerMessage, SessionDescription, VideoPause,
     client_message, control_message, ended, server_message,
 };
 use qdw_video::encode::Codec;
@@ -76,6 +76,9 @@ pub struct Shared {
     pub pointer: watch::Receiver<Vec<Pointer>>,
     /// Whether the guest takes the pointer by relative moves (see `PointerMode`).
     pub pointer_mode: watch::Receiver<bool>,
+    /// The latency of each screen's frames on the server over the last second, by screen:
+    /// the mean and the longest, `None` for a screen not encoded then (see `EncodeLatency`).
+    pub encode_latency: watch::Receiver<Vec<Option<(std::time::Duration, std::time::Duration)>>>,
     pub clipboard: Arc<Clipboard>,
     pub drives: Arc<Drives>,
     pub printers: Arc<Printers>,
@@ -568,6 +571,7 @@ async fn viewer(
             Follow {
                 pointer: shared.pointer.clone(),
                 pointer_mode: shared.pointer_mode.clone(),
+                encode_latency: shared.encode_latency.clone(),
                 clip,
                 drives: drives_follow,
                 printers: printers_follow,
@@ -657,6 +661,7 @@ struct ViewerState {
 struct Follow {
     pointer: watch::Receiver<Vec<Pointer>>,
     pointer_mode: watch::Receiver<bool>,
+    encode_latency: watch::Receiver<Vec<Option<(std::time::Duration, std::time::Duration)>>>,
     clip: ViewerFollow,
     drives: DrivesFollow,
     printers: PrintersFollow,
@@ -848,6 +853,23 @@ async fn run(
                 if let Some(sent) = &mut sent {
                     let relative = *follow.pointer_mode.borrow();
                     send_all(session, Channel::Pointer, sent.update(&follow.pointer.borrow_and_update(), relative));
+                }
+            }
+            Ok(()) = follow.encode_latency.changed() => {
+                let latencies = follow.encode_latency.borrow_and_update().clone();
+                if control_open {
+                    for (screen, latency) in latencies.into_iter().enumerate() {
+                        let Some((mean, max)) = latency else { continue };
+                        let micros = |d: std::time::Duration| u32::try_from(d.as_micros()).unwrap_or(u32::MAX);
+                        let message = ControlMessage {
+                            message: Some(control_message::Message::EncodeLatency(EncodeLatency {
+                                screen: screen as u32,
+                                mean_us: micros(mean),
+                                max_us: micros(max),
+                            })),
+                        };
+                        session.send(Channel::Control, message.encode_to_vec());
+                    }
                 }
             }
             Ok(()) = follow.pointer_mode.changed() => {

@@ -338,7 +338,24 @@ message ControlMessage {
     BandwidthEstimate bandwidth_estimate = 3;
     Microphone microphone = 4;
     PointerMode pointer_mode = 5;
+    // Server to client.
+    EncodeLatency encode_latency = 6;
   }
+}
+
+// How long the frames of a guest screen took on the server over the last second: from the
+// frame asked for (the guest drew) to its encoding handed to the transport. Sent once a second
+// for each screen encoded in that second, one message each. With the client's own figures (the
+// network, its jitter buffer, decoding and display), it gives the latency from the guest to
+// the client's screen. Not counted: a guest that draws faster than the server's frame rate
+// waits up to a frame interval more, and the packets wait in the transport's pacer.
+message EncodeLatency {
+  // The guest screen, as `PointerMove.screen` numbers them: in the order of the offer's video
+  // tracks.
+  uint32 screen = 1;
+  // The mean over the frames, and the longest, in microseconds.
+  uint32 mean_us = 2;
+  uint32 max_us = 3;
 }
 
 // How the guest takes the pointer. Sent to every client when its control channel opens, then
