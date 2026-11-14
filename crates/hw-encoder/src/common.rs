@@ -82,15 +82,22 @@ pub(crate) struct RateControl {
     told: (u32, u32),
     /// The bitrate changed since the encoder was last told.
     changed: bool,
+    /// The largest a frame may be, as a time of the bitrate, where the driver bounds it.
+    max_frame_time: Option<std::time::Duration>,
 }
 
 impl RateControl {
-    pub fn new(display: &Display, profile: sys::VAProfile, framerate: u32, bitrate: u32) -> Self {
+    pub fn new(display: &Display, profile: sys::VAProfile, settings: &crate::Settings) -> Self {
         let quality = display
             .attribute(profile, ENTRYPOINT, sys::VAConfigAttribEncQualityRange)
             .filter(|&levels| levels > 1)
             .map(|levels| levels.div_ceil(2));
-        let framerate = framerate.max(1);
+        // VAConfigAttribValMaxFrameSize: bit 0, the driver takes a frame size limit.
+        let bounds_frames = display
+            .attribute(profile, ENTRYPOINT, sys::VAConfigAttribMaxFrameSize)
+            .is_some_and(|value| value & 1 != 0);
+        let max_frame_time = settings.max_frame_time.filter(|_| bounds_frames);
+        let (framerate, bitrate) = (settings.framerate.max(1), settings.bitrate);
         Self {
             quality,
             framerate,
@@ -100,6 +107,7 @@ impl RateControl {
             recent: [1.0 / f64::from(framerate); 3],
             told: (0, 0),
             changed: false,
+            max_frame_time,
         }
     }
 
@@ -222,6 +230,18 @@ impl RateControl {
                 )?);
             }
         }
+        // The largest a frame may be, with the rate control: the driver encodes a frame again,
+        // coarser, when it comes out larger.
+        if retell && let Some(time) = self.max_frame_time {
+            let limit = sys::VAEncMiscParameterBufferMaxFrameSize {
+                max_frame_size: (f64::from(self.bitrate) * time.as_secs_f64()).max(1.0) as u32,
+                ..Default::default()
+            };
+            // SAFETY: the structure of this parameter type.
+            buffers.push(unsafe {
+                Buffer::miscellaneous(context, sys::VAEncMiscParameterTypeMaxFrameSize, &limit)
+            }?);
+        }
         // The frame rate goes after the rate control: Intel's VP9 driver resets its rate
         // control for a new frame rate, but its rate control parameter, read later, sets that
         // reset rather than adding to it, and so cancels it (ddi_encode_vp9_specific.cpp,
@@ -297,6 +317,7 @@ mod tests {
             recent: [1.0 / f64::from(framerate); 3],
             told: (0, 0),
             changed: false,
+            max_frame_time: None,
         }
     }
 

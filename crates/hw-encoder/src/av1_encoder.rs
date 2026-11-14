@@ -201,7 +201,7 @@ impl Av1 {
             current: 0,
             coded,
             count: None,
-            rate: RateControl::new(display, PROFILE, settings.framerate, settings.bitrate),
+            rate: RateControl::new(display, PROFILE, settings),
         })
     }
 

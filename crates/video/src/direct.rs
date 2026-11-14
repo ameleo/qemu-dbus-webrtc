@@ -164,6 +164,7 @@ impl Engine {
             bitrate,
             max_bitrate: settings.max_bitrate.saturating_mul(1000).max(bitrate),
             framerate: FRAMERATE,
+            ..hw::Settings::new(settings.codec.hw(), bitrate)
         };
         if settings.software {
             if settings.codec != Codec::Vp9 {

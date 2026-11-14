@@ -141,6 +141,11 @@ pub struct Settings {
     /// The most frames encoded in a second: what the stream says a decoder must be able to
     /// take, and what the rate control spreads the bitrate over.
     pub framerate: u32,
+    /// The largest a frame may be, as the time the bitrate takes to send it, where the driver
+    /// bounds a frame's size (AV1 and HEVC on Intel's, not VP9): a keyframe, uncapped, was
+    /// measured at 1.8 MB, half a second of sending at 30 Mbit/s, the screen frozen
+    /// meanwhile. `None` leaves the frames as the driver makes them.
+    pub max_frame_time: Option<std::time::Duration>,
 }
 
 impl Settings {
@@ -153,6 +158,7 @@ impl Settings {
             bitrate,
             max_bitrate: bitrate,
             framerate: 60,
+            max_frame_time: Some(std::time::Duration::from_millis(100)),
         }
     }
 }

@@ -191,7 +191,7 @@ impl Hevc {
             coded,
             order: None,
             both_lists,
-            rate: RateControl::new(display, va_profile, settings.framerate, settings.bitrate),
+            rate: RateControl::new(display, va_profile, settings),
         })
     }
 

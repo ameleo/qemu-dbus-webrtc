@@ -117,7 +117,7 @@ impl Vp9 {
             current: 0,
             coded,
             predicted: false,
-            rate: RateControl::new(display, profile, settings.framerate, settings.bitrate),
+            rate: RateControl::new(display, profile, settings),
         })
     }
 

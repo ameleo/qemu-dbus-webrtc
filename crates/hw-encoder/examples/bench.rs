@@ -8,6 +8,8 @@
 //! ```
 //!
 //! The codec is `BENCH_CODEC`: `hevc` (the default), `av1`, `vp9`, or `vp9-cpu` for libvpx.
+//! `BENCH_KEYFRAME_EVERY=n` asks a keyframe every `n` frames, its size and time said;
+//! `BENCH_NO_FRAME_CAP=1` leaves the frames as large as the driver makes them.
 //!
 //! The frames come at `fps` a second (30 by default), as a desktop's would; the bitrate is
 //! halved for the third quarter of them. `frames.bgrx` gets the frames
@@ -95,8 +97,17 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let settings = Settings {
         full_chroma: number(3, 420) == 444,
         ten_bits: number(4, 8) == 10,
+        max_frame_time: if std::env::var_os("BENCH_NO_FRAME_CAP").is_some() {
+            None
+        } else {
+            Settings::new(codec, bitrate).max_frame_time
+        },
         ..Settings::new(codec, bitrate)
     };
+    let keyframe_every: u32 = std::env::var("BENCH_KEYFRAME_EVERY")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0);
     let fps = number(8, 30).max(1);
     let mut encoder = if cpu {
         println!("libvpx");
@@ -140,11 +151,20 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         }
         let due = begin + Duration::from_secs_f64(f64::from(index) / f64::from(fps));
         std::thread::sleep(due.saturating_duration_since(Instant::now()));
+        let asked = keyframe_every > 0 && index > 0 && index % keyframe_every == 0;
         let start = Instant::now();
-        let packet = encoder.encode(&frame, false)?;
-        quarters[quarter].0 += start.elapsed();
+        let packet = encoder.encode(&frame, asked)?;
+        let took = start.elapsed();
+        quarters[quarter].0 += took;
         quarters[quarter].1 += packet.data.len();
-        if index > 0 && packet.keyframe {
+        if packet.keyframe {
+            println!(
+                "frame {index}: keyframe of {} bytes in {:.1} ms",
+                packet.data.len(),
+                took.as_secs_f64() * 1000.0
+            );
+        }
+        if index > 0 && packet.keyframe && !asked {
             println!("frame {index}: an unexpected keyframe");
         }
         output.extend_from_slice(&packet.data);
