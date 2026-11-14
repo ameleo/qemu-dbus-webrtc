@@ -6,8 +6,8 @@ client, with keyboard, mouse and sound, without any software in the guest; an op
 agent adds the clipboard, files, drives and printers.
 
 Status: **early development**. It works day to day on its developers' setup (Windows 11 guest,
-Intel Arc A380). The consoles take the server's user and password; single sign-on and the
-automatic logon to Windows are to come. Design discussions and contributions are welcome, see
+Intel Arc A380). The consoles take the server's user and password; client certificates and
+security keys (FIDO) are to come. Windows keeps its own logon, as on a PC. Design discussions and contributions are welcome, see
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Features
@@ -56,7 +56,7 @@ Without anything in the guest:
 thin coloured lines blur. Measurements and the patent question are in
 [ARCHITECTURE.md](ARCHITECTURE.md#codecs).
 
-With the optional Ameleo guest agent in a Windows guest:
+With the optional guest agent [ameleo-display-agent-windows](https://github.com/ameleo/ameleo-display-agent-windows) in a Windows guest:
 
 - **Clipboard:** text and images, both ways.
 - **Files and folders** copied and pasted both ways, with Explorer's progress dialog (native
@@ -73,7 +73,8 @@ Clients: the page served by the program itself; a native client built on libwebr
 works. All messages are Protocol Buffers ([qdw.proto](crates/protocol/proto/qdw.proto)), so
 other clients can be written from it.
 
-Coming next: automatic logon to the guest, and single sign-on (OpenBao, OIDC).
+Coming next: client certificates and security keys (FIDO) at the server's door; the guest keeps
+its own logon, as a PC does.
 
 ## Running it
 

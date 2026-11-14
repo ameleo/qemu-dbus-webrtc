@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! The Ameleo guest agent, reached through a QEMU character device on the D-Bus display.
+//! The guest agent (ameleo-display-agent-windows), reached through a QEMU character device on
+//! the D-Bus display.
 //!
 //! QEMU exports the character device as `org.qemu.Display1.Chardev`; `Register` hands it one end
 //! of a socket pair. Over it runs a peer-to-peer D-Bus connection on which the guest agent is

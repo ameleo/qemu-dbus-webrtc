@@ -46,7 +46,7 @@ for Enterprise Linux 10 as an RPM and a systemd service.
   four; idle screens and screens the client does not show cost little or nothing.
 - **Keyboard and mouse** by scancode, the guest's pointer drawn by the client; **pause** of a
   hidden window; one user at a time, with **shadow** clients that only watch.
-- With the Ameleo guest agent in a Windows guest: **clipboard** (text, images, files),
+- With the guest agent [ameleo-display-agent-windows](https://github.com/ameleo/ameleo-display-agent-windows) in a Windows guest: **clipboard** (text, images, files),
   **drives**, **printers** and **cameras** of the client.
 - **Security:** HTTPS only, a user and an Argon2id password hash, ACME certificates. As a
   service, it runs under an account of its own, confined by systemd, its certificate's key

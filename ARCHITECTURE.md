@@ -59,8 +59,8 @@ libvirt, plain QEMU) starts and stops it.
   password an Argon2id hash in the configuration), checked before the server starts the VM or
   attaches to it, whatever runs the VMs; a wrong one waits a second for its answer. They open
   the server's door; the guest's logon still guards the guest. Other methods are to come next
-  to it: OpenBao (its users, LDAP or OIDC, its policies, and the secrets of the automatic
-  logon), a broker's token.
+  to it: client certificates, security keys (FIDO), a broker's token. The guest keeps its own
+  logon, as a PC does: the server does not log on to Windows.
 - **Protocol:** the messages between the server and its clients are Protocol Buffers, defined
   in `crates/protocol/proto/qdw.proto`. Clients in any language generate their code from it;
   the browser page carries a small hand-written codec for the few messages it needs. Device
@@ -214,12 +214,12 @@ the video latency.
 Touch input does not use MS-RDPEI, which has a listed patent.
 
 The clipboard follows RDP's model: whoever copied last owns it and announces the types it holds,
-and the data move only when someone pastes. In the guest, the Ameleo guest agent holds the
+and the data move only when someone pastes. In the guest, the guest agent ([ameleo-display-agent-windows](https://github.com/ameleo/ameleo-display-agent-windows)) holds the
 Windows clipboard. A browser page cannot watch the local clipboard: it reads it when it gets the
 focus, and offers it to the guest if it changed; and browsers give the clipboard only to pages
 served in HTTPS, which the server always is.
 
-Drives follow RDP's drive redirection: a client announces its drives, the Ameleo guest agent
+Drives follow RDP's drive redirection: a client announces its drives, the guest agent
 mounts each on a drive letter (with Dokany), and every file operation of a guest application
 comes to the client as it happens, with Windows' own parameters and the client's NTSTATUS in
 return; nothing of the client's files stays in the guest. The server refuses paths through `..`
@@ -228,7 +228,7 @@ up to 1 MiB: larger than a data channel message, it goes in fragments.
 
 Printers follow RDP's Easy Print: a client announces its printers with their driver's
 PrintCapabilities and default PrintTicket (Print Schema XML, as Windows' PrintTicket API gives
-them), and the Ameleo guest agent makes each a virtual printer of its Print Support App, with
+them), and the guest agent makes each a virtual printer of its Print Support App, with
 the same options, on Windows' inbox driver. A guest job comes to the client as it is printed:
 OpenXPS with its PrintTicket inside, for the client's own driver, sent a window of 1 MiB ahead
 of the client's acknowledgements; the guest learns whether the client could print it. The
@@ -236,7 +236,7 @@ driver's own settings dialog opens on the client, and the guest keeps what the u
 there. Capabilities, tickets and pieces of a job go in fragments, as drive reads do.
 
 Cameras follow RDP's camera redirection: the user's client announces its cameras, with their
-H.264 formats and controls (numbered as in MS-RDPECAM), and the Ameleo guest agent shows each in
+H.264 formats and controls (numbered as in MS-RDPECAM), and the guest agent shows each in
 the guest. The pictures themselves go as WebRTC video: the offer keeps four receive-only H.264
 tracks for the cameras, which the client sets to send when it answers; when a guest application
 opens a camera, the server names the track and the format, and relays the H.264 as it comes,
@@ -249,8 +249,9 @@ later), with their base crates. They do no I/O:
 bytes received on a data channel go in, the messages to send come out. The RDP server, connection
 and graphics crates are not needed: WebRTC provides the transport, security and media.
 
-In the guest, the optional Ameleo guest agent (D-Bus over a QEMU character device) provides what
-QEMU alone cannot: the clipboard, automatic logon, printers, drives and cameras as native Windows
+In the guest, the optional guest agent (D-Bus over a QEMU character device, its contract in
+[ameleo-display-protocol](https://github.com/ameleo/ameleo-display-protocol)) provides what
+QEMU alone cannot: the clipboard, printers, drives and cameras as native Windows
 devices.
 
 ## Milestones
