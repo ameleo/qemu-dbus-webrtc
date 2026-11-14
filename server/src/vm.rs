@@ -488,7 +488,9 @@ async fn start_in(
                         if !due {
                             debug!(console, "keyframe request within the interval: dropped");
                         }
-                        if due && let Some(encoder) = encoders.get(&console) {
+                        // A screen the client does not show is not encoded: its track gets no
+                        // frame, for which a receiver asks a keyframe every few seconds.
+                        if due && wanted(console) && let Some(encoder) = encoders.get(&console) {
                             info!(console, "keyframe requested");
                             last_keyframe.insert(console, Instant::now());
                             if let Err(e) = encoder.keyframe() {
