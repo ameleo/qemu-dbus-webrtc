@@ -65,6 +65,14 @@ impl BitWriter {
         }
     }
 
+    /// How many bits were written.
+    pub fn len(&self) -> usize {
+        match self.used {
+            0 => self.bytes.len() * 8,
+            used => (self.bytes.len() - 1) * 8 + used as usize,
+        }
+    }
+
     /// The bytes written; the last one is padded with zeros.
     pub fn into_bytes(self) -> Vec<u8> {
         self.bytes

@@ -11,3 +11,6 @@ publish.workspace = true
 [build-dependencies]
 bindgen.workspace = true
 pkg-config.workspace = true
+
+[dev-dependencies]
+rustix = { workspace = true, features = ["fs", "mm"] }

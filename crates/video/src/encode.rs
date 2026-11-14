@@ -28,7 +28,7 @@ use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
 use tracing::warn;
 
-use crate::direct::{Direct, Mapping, Picture};
+use crate::direct::{Direct, Mapping, Picture, Source};
 
 /// The video codec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -514,7 +514,7 @@ enum Pixels {
     /// For a pipeline.
     Memory(gst::Memory),
     /// For the GPU's own API.
-    Mapped(Arc<Mapping>),
+    Direct(Arc<Source>),
 }
 
 /// A guest framebuffer, ready to be pushed as often as it changes.
@@ -595,7 +595,13 @@ impl Encoder {
             Backend::Pipeline { .. } => {
                 Pixels::Memory(unsafe { DmaBufAllocator::new().alloc_dmabuf(fd, size)? })
             }
-            Backend::Direct(_) => Pixels::Mapped(Arc::new(Mapping::new(fd, size, true)?)),
+            // Imported by the GPU, which reads it where it is: in GPU memory with virgl, read
+            // by the CPU through the bus, it would take a good part of a second a frame.
+            Backend::Direct(_) => Pixels::Direct(Arc::new(Source::DmaBuf {
+                fd,
+                size: u32::try_from(size).context("framebuffer size")?,
+                fourcc,
+            })),
         };
         self.install(pixels, format, width, height, offset, stride)
     }
@@ -619,7 +625,7 @@ impl Encoder {
             Backend::Pipeline { .. } => Pixels::Memory(unsafe {
                 FdAllocator::new().alloc_fd(fd.into_raw_fd(), size, FdMemoryFlags::NONE)?
             }),
-            Backend::Direct(_) => Pixels::Mapped(Arc::new(Mapping::new(fd, size, false)?)),
+            Backend::Direct(_) => Pixels::Direct(Arc::new(Source::Mapped(Mapping::new(fd, size)?))),
         };
         self.install(pixels, format, width, height, offset, stride)
     }
@@ -679,8 +685,8 @@ impl Encoder {
                 src.push_buffer(buffer)
                     .map_err(|e| anyhow!("pushing a frame: {e:?}"))?;
             }
-            (Backend::Direct(direct), Pixels::Mapped(mapping)) => direct.frame(Picture {
-                mapping: mapping.clone(),
+            (Backend::Direct(direct), Pixels::Direct(source)) => direct.frame(Picture {
+                source: source.clone(),
                 format: fb.format,
                 width: fb.width,
                 height: fb.height,

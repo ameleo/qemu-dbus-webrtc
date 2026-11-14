@@ -5,9 +5,12 @@
 //!
 //! The thread encodes the framebuffer as it is when it gets to it: frames asked for while it
 //! is busy make one, the latest, as the pipeline's queues do.
+//!
+//! A DMA-BUF framebuffer is imported by the GPU, which reads it where it is. A framebuffer in
+//! memory shared with QEMU is read by the CPU and copied to the GPU.
 
 use std::ffi::c_void;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, OwnedFd};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -24,18 +27,11 @@ use crate::encode::{Codec, Counters, Settings, Sink};
 /// the bitrate over: what the VA encoders of GStreamer assume as well.
 const FRAMERATE: u32 = 30;
 
-/// `DMA_BUF_IOCTL_SYNC` (linux/dma-buf.h): brackets the CPU's access to a DMA-BUF.
-const DMA_BUF_SYNC_READ: u64 = 1;
-const DMA_BUF_SYNC_START: u64 = 0;
-const DMA_BUF_SYNC_END: u64 = 1 << 2;
-
-/// A framebuffer mapped in this process, for as long as it is the console's.
+/// A framebuffer in memory shared with QEMU, mapped in this process for as long as it is the
+/// console's.
 pub(crate) struct Mapping {
     pointer: *mut c_void,
     length: usize,
-    fd: OwnedFd,
-    /// A DMA-BUF, whose reads are bracketed for its exporter; a plain file otherwise.
-    dma_buf: bool,
 }
 
 // SAFETY: the mapping is only read, and unmapped once, when dropped.
@@ -43,8 +39,9 @@ unsafe impl Send for Mapping {}
 unsafe impl Sync for Mapping {}
 
 impl Mapping {
-    /// Map the `length` bytes of `fd` to read them.
-    pub(crate) fn new(fd: OwnedFd, length: usize, dma_buf: bool) -> Result<Self> {
+    /// Map the `length` bytes of `fd` to read them. The mapping keeps the memory: `fd` may
+    /// close.
+    pub(crate) fn new(fd: OwnedFd, length: usize) -> Result<Self> {
         // SAFETY: a new shared mapping of a file we own, at an address the kernel picks.
         let pointer = unsafe {
             rustix::mm::mmap(
@@ -57,49 +54,37 @@ impl Mapping {
             )
         }
         .context("mapping the framebuffer")?;
-        Ok(Self {
-            pointer,
-            length,
-            fd,
-            dma_buf,
-        })
+        Ok(Self { pointer, length })
     }
 
-    fn sync(&self, flags: u64) {
-        if !self.dma_buf {
-            return;
-        }
-        type Sync = rustix::ioctl::Setter<{ rustix::ioctl::opcode::write::<u64>(b'b', 0) }, u64>;
-        // SAFETY: DMA_BUF_IOCTL_SYNC takes a `struct dma_buf_sync`, one 64-bit word of flags.
-        if let Err(error) = unsafe { rustix::ioctl::ioctl(&self.fd, Sync::new(flags)) } {
-            warn!(%error, "DMA-BUF not synchronized");
-        }
-    }
-
-    /// Give `read` the framebuffer's bytes.
-    fn read<R>(&self, read: impl FnOnce(&[u8]) -> R) -> R {
-        self.sync(DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ);
-        // SAFETY: `length` bytes mapped until this is dropped. The guest draws in them while
-        // they are read, as with any shared framebuffer: the bytes are only copied, and a
-        // frame caught half drawn is followed by another.
-        let bytes = unsafe { std::slice::from_raw_parts(self.pointer.cast::<u8>(), self.length) };
-        let result = read(bytes);
-        self.sync(DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
-        result
+    /// The framebuffer's bytes. The guest draws in them while they are read, as with any
+    /// shared framebuffer: the bytes are only copied, and a frame caught half drawn is
+    /// followed by another.
+    fn bytes(&self) -> &[u8] {
+        // SAFETY: `length` bytes mapped until this is dropped, which the slice cannot outlive.
+        unsafe { std::slice::from_raw_parts(self.pointer.cast::<u8>(), self.length) }
     }
 }
 
 impl Drop for Mapping {
     fn drop(&mut self) {
-        // SAFETY: mapped in `new`, and no slice of it outlives `read`.
+        // SAFETY: mapped in `new`, and no slice of it outlives it.
         let _ = unsafe { rustix::mm::munmap(self.pointer, self.length) };
     }
+}
+
+/// Where a framebuffer is.
+pub(crate) enum Source {
+    /// In memory shared with QEMU.
+    Mapped(Mapping),
+    /// In a DMA-BUF of one linear plane, of `size` bytes, in the DRM format `fourcc`.
+    DmaBuf { fd: OwnedFd, size: u32, fourcc: u32 },
 }
 
 /// A framebuffer to encode.
 #[derive(Clone)]
 pub(crate) struct Picture {
-    pub mapping: Arc<Mapping>,
+    pub source: Arc<Source>,
     pub format: gst_video::VideoFormat,
     pub width: u32,
     pub height: u32,
@@ -229,8 +214,59 @@ impl Drop for Direct {
     }
 }
 
+/// Encode `picture` with `encoder`; a DMA-BUF is imported once, and kept in `imported` with
+/// the framebuffer it is.
+fn encode(
+    encoder: &mut hw::Encoder,
+    imported: &mut Option<(Arc<Source>, hw::Imported)>,
+    picture: &Picture,
+    keyframe: bool,
+) -> Result<hw::Packet> {
+    match &*picture.source {
+        Source::Mapped(mapping) => {
+            let format = pixel_format(picture.format)
+                .ok_or_else(|| anyhow!("framebuffer format {:?}", picture.format))?;
+            let bytes = mapping.bytes();
+            Ok(encoder.encode(
+                &hw::Frame {
+                    pixels: &bytes[picture.offset.min(bytes.len())..],
+                    format,
+                    width: picture.width,
+                    height: picture.height,
+                    stride: picture.stride,
+                },
+                keyframe,
+            )?)
+        }
+        Source::DmaBuf { fd, size, fourcc } => {
+            if !imported
+                .as_ref()
+                .is_some_and(|(source, _)| Arc::ptr_eq(source, &picture.source))
+            {
+                // The previous framebuffer's import goes first.
+                *imported = None;
+                let frame = encoder.import(&hw::DmaBuf {
+                    fd: fd.as_fd(),
+                    size: *size,
+                    fourcc: *fourcc,
+                    modifier: 0,
+                    offset: u32::try_from(picture.offset)?,
+                    stride: u32::try_from(picture.stride)?,
+                    width: picture.width,
+                    height: picture.height,
+                })?;
+                *imported = Some((picture.source.clone(), frame));
+            }
+            let (_, frame) = imported.as_ref().expect("imported just above");
+            Ok(encoder.encode_imported(frame, keyframe)?)
+        }
+    }
+}
+
 /// The encoding thread: encodes what is asked until told to stop.
 fn run(mut encoder: hw::Encoder, shared: &Shared, sink: &Sink, counters: &Counters) {
+    // The framebuffer the encoder imported, which is the encoder's own.
+    let mut imported = None;
     loop {
         let (picture, keyframe) = {
             let mut asked = shared.asked.lock().unwrap();
@@ -241,6 +277,7 @@ fn run(mut encoder: hw::Encoder, shared: &Shared, sink: &Sink, counters: &Counte
                 return;
             }
             if let Some(other) = asked.encoder.take() {
+                imported = None;
                 encoder = other;
             }
             if let Some(bitrate) = asked.bitrate.take() {
@@ -251,27 +288,12 @@ fn run(mut encoder: hw::Encoder, shared: &Shared, sink: &Sink, counters: &Counte
             };
             (picture, std::mem::take(&mut asked.keyframe))
         };
-        let Some(format) = pixel_format(picture.format) else {
-            warn!(format = ?picture.format, "framebuffer format not encoded");
-            continue;
-        };
-        let encoded = picture.mapping.read(|bytes| {
-            encoder.encode(
-                &hw::Frame {
-                    pixels: &bytes[picture.offset.min(bytes.len())..],
-                    format,
-                    width: picture.width,
-                    height: picture.height,
-                    stride: picture.stride,
-                },
-                keyframe,
-            )
-        });
+        let encoded = encode(&mut encoder, &mut imported, &picture, keyframe);
         let packet = match encoded {
             Ok(packet) => packet,
             Err(error) => {
                 // The library makes the next frame a keyframe.
-                warn!(%error, "frame not encoded");
+                warn!(error = %format!("{error:#}"), "frame not encoded");
                 continue;
             }
         };

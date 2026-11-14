@@ -7,7 +7,7 @@
 
 use std::ffi::CStr;
 use std::fs::File;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, BorrowedFd};
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::Arc;
@@ -254,8 +254,90 @@ impl Surface {
         })
     }
 
+    /// A surface over a DMA-BUF of one plane: `width`x`height` pixels of the DRM format
+    /// `drm_fourcc` (libva's `fourcc`), `pitch` bytes a row from `offset`, laid out as
+    /// `modifier` says, in a buffer of `size` bytes. The GPU reads the buffer where it is, no
+    /// copy made; the driver takes its own reference to it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn import(
+        display: &Arc<Display>,
+        fd: BorrowedFd<'_>,
+        size: u32,
+        drm_fourcc: u32,
+        fourcc: u32,
+        modifier: u64,
+        (width, height): (u32, u32),
+        offset: u32,
+        pitch: u32,
+    ) -> Result<Self> {
+        let mut descriptor = sys::VADRMPRIMESurfaceDescriptor {
+            fourcc,
+            width,
+            height,
+            num_objects: 1,
+            num_layers: 1,
+            ..Default::default()
+        };
+        descriptor.objects[0].fd = fd.as_raw_fd();
+        descriptor.objects[0].size = size;
+        descriptor.objects[0].drm_format_modifier = modifier;
+        let layer = &mut descriptor.layers[0];
+        layer.drm_format = drm_fourcc;
+        layer.num_planes = 1;
+        layer.object_index[0] = 0;
+        layer.offset[0] = offset;
+        layer.pitch[0] = pitch;
+        let mut attributes = [
+            sys::VASurfaceAttrib {
+                type_: sys::VASurfaceAttribMemoryType,
+                flags: sys::VA_SURFACE_ATTRIB_SETTABLE,
+                value: sys::VAGenericValue {
+                    type_: sys::VAGenericValueTypeInteger,
+                    value: sys::_VAGenericValue__bindgen_ty_1 {
+                        i: sys::VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2 as i32,
+                    },
+                },
+            },
+            sys::VASurfaceAttrib {
+                type_: sys::VASurfaceAttribExternalBufferDescriptor,
+                flags: sys::VA_SURFACE_ATTRIB_SETTABLE,
+                value: sys::VAGenericValue {
+                    type_: sys::VAGenericValueTypePointer,
+                    value: sys::_VAGenericValue__bindgen_ty_1 {
+                        p: std::ptr::from_mut(&mut descriptor).cast(),
+                    },
+                },
+            },
+        ];
+        let mut id = 0;
+        // SAFETY: one surface to create; the descriptor, and the descriptor it points to, live
+        // through the call; the descriptor is open.
+        let status = unsafe {
+            sys::vaCreateSurfaces(
+                display.raw,
+                sys::VA_RT_FORMAT_RGB32,
+                width,
+                height,
+                &mut id,
+                1,
+                attributes.as_mut_ptr(),
+                attributes.len() as u32,
+            )
+        };
+        check("vaCreateSurfaces (DMA-BUF)", status)?;
+        Ok(Self {
+            display: display.clone(),
+            id,
+        })
+    }
+
     pub fn id(&self) -> sys::VASurfaceID {
         self.id
+    }
+
+    /// Whether the surface is one of `display`'s.
+    pub fn of(&self, display: &Arc<Display>) -> bool {
+        Arc::ptr_eq(&self.display, display)
     }
 
     /// Wait until what was rendered to the surface is done.
@@ -337,20 +419,30 @@ impl Context {
     }
 
     /// Submit one picture: `buffers`, in order, applied to `target`.
+    ///
+    /// The buffers go one by one, as libva allows, so that an error names the buffer the
+    /// driver refused: drivers check each as it comes.
     pub fn render(&self, target: &Surface, buffers: &[Buffer]) -> Result<()> {
-        let mut ids: Vec<sys::VABufferID> = buffers.iter().map(|buffer| buffer.id).collect();
         // SAFETY: our context and a surface of the same display.
         check("vaBeginPicture", unsafe {
             sys::vaBeginPicture(self.display.raw, self.id, target.id)
         })?;
-        // SAFETY: the list of buffers and its length.
-        let rendered = check("vaRenderPicture", unsafe {
-            sys::vaRenderPicture(
-                self.display.raw,
-                self.id,
-                ids.as_mut_ptr(),
-                ids.len() as i32,
-            )
+        let rendered = buffers.iter().enumerate().try_for_each(|(index, buffer)| {
+            let mut id = buffer.id;
+            // SAFETY: one buffer of this context.
+            let status = unsafe { sys::vaRenderPicture(self.display.raw, self.id, &mut id, 1) };
+            check("vaRenderPicture", status).map_err(|error| match error {
+                Error::Va {
+                    call,
+                    status,
+                    message,
+                } => Error::Va {
+                    call,
+                    status,
+                    message: format!("{message}, at buffer {index} of type {}", buffer.type_),
+                },
+                other => other,
+            })
         });
         // Even after a failure: the picture begun must be ended.
         // SAFETY: the picture begun above.
@@ -372,6 +464,8 @@ impl Drop for Context {
 pub struct Buffer {
     display: Arc<Display>,
     id: sys::VABufferID,
+    /// What it holds (`VA*BufferType`), to say which one a driver refuses.
+    type_: sys::VABufferType,
 }
 
 impl Buffer {
@@ -399,6 +493,7 @@ impl Buffer {
         Ok(Self {
             display: context.display.clone(),
             id,
+            type_,
         })
     }
 

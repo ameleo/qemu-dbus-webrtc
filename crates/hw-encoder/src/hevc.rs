@@ -9,28 +9,15 @@
 
 use std::sync::Arc;
 
+use crate::common::{self, ENTRYPOINT, INTRA_PERIOD, RateControl};
 use crate::error::{Error, Result};
 use crate::h265::{self, Coding, Colour, Picture, Profile, Sequence};
 use crate::va::{self, Buffer, Config, Context, Display, Surface, sys};
 use crate::{Packet, Settings};
 
-/// The low-power entrypoint: the encoder of the GPU's fixed-function hardware, the only one
-/// Intel GPUs have since Arc.
-const ENTRYPOINT: sys::VAEntrypoint = sys::VAEntrypointEncSliceLP;
-
 /// The picture order count starts again, with a keyframe, before it outgrows its type: after
 /// more than a year at 60 pictures a second.
 const MAX_ORDER: u32 = i32::MAX as u32;
-
-/// What the encoder is told of the distance between keyframes, which only come when asked:
-/// the rate control plans for pictures predicted from the one before.
-const INTRA_PERIOD: u32 = 1024;
-
-/// The rate control buffer: half a second of the bitrate. It bounds the size of a picture,
-/// a keyframe's above all, and so the bursts on the network.
-fn buffer_size(bitrate: u32) -> u32 {
-    (bitrate / 2).max(1)
-}
 
 fn profile(profile: Profile) -> sys::VAProfile {
     match profile {
@@ -120,12 +107,7 @@ pub(crate) struct Hevc {
     order: Option<u32>,
     /// The encoder has no P slices: pictures are predicted through both lists.
     both_lists: bool,
-    quality: Option<u32>,
-    framerate: u32,
-    /// In bit/s.
-    bitrate: u32,
-    /// The encoder was not told of `bitrate` yet.
-    bitrate_changed: bool,
+    rate: RateControl,
 }
 
 impl Hevc {
@@ -137,35 +119,25 @@ impl Hevc {
     ) -> Result<Self> {
         let stream_profile = Profile::new(settings.full_chroma, settings.ten_bits);
         let va_profile = profile(stream_profile);
-        if !display.has(va_profile, ENTRYPOINT) {
-            return Err(Error::Unsupported(format!("HEVC {stream_profile:?}")));
-        }
-        let attribute = |attribute| display.attribute(va_profile, ENTRYPOINT, attribute);
         let (rt_format, fourcc) = surface_format(stream_profile);
-        if attribute(sys::VAConfigAttribRTFormat).is_none_or(|formats| formats & rt_format == 0) {
-            return Err(Error::Unsupported(format!(
-                "HEVC {stream_profile:?} pictures"
-            )));
-        }
-        if attribute(sys::VAConfigAttribRateControl).is_none_or(|modes| modes & sys::VA_RC_CBR == 0)
-        {
-            return Err(Error::Unsupported("constant bitrate".into()));
-        }
         // The headers written here: the parameter sets and the slice headers.
         let headers = sys::VA_ENC_PACKED_HEADER_SEQUENCE | sys::VA_ENC_PACKED_HEADER_SLICE;
-        if attribute(sys::VAConfigAttribEncPackedHeaders)
-            .is_none_or(|packed| packed & headers != headers)
-        {
-            return Err(Error::Unsupported("headers from the application".into()));
-        }
+        common::check(
+            display,
+            va_profile,
+            rt_format,
+            headers,
+            &format!("HEVC {stream_profile:?}"),
+        )?;
         // An encoder that says its pictures predicted from the past use both lists has no P
         // slices (libva's VAConfigAttribPredictionDirection).
-        let both_lists = attribute(sys::VAConfigAttribPredictionDirection)
+        let both_lists = display
+            .attribute(
+                va_profile,
+                ENTRYPOINT,
+                sys::VAConfigAttribPredictionDirection,
+            )
             .is_some_and(|direction| direction & sys::VA_PREDICTION_DIRECTION_BI_NOT_EMPTY != 0);
-        // The middle of the driver's range of speed against quality, when it has one.
-        let quality = attribute(sys::VAConfigAttribEncQualityRange)
-            .filter(|&levels| levels > 1)
-            .map(|levels| levels.div_ceil(2));
 
         let coding = coding(display, va_profile);
         let mut sequence = Sequence {
@@ -208,9 +180,7 @@ impl Hevc {
         let surface = || Surface::new(display, rt_format, fourcc, coded_width, coded_height);
         let input = surface()?;
         let reconstructed = [surface()?, surface()?];
-        // More than a picture takes uncompressed, which no coded picture reaches.
-        let raw = coded_width as usize * coded_height as usize * 3 * 2;
-        let coded = Buffer::coded(&context, raw + (1 << 16))?;
+        let coded = Buffer::coded(&context, common::coded_size(coded_width, coded_height))?;
         Ok(Self {
             context,
             _config: config,
@@ -221,10 +191,7 @@ impl Hevc {
             coded,
             order: None,
             both_lists,
-            quality,
-            framerate: settings.framerate,
-            bitrate: settings.bitrate,
-            bitrate_changed: false,
+            rate: RateControl::new(display, va_profile, settings.framerate, settings.bitrate),
         })
     }
 
@@ -240,10 +207,7 @@ impl Hevc {
 
     /// Change the bitrate, in bit/s, from the next picture on.
     pub fn set_bitrate(&mut self, bitrate: u32) {
-        if bitrate != self.bitrate {
-            self.bitrate = bitrate;
-            self.bitrate_changed = true;
-        }
+        self.rate.set_bitrate(bitrate);
     }
 
     /// Encode the picture drawn in the input surface; as a keyframe when asked.
@@ -263,7 +227,7 @@ impl Hevc {
         self.context.render(&self.input, &buffers)?;
         self.input.sync()?;
         let data = self.coded.read_coded()?;
-        self.bitrate_changed = false;
+        self.rate.told();
         self.current ^= 1;
         self.order = Some(order + 1);
         Ok(Packet {
@@ -285,59 +249,8 @@ impl Hevc {
                     &self.sequence_parameters(),
                 )
             }?);
-            let framerate = sys::VAEncMiscParameterFrameRate {
-                framerate: self.framerate,
-                ..Default::default()
-            };
-            // SAFETY: the structure of this parameter type.
-            buffers.push(unsafe {
-                Buffer::miscellaneous(context, sys::VAEncMiscParameterTypeFrameRate, &framerate)
-            }?);
-            if let Some(quality_level) = self.quality {
-                let quality = sys::VAEncMiscParameterBufferQualityLevel {
-                    quality_level,
-                    ..Default::default()
-                };
-                // SAFETY: the structure of this parameter type.
-                buffers.push(unsafe {
-                    Buffer::miscellaneous(
-                        context,
-                        sys::VAEncMiscParameterTypeQualityLevel,
-                        &quality,
-                    )
-                }?);
-            }
         }
-        if picture.idr || self.bitrate_changed {
-            let buffer_size = buffer_size(self.bitrate);
-            let rate = sys::VAEncMiscParameterRateControl {
-                bits_per_second: self.bitrate,
-                // Constant bitrate: the target is the maximum.
-                target_percentage: 100,
-                // The time the buffer holds, in milliseconds.
-                window_size: (u64::from(buffer_size) * 1000 / u64::from(self.bitrate.max(1)))
-                    as u32,
-                ..Default::default()
-            };
-            let hrd = sys::VAEncMiscParameterHRD {
-                initial_buffer_fullness: buffer_size / 2,
-                buffer_size,
-                ..Default::default()
-            };
-            // SAFETY: the structures of these parameter types.
-            unsafe {
-                buffers.push(Buffer::miscellaneous(
-                    context,
-                    sys::VAEncMiscParameterTypeRateControl,
-                    &rate,
-                )?);
-                buffers.push(Buffer::miscellaneous(
-                    context,
-                    sys::VAEncMiscParameterTypeHRD,
-                    &hrd,
-                )?);
-            }
-        }
+        buffers.extend(self.rate.buffers(context, picture.idr)?);
         // SAFETY: the structure of this buffer type.
         buffers.push(unsafe {
             Buffer::parameter(
@@ -353,9 +266,10 @@ impl Hevc {
                 self.sequence.pps(),
             ]
             .concat();
-            self.packed(&mut buffers, sys::VAEncPackedHeaderSequence, &sets)?;
+            common::packed(context, &mut buffers, sys::VAEncPackedHeaderSequence, &sets)?;
         }
-        self.packed(
+        common::packed(
+            context,
             &mut buffers,
             sys::VAEncPackedHeaderSlice,
             &self.sequence.slice_header(picture),
@@ -371,36 +285,6 @@ impl Hevc {
         Ok(buffers)
     }
 
-    /// A header written here, for the encoder to put in the stream as it is: whole NAL
-    /// units, with their emulation prevention bytes.
-    fn packed(
-        &self,
-        buffers: &mut Vec<Buffer>,
-        type_: sys::VAEncPackedHeaderType,
-        header: &[u8],
-    ) -> Result<()> {
-        let parameters = sys::VAEncPackedHeaderParameterBuffer {
-            type_,
-            bit_length: header.len() as u32 * 8,
-            has_emulation_bytes: 1,
-            ..Default::default()
-        };
-        // SAFETY: the structure of this buffer type.
-        buffers.push(unsafe {
-            Buffer::parameter(
-                &self.context,
-                sys::VAEncPackedHeaderParameterBufferType,
-                &parameters,
-            )
-        }?);
-        buffers.push(Buffer::bytes(
-            &self.context,
-            sys::VAEncPackedHeaderDataBufferType,
-            header,
-        )?);
-        Ok(())
-    }
-
     /// The sequence, as the encoder is told it: what [`Sequence::sps`] writes.
     fn sequence_parameters(&self) -> sys::VAEncSequenceParameterBufferHEVC {
         let sequence = &self.sequence;
@@ -412,7 +296,7 @@ impl Hevc {
             intra_period: INTRA_PERIOD,
             intra_idr_period: INTRA_PERIOD,
             ip_period: 1,
-            bits_per_second: self.bitrate,
+            bits_per_second: self.rate.bitrate(),
             pic_width_in_luma_samples: sequence.coded_width() as u16,
             pic_height_in_luma_samples: sequence.coded_height() as u16,
             log2_min_luma_coding_block_size_minus3: (coding.log2_min_cb - 3) as u8,
