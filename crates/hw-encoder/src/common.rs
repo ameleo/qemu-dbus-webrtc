@@ -156,19 +156,6 @@ impl RateControl {
     pub fn buffers(&self, context: &Context, keyframe: bool) -> Result<Vec<Buffer>> {
         let mut buffers = Vec::new();
         let retell = keyframe || self.changed || self.retell();
-        if retell {
-            // Frames a second as a fraction: the numerator in the low 16 bits, the
-            // denominator in the high ones. libva takes a denominator of 0 for 1, but Intel's
-            // AV1 encoder refuses it.
-            let framerate = sys::VAEncMiscParameterFrameRate {
-                framerate: (self.told_framerate() & 0xffff) | (1 << 16),
-                ..Default::default()
-            };
-            // SAFETY: the structure of this parameter type.
-            buffers.push(unsafe {
-                Buffer::miscellaneous(context, sys::VAEncMiscParameterTypeFrameRate, &framerate)
-            }?);
-        }
         if keyframe && let Some(quality_level) = self.quality {
             let quality = sys::VAEncMiscParameterBufferQualityLevel {
                 quality_level,
@@ -181,7 +168,7 @@ impl RateControl {
         }
         if retell {
             let buffer_size = self.buffer_size();
-            let rate = sys::VAEncMiscParameterRateControl {
+            let mut rate = sys::VAEncMiscParameterRateControl {
                 bits_per_second: self.bitrate(),
                 // Constant bitrate: the target is the maximum.
                 target_percentage: 100,
@@ -189,6 +176,14 @@ impl RateControl {
                 window_size: 500,
                 ..Default::default()
             };
+            // A new frame rate restarts the rate control, said outright: Intel's AV1 driver
+            // does not restart it for a frame rate alone (ddi_encode_av1_specific.cpp,
+            // ParseMiscParamFR), and keeps spending for the old one: measured on an Intel Arc
+            // A380, started at 60 frames a second and told 25, AV1 filled a third of its
+            // bitrate.
+            let new_rate = self.told_framerate() != self.told.1;
+            // SAFETY: both views of the union are plain integers.
+            unsafe { rate.rc_flags.bits.set_reset(new_rate.into()) };
             let hrd = sys::VAEncMiscParameterHRD {
                 initial_buffer_fullness: buffer_size / 2,
                 buffer_size,
@@ -207,6 +202,24 @@ impl RateControl {
                     &hrd,
                 )?);
             }
+        }
+        // The frame rate goes after the rate control: Intel's VP9 driver resets its rate
+        // control for a new frame rate, but its rate control parameter, read later, sets that
+        // reset rather than adding to it, and so cancels it (ddi_encode_vp9_specific.cpp,
+        // ParseMiscParamRC); the new frame rate was never used. Measured on an Intel Arc A380:
+        // started at 60 frames a second and told 25, VP9 filled half its bitrate.
+        if retell {
+            // Frames a second as a fraction: the numerator in the low 16 bits, the
+            // denominator in the high ones. libva takes a denominator of 0 for 1, but Intel's
+            // AV1 encoder refuses it.
+            let framerate = sys::VAEncMiscParameterFrameRate {
+                framerate: (self.told_framerate() & 0xffff) | (1 << 16),
+                ..Default::default()
+            };
+            // SAFETY: the structure of this parameter type.
+            buffers.push(unsafe {
+                Buffer::miscellaneous(context, sys::VAEncMiscParameterTypeFrameRate, &framerate)
+            }?);
         }
         Ok(buffers)
     }
