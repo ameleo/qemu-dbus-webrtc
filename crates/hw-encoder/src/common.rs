@@ -56,9 +56,6 @@ pub(crate) fn coded_size(width: u32, height: u32) -> usize {
 /// this many seconds.
 const PACE_TIME_CONSTANT: f64 = 0.5;
 
-/// How much of the way the measured frame interval goes to a shorter one, at each frame.
-const PACE_RISE: f64 = 0.5;
-
 /// The encoder is told a new bitrate when the one it should have moved by this share.
 const RETELL_SHARE: f64 = 0.1;
 
@@ -78,6 +75,8 @@ pub(crate) struct RateControl {
     /// When the last frame came, and the time between frames, averaged.
     last_frame: Option<Instant>,
     interval: f64,
+    /// The last three times between frames, the latest last.
+    recent: [f64; 3],
     /// The bitrate, in bit/s, and the frame rate the encoder was last told; 0 before the
     /// first frame.
     told: (u32, u32),
@@ -98,6 +97,7 @@ impl RateControl {
             bitrate,
             last_frame: None,
             interval: 1.0 / f64::from(framerate),
+            recent: [1.0 / f64::from(framerate); 3],
             told: (0, 0),
             changed: false,
         }
@@ -123,19 +123,23 @@ impl RateControl {
             let dt = (now - last)
                 .as_secs_f64()
                 .clamp(1.0 / f64::from(self.framerate), 1.0);
-            // Up, half the way at each frame: from a still screen (four frames a second), the
-            // rate is followed within a few frames once the guest draws, and the encoder does
-            // not spend for four frames a second meanwhile (measured on an Intel Arc A380 at
-            // 8 Mbit/s, 30 frames a second after 5 s still: 10 Mbit/s the first second in VP9,
-            // 12 in HEVC, rather than 37 and 31 at the pace of the way down). Not at once: a
-            // frame a little early would tell a rate the guest does not draw at, and the
-            // encoder would spend too little. Down, over about `PACE_TIME_CONSTANT`.
-            let weight = if dt < self.interval {
-                PACE_RISE
-            } else {
-                (dt / PACE_TIME_CONSTANT).min(1.0)
-            };
-            self.interval += (dt - self.interval) * weight;
+            self.recent = [self.recent[1], self.recent[2], dt];
+            let mut sorted = self.recent;
+            sorted.sort_by(f64::total_cmp);
+            let median = sorted[1];
+            // Up, at once, when three times between frames say so (their median is shorter):
+            // from a still screen (four frames a second), the rate is the guest's again by the
+            // third frame it draws, told the encoder once. Half the way at each frame instead
+            // told it again at each, and Intel's VP9 encoder, whose rate control starts again
+            // each time it is told, starved those frames (8 to 14 kB at 1080p: the motion
+            // showed late). A single early frame does not move the median. Down, over about
+            // `PACE_TIME_CONSTANT`.
+            if median < self.interval {
+                self.interval = median;
+            } else if dt > self.interval {
+                let weight = (dt / PACE_TIME_CONSTANT).min(1.0);
+                self.interval += (dt - self.interval) * weight;
+            }
         }
     }
 
@@ -290,6 +294,7 @@ mod tests {
             bitrate: 10_000_000,
             last_frame: None,
             interval: 1.0 / f64::from(framerate),
+            recent: [1.0 / f64::from(framerate); 3],
             told: (0, 0),
             changed: false,
         }
