@@ -14,13 +14,15 @@ automatic logon to Windows are to come. Design discussions and contributions are
 
 Without anything in the guest:
 
-- **Video:** the guest's screen, encoded on the host GPU with VA-API, in the codecs below; from
-  the DMA-BUF QEMU shares when the VM has GL (no copy through the CPU), from memory otherwise
-  (`gl=off`, virtio-vga 2D). One encoder per screen, shared by every viewer, at most 30 frames
-  a second; nothing is encoded when nobody watches. In 10 bits (AV1, HEVC) for clients that
+- **Video:** the guest's screen, encoded on the host GPU straight through VA-API, with no
+  media framework, in the codecs below; from the DMA-BUF QEMU shares when the VM has GL, which
+  the GPU reads where it is, from memory otherwise (`gl=off`, virtio-vga 2D). One encoder per
+  screen, shared by every viewer, up to 60 frames a second, as fast as the guest draws; a
+  keyframe or a change of bitrate takes effect with the next frame. Nothing is encoded when
+  nobody watches. In 10 bits (AV1, HEVC) for clients that
   say they decode it: no banding in gradients.
-- **Without a GPU:** VP9 encoded on the CPU (`--software`, taken by itself when the host has no
-  GPU encoder), in 4:2:0 or 4:4:4. `--codecs` lists what each GPU, and the CPU, encodes.
+- **Without a GPU:** VP9 encoded on the CPU with libvpx (`--software`, taken by itself when the
+  host has no GPU encoder), in 4:2:0 or 4:4:4. `--codecs` lists what each GPU, and the CPU, encodes.
 - **The network:** the bitrate follows the user's bandwidth, estimated with Google Congestion
   Control from the client's reports (between 4 and 30 Mbit/s, `--bitrate` for the ceiling);
   each client is told its estimate.
@@ -75,11 +77,13 @@ Coming next: automatic logon to the guest, and single sign-on (OpenBao, OIDC).
 
 ## Running it
 
-It needs GStreamer 1.26 (the `va` elements of gst-plugins-bad for a VA-API GPU, `vp9enc` for the
-CPU, and `rtpgccbwe`, `rtpvp9pay2` of gst-plugins-rs), libvirt-dbus for libvirt's VMs, and VMs
-started with `-display dbus` (libvirt: `<graphics type='dbus'/>`). Two fixes to GStreamer, to be offered upstream, make the
-congestion control smoother: as released, the VA encoders send a keyframe at each change of
-bitrate, and `rtpgccbwe` raises its estimate far above the link while the desktop sends little.
+It needs libva with the GPU's VA driver (Intel's `iHD`, or Mesa's for AMD) and libvpx for the
+video; GStreamer 1.26 for the transport and the sound (`webrtcbin` and Opus, and `rtpgccbwe`,
+`rtpvp9pay2` of gst-plugins-rs); libvirt-dbus for libvirt's VMs; and VMs started with
+`-display dbus` (libvirt: `<graphics type='dbus'/>`). Building it also needs the development
+files of libva and libvpx, and libclang, which generates the bindings to both. A fix to
+GStreamer, to be offered upstream, makes the congestion control smoother: as released,
+`rtpgccbwe` raises its estimate far above the link while the desktop sends little.
 One server serves every VM of its host. It finds them through their VM manager: libvirt (the
 domains with `<graphics type='dbus'/>`, through libvirt-dbus, which also lets it start a VM
 that is off), Proxmox VE (not tried yet), or VMs given by hand. Build it with Cargo and start
@@ -123,8 +127,9 @@ file), and VMs by hand: `--domain <libvirt domain>`, `--dbus <address>`, `--qmp 
 
 ## Design
 
-See [ARCHITECTURE.md](ARCHITECTURE.md): WebRTC through GStreamer `webrtcbin`, royalty-free AV1
-by default and VP9 4:4:4 for sharp coloured text, and the device redirection formats of the Remote
+See [ARCHITECTURE.md](ARCHITECTURE.md): video encoded straight through VA-API (or libvpx on the
+CPU), WebRTC through GStreamer `webrtcbin`, royalty-free AV1 by default and VP9 4:4:4 for sharp
+coloured text, and the device redirection formats of the Remote
 Desktop Protocol carried over WebRTC data channels.
 
 ## License

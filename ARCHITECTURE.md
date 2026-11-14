@@ -66,7 +66,7 @@ libvirt, plain QEMU) starts and stops it.
 |---|---|---|
 | `crates/protocol` | `qdw-protocol` | the `.proto` file and the Rust types generated from it |
 | `crates/qemu` | `qdw-qemu` | attachment to QEMU: QMP, the D-Bus display and sound, the guest agent |
-| `crates/video` | `qdw-video` | hardware encoding of a framebuffer, recording |
+| `crates/video` | `qdw-video` | the encoding of a console's framebuffer, on a thread of its own, recording |
 | `crates/hw-encoder` | `qdw-hw-encoder` | encoding on the GPU's own API (VA-API), with the codecs' headers written from their standards |
 | `crates/audio` | `qdw-audio` | Opus encoding of the guest's sound |
 | `server` | `qemu-dbus-webrtc` | the server: the VMs and their providers (`providers.rs`, `libvirt.rs`, `vms.rs`), a VM's display loop (`vm.rs`), viewer sessions, signalling, the browser page |
@@ -84,11 +84,11 @@ client.
 Each connection estimates its bandwidth with Google Congestion Control (`rtpgccbwe`, from the
 client's transport-wide congestion control reports), which also paces its packets. The user's
 estimate sets the bitrate of the video, which all viewers share, within 4 and 30 Mbit/s
-(`--bitrate`), starting at 10; each client gets its own estimate on the `control` channel. Two
-fixes to GStreamer go with it, to be offered upstream: the VA encoders change their bitrate
-without a keyframe (by default, each change resets the GOP), and `rtpgccbwe` holds its estimate
-when the sender uses less than two thirds of it (by default, it grows with no evidence until
-losses show it far above the link).
+(`--bitrate`), starting at 10; each client gets its own estimate on the `control` channel. The
+encoders take a new bitrate with the next frame, without a keyframe. A fix to GStreamer goes
+with it, to be offered upstream: `rtpgccbwe` holds its estimate when the sender uses less than
+two thirds of it (by default, it grows with no evidence until losses show it far above the
+link).
 
 What differs is decoding: the native client brings its own decoders and can take what browsers
 may not (VP9 4:4:4). The codec is negotiated in SDP, from the best the client offers down to
@@ -137,16 +137,19 @@ needs about a fifth fewer bits than VP9 4:4:4 for the same RGB quality. Hence AV
 bandwidth is short, VP9 4:4:4 above. Full chroma comes from the codec's own 4:4:4 profile,
 encoded in hardware: Intel GPUs encode VP9 profile 1, but AV1 in 4:2:0 only.
 
-The VA encoders do not write the colour space into the stream, and decoders then assume BT.601,
-so the conversion from the guest's RGB uses BT.601.
+The guest's RGB is converted to YUV with BT.601's matrix, limited range: what decoders assume
+when a stream does not say. The AV1 and HEVC streams say it (with BT.709 primaries and the
+sRGB transfer, the desktop's), libvpx's VP9 too; the VP9 of Intel's VA driver leaves the colour
+space unknown (measured on the A380), which decoders take for BT.601.
 
 > **Patent royalties.** AV1 and VP9 come with royalty-free patent licences (from the Alliance
 > for Open Media and Google); third-party pools also claim patents on them, aimed mainly at
 > device makers. HEVC is covered by patents licensed through patent pools, whose licensing can
 > apply to services that stream it. HEVC is therefore off by default,
-> and turning it on is the deployer's decision. This project ships no encoder or decoder of its
-> own: encoding uses the host GPU's hardware encoder through VA-API, and decoding happens in the
-> user's browser or operating system. Whether your deployment needs a patent license depends on
+> and turning it on is the deployer's decision. This project codes no picture itself: the host
+> GPU's hardware encoder does, through VA-API (this project writes the AV1 and HEVC headers that
+> describe the stream), or libvpx for VP9 on the CPU; decoding happens in the user's browser or
+> operating system. Whether your deployment needs a patent license depends on
 > your use and jurisdiction; this is not legal advice.
 
 Audio is Opus, 128 kbit/s in 10 ms frames, encoded once for every viewer. A silent source keeps
