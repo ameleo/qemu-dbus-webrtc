@@ -61,6 +61,10 @@ const DISCONNECTED_GRACE: Duration = Duration::from_secs(10);
 /// it: the largest message must fit (a drive's 1 MiB reads, with their header).
 const MAX_BUFFERED: usize = 2 * 1024 * 1024;
 
+/// str0m's deadlines already reached that the session handles in a row before it waits: a
+/// burst of a large keyframe is a few hundred packets.
+const IMMEDIATE: u32 = 1024;
+
 /// The datagrams of a session wait at most this many for its task.
 const INCOMING: usize = 1024;
 
@@ -525,6 +529,7 @@ async fn run(
     mut commands: mpsc::UnboundedReceiver<Command>,
     mut incoming: mpsc::Receiver<Datagram>,
 ) -> Result<()> {
+    let mut immediate = 0;
     loop {
         // Every input is followed by all its outputs, before the next (see str0m's run loop).
         let mut deadline = state.drain()?;
@@ -542,6 +547,23 @@ async fn run(
             }
             deadline = deadline.min(since + DISCONNECTED_GRACE);
         }
+        // A deadline already reached is str0m's pacer sending its next packet at once (a burst
+        // of a frame): handled now, the network and the frames waiting go first. A timer would
+        // wait for its next tick, a millisecond: one packet a millisecond, measured as frames
+        // spread over tens of milliseconds and the sending capped near 10 Mbit/s.
+        // At most `IMMEDIATE` in a row, then a wait: a deadline that would stay behind cannot
+        // starve the frames and messages waiting.
+        let now = Instant::now();
+        if deadline <= now && immediate < IMMEDIATE {
+            immediate += 1;
+            if let Ok(datagram) = incoming.try_recv() {
+                state.receive(datagram)?;
+            } else {
+                state.rtc.handle_input(Input::Timeout(now))?;
+            }
+            continue;
+        }
+        immediate = 0;
         tokio::select! {
             biased;
             datagram = incoming.recv() => {
