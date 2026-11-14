@@ -420,6 +420,14 @@ async fn start_in(
                 continue;
             }
             _ = still.tick() => {
+                // An estimate that came too soon after the last change is taken now: the
+                // estimate comes only when it changes, and a steady one would never be taken.
+                if let Some(bitrate) = estimated.and_then(|e| bitrate_due(e, settings.bitrate, bitrate_changed.elapsed())) {
+                    debug!(from = settings.bitrate, to = bitrate, "video bitrate");
+                    settings.bitrate = bitrate;
+                    bitrate_changed = Instant::now();
+                    share(&encoders, &sizes, &in_use, &in_layout, bitrate);
+                }
                 // A screen that turned idle gives its share back.
                 let now_in_use = busy(&last_drawn);
                 if now_in_use != in_use {
@@ -463,14 +471,7 @@ async fn start_in(
                 match request {
                     Request::Bitrate { bitrate } => {
                         estimated = Some(bitrate);
-                        // The estimate as it is: it probes the link (str0m's GCC), so it does not
-                        // rise without evidence while the screens send little.
-                        let current = f64::from(settings.bitrate);
-                        let change = (f64::from(bitrate) - current).abs() / current;
-                        let congested = f64::from(bitrate) <= current * (1.0 - BITRATE_DROP);
-                        if change >= BITRATE_STEP
-                            && (congested || bitrate_changed.elapsed() >= BITRATE_INTERVAL)
-                        {
+                        if let Some(bitrate) = bitrate_due(bitrate, settings.bitrate, bitrate_changed.elapsed()) {
                             debug!(from = settings.bitrate, to = bitrate, "video bitrate");
                             settings.bitrate = bitrate;
                             bitrate_changed = Instant::now();
@@ -833,6 +834,18 @@ async fn gone(peer: zbus::fdo::PeerProxy<'static>) {
     }
 }
 
+/// The video bitrate to take now for the user's `estimate` (both in kbit/s), from `current`,
+/// `since` the last change: the estimate as it is (it probes the link, str0m's GCC, so it does
+/// not rise without evidence while the screens send little), when it moved by `BITRATE_STEP`
+/// at least, and either fell by `BITRATE_DROP` (the link is congested: at once) or
+/// `BITRATE_INTERVAL` passed; `None` otherwise.
+fn bitrate_due(estimate: u32, current: u32, since: Duration) -> Option<u32> {
+    let current = f64::from(current.max(1));
+    let change = (f64::from(estimate) - current).abs() / current;
+    let congested = f64::from(estimate) <= current * (1.0 - BITRATE_DROP);
+    (change >= BITRATE_STEP && (congested || since >= BITRATE_INTERVAL)).then_some(estimate)
+}
+
 /// The consoles the guest drew on within `IDLE_AFTER`.
 fn busy(last_drawn: &HashMap<u32, Instant>) -> std::collections::BTreeSet<u32> {
     last_drawn
@@ -1005,6 +1018,22 @@ fn report_rates(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An estimate is taken when it moved enough: at once when it falls far, else once the
+    /// interval since the last change passed; one that came too soon is taken later.
+    #[test]
+    fn estimates_are_taken_when_due() {
+        let soon = BITRATE_INTERVAL / 2;
+        // Too soon, and not a fall: later.
+        assert_eq!(bitrate_due(29_850, 10_000, soon), None);
+        assert_eq!(bitrate_due(29_850, 10_000, BITRATE_INTERVAL), Some(29_850));
+        // A fall of 10 %: not congested, it waits as well; of 20 %, at once.
+        assert_eq!(bitrate_due(9_000, 10_000, soon), None);
+        assert_eq!(bitrate_due(9_000, 10_000, BITRATE_INTERVAL), Some(9_000));
+        assert_eq!(bitrate_due(8_000, 10_000, soon), Some(8_000));
+        // Within the step: never.
+        assert_eq!(bitrate_due(10_400, 10_000, BITRATE_INTERVAL * 10), None);
+    }
 
     /// The screens in use share what the idle ones leave, by area; with none in use, all do.
     #[test]
