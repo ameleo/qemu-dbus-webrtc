@@ -11,6 +11,10 @@
 //! ```text
 //! appsrc ! queue ! vapostproc ! video/x-raw(memory:VAMemory) ! encoder ! parser ! appsink
 //! ```
+//!
+//! HEVC on a GPU leaves GStreamer out: the `qdw-hw-encoder` crate copies the framebuffer
+//! to the GPU and drives its encoder itself (see [`crate::direct`]). The stream that comes
+//! out goes the same way as the pipeline's.
 
 use std::os::fd::{AsFd, IntoRawFd, OwnedFd};
 use std::sync::Arc;
@@ -23,6 +27,8 @@ use gstreamer_allocators::{DmaBufAllocator, FdAllocator, FdMemoryFlags, prelude:
 use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
 use tracing::warn;
+
+use crate::direct::{Direct, Mapping, Picture};
 
 /// The video codec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,6 +261,12 @@ pub struct Settings {
     pub ten_bits: bool,
     /// Encode on the CPU (VP9 only) rather than on the GPU.
     pub software: bool,
+    /// The highest bitrate the stream will be set to, in kbit/s: what an HEVC stream says of
+    /// itself, from its start (its level).
+    pub max_bitrate: u32,
+    /// Encode on the GPU's own API where this program does (HEVC), rather than through
+    /// GStreamer's VA elements.
+    pub direct: bool,
 }
 
 /// The software encoder: libvpx's VP9, for hosts without a GPU. Real time (deadline=1,
@@ -331,17 +343,43 @@ const LATEST: &str = "leaky-type=downstream max-buffers=1";
 const QUEUE: &str = "queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream";
 
 /// Where the encoded frames go.
-type Sink = Arc<std::sync::Mutex<Box<dyn FnMut(&gst::Buffer) + Send>>>;
+pub(crate) type Sink = Arc<std::sync::Mutex<Box<dyn FnMut(&gst::Buffer) + Send>>>;
 
 /// What an encoder produced, across its pipelines.
 #[derive(Default, Clone)]
-struct Counters {
+pub(crate) struct Counters {
     /// Frames out of the encoder.
-    encoded: Arc<AtomicU64>,
+    pub(crate) encoded: Arc<AtomicU64>,
     /// Bytes out of the encoder.
-    bytes: Arc<AtomicU64>,
+    pub(crate) bytes: Arc<AtomicU64>,
     /// Bytes out of the encoder since it started.
-    output: Arc<AtomicU64>,
+    pub(crate) output: Arc<AtomicU64>,
+}
+
+/// What encodes: a GStreamer pipeline, or the GPU's own API. An encoder keeps the one it
+/// started with.
+enum Backend {
+    Pipeline {
+        pipeline: gst::Pipeline,
+        src: gst_app::AppSrc,
+    },
+    Direct(Direct),
+}
+
+/// Start what encodes `settings`: the GPU's own API when asked and able, a pipeline
+/// otherwise.
+fn backend(settings: &Settings, sink: &Sink, counters: &Counters) -> Result<Backend> {
+    if settings.direct && !settings.software && settings.codec == Codec::Hevc {
+        match Direct::new(settings, sink.clone(), counters.clone()) {
+            Ok(direct) => return Ok(Backend::Direct(direct)),
+            Err(error) => warn!(
+                error = %format!("{error:#}"),
+                "no direct encoder: encoding through GStreamer"
+            ),
+        }
+    }
+    let (pipeline, src) = build(settings, sink, counters)?;
+    Ok(Backend::Pipeline { pipeline, src })
 }
 
 /// Build and start an encoding pipeline for `settings`, its output to `sink`.
@@ -471,10 +509,18 @@ pub fn pixman_format(code: u32) -> Option<gst_video::VideoFormat> {
     }
 }
 
+/// Where a framebuffer's pixels are, for what encodes them.
+enum Pixels {
+    /// For a pipeline.
+    Memory(gst::Memory),
+    /// For the GPU's own API.
+    Mapped(Arc<Mapping>),
+}
+
 /// A guest framebuffer, ready to be pushed as often as it changes.
 struct Framebuffer {
     caps: gst::Caps,
-    memory: gst::Memory,
+    pixels: Pixels,
     format: gst_video::VideoFormat,
     width: u32,
     height: u32,
@@ -484,8 +530,7 @@ struct Framebuffer {
 
 /// One console's encoder.
 pub struct Encoder {
-    pipeline: gst::Pipeline,
-    src: gst_app::AppSrc,
+    backend: Backend,
     sink: Sink,
     framebuffer: Option<Framebuffer>,
     counters: Counters,
@@ -503,10 +548,9 @@ impl Encoder {
     ) -> Result<Self> {
         let counters = Counters::default();
         let sink: Sink = Arc::new(std::sync::Mutex::new(Box::new(sink)));
-        let (pipeline, src) = build(settings, &sink, &counters)?;
+        let backend = backend(settings, &sink, &counters)?;
         Ok(Self {
-            pipeline,
-            src,
+            backend,
             sink,
             framebuffer: None,
             counters,
@@ -520,10 +564,15 @@ impl Encoder {
     /// change of depth needs a new one. The old pipeline stops first: none of its frames comes
     /// after the new keyframe.
     pub fn restart(&mut self, settings: &Settings) -> Result<()> {
-        let (pipeline, src) = build(settings, &self.sink, &self.counters)?;
-        let _ = self.pipeline.set_state(gst::State::Null);
-        self.pipeline = pipeline;
-        self.src = src;
+        match &mut self.backend {
+            Backend::Pipeline { pipeline, src } => {
+                let (new_pipeline, new_src) = build(settings, &self.sink, &self.counters)?;
+                let _ = pipeline.set_state(gst::State::Null);
+                *pipeline = new_pipeline;
+                *src = new_src;
+            }
+            Backend::Direct(direct) => direct.restart(settings)?,
+        }
         self.frame()
     }
 
@@ -541,9 +590,14 @@ impl Encoder {
         let format =
             video_format(fourcc).ok_or_else(|| anyhow!("unsupported fourcc {fourcc:#x}"))?;
         let (fd, size) = own(fd, offset, width, stride, height)?;
-        // SAFETY: the descriptor is a DMA-BUF, and owned by the memory from now on.
-        let memory = unsafe { DmaBufAllocator::new().alloc_dmabuf(fd, size)? };
-        self.install(memory, format, width, height, offset, stride)
+        let pixels = match &self.backend {
+            // SAFETY: the descriptor is a DMA-BUF, and owned by the memory from now on.
+            Backend::Pipeline { .. } => {
+                Pixels::Memory(unsafe { DmaBufAllocator::new().alloc_dmabuf(fd, size)? })
+            }
+            Backend::Direct(_) => Pixels::Mapped(Arc::new(Mapping::new(fd, size, true)?)),
+        };
+        self.install(pixels, format, width, height, offset, stride)
     }
 
     /// A new framebuffer in memory shared with QEMU: `fd` holds `width`x`height` pixels in
@@ -559,16 +613,20 @@ impl Encoder {
         stride: u32,
     ) -> Result<()> {
         let (fd, size) = own(fd, offset, width, stride, height)?;
-        // SAFETY: the descriptor is a mappable file (a memfd), and owned by the memory from now
-        // on.
-        let memory =
-            unsafe { FdAllocator::new().alloc_fd(fd.into_raw_fd(), size, FdMemoryFlags::NONE)? };
-        self.install(memory, format, width, height, offset, stride)
+        let pixels = match &self.backend {
+            // SAFETY: the descriptor is a mappable file (a memfd), and owned by the memory
+            // from now on.
+            Backend::Pipeline { .. } => Pixels::Memory(unsafe {
+                FdAllocator::new().alloc_fd(fd.into_raw_fd(), size, FdMemoryFlags::NONE)?
+            }),
+            Backend::Direct(_) => Pixels::Mapped(Arc::new(Mapping::new(fd, size, false)?)),
+        };
+        self.install(pixels, format, width, height, offset, stride)
     }
 
     fn install(
         &mut self,
-        memory: gst::Memory,
+        pixels: Pixels,
         format: gst_video::VideoFormat,
         width: u32,
         height: u32,
@@ -582,7 +640,7 @@ impl Encoder {
             .to_caps()?;
         self.framebuffer = Some(Framebuffer {
             caps,
-            memory,
+            pixels,
             format,
             width,
             height,
@@ -597,27 +655,41 @@ impl Encoder {
         let Some(fb) = &self.framebuffer else {
             return Ok(());
         };
-        if self.src.caps().as_ref() != Some(&fb.caps) {
-            self.src.set_caps(Some(&fb.caps));
+        match (&self.backend, &fb.pixels) {
+            (Backend::Pipeline { src, .. }, Pixels::Memory(memory)) => {
+                if src.caps().as_ref() != Some(&fb.caps) {
+                    src.set_caps(Some(&fb.caps));
+                }
+                let mut buffer = gst::Buffer::new();
+                {
+                    let buffer = buffer.get_mut().unwrap();
+                    buffer.append_memory(memory.clone());
+                    // The layout of the pixels in the DMA-BUF, which the caps alone do not
+                    // give.
+                    gst_video::VideoMeta::add_full(
+                        buffer,
+                        gst_video::VideoFrameFlags::empty(),
+                        fb.format,
+                        fb.width,
+                        fb.height,
+                        &[fb.offset],
+                        &[fb.stride],
+                    )?;
+                }
+                src.push_buffer(buffer)
+                    .map_err(|e| anyhow!("pushing a frame: {e:?}"))?;
+            }
+            (Backend::Direct(direct), Pixels::Mapped(mapping)) => direct.frame(Picture {
+                mapping: mapping.clone(),
+                format: fb.format,
+                width: fb.width,
+                height: fb.height,
+                offset: fb.offset,
+                stride: fb.stride as usize,
+            }),
+            // An encoder keeps its backend, and its framebuffers are made for it.
+            _ => bail!("a framebuffer made for another encoder"),
         }
-        let mut buffer = gst::Buffer::new();
-        {
-            let buffer = buffer.get_mut().unwrap();
-            buffer.append_memory(fb.memory.clone());
-            // The layout of the pixels in the DMA-BUF, which the caps alone do not give.
-            gst_video::VideoMeta::add_full(
-                buffer,
-                gst_video::VideoFrameFlags::empty(),
-                fb.format,
-                fb.width,
-                fb.height,
-                &[fb.offset],
-                &[fb.stride],
-            )?;
-        }
-        self.src
-            .push_buffer(buffer)
-            .map_err(|e| anyhow!("pushing a frame: {e:?}"))?;
         self.last_frame.set(std::time::Instant::now());
         Ok(())
     }
@@ -630,19 +702,29 @@ impl Encoder {
     /// Make the next frame a keyframe, and encode the framebuffer now: a new viewer, or one
     /// that lost a frame, needs it even if the guest does not draw.
     pub fn keyframe(&self) -> Result<()> {
-        self.src.send_event(
-            gst_video::DownstreamForceKeyUnitEvent::builder()
-                .all_headers(true)
-                .build(),
-        );
+        match &self.backend {
+            Backend::Pipeline { src, .. } => {
+                src.send_event(
+                    gst_video::DownstreamForceKeyUnitEvent::builder()
+                        .all_headers(true)
+                        .build(),
+                );
+            }
+            Backend::Direct(direct) => direct.keyframe(),
+        }
         self.frame()
     }
 
     /// Change the target bitrate, in kbit/s, and the rate control buffer with it. The VA
     /// encoders of GStreamer 1.26 reconfigure for it, which resets the GOP and costs a
-    /// keyframe; patched (the `.daas` build), they take it with the next frame.
+    /// keyframe; patched (the `.daas` build), they take it with the next frame, as the GPU's
+    /// own API does.
     pub fn set_bitrate(&self, bitrate: u32) {
-        if let Some(encoder) = self.pipeline.by_name("encoder") {
+        let pipeline = match &self.backend {
+            Backend::Pipeline { pipeline, .. } => pipeline,
+            Backend::Direct(direct) => return direct.set_bitrate(bitrate),
+        };
+        if let Some(encoder) = pipeline.by_name("encoder") {
             if encoder.find_property("target-bitrate").is_some() {
                 // libvpx, which takes it with the next frame.
                 let bps = i32::try_from(u64::from(bitrate) * 1000).unwrap_or(i32::MAX);
@@ -673,20 +755,31 @@ impl Encoder {
     }
 
     /// Finish the stream: the last frames go through before this returns.
-    pub fn finish(self) {
-        let _ = self.src.end_of_stream();
-        if let Some(bus) = self.pipeline.bus() {
-            let _ =
-                bus.timed_pop_filtered(gst::ClockTime::from_seconds(2), &[gst::MessageType::Eos]);
+    pub fn finish(mut self) {
+        match &mut self.backend {
+            Backend::Pipeline { pipeline, src } => {
+                let _ = src.end_of_stream();
+                if let Some(bus) = pipeline.bus() {
+                    let _ = bus.timed_pop_filtered(
+                        gst::ClockTime::from_seconds(2),
+                        &[gst::MessageType::Eos],
+                    );
+                }
+                // Dropped next: the pipeline stops.
+            }
+            // No frame waits in it: the one being encoded goes through.
+            Backend::Direct(direct) => direct.stop(),
         }
-        // Dropped next: the pipeline stops.
     }
 }
 
 impl Drop for Encoder {
     /// Stopped, finished or not: GStreamer wants a pipeline stopped before it goes.
     fn drop(&mut self) {
-        let _ = self.pipeline.set_state(gst::State::Null);
+        // The direct encoder stops when it is dropped.
+        if let Backend::Pipeline { pipeline, .. } = &self.backend {
+            let _ = pipeline.set_state(gst::State::Null);
+        }
     }
 }
 
@@ -720,6 +813,8 @@ mod tests {
             bitrate: 1000,
             ten_bits: false,
             software: true,
+            max_bitrate: 1000,
+            direct: true,
         };
         let (tx, rx) = std::sync::mpsc::channel();
         let mut encoder = Encoder::new(&settings, move |frame: &gst::Buffer| {
@@ -739,6 +834,71 @@ mod tests {
         encoder.keyframe().unwrap();
         let size = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
         assert!(size > 0);
+        encoder.finish();
+    }
+
+    /// HEVC on the GPU's own API: a framebuffer comes out as a keyframe with its parameter
+    /// sets, then as pictures predicted from it, a bitrate change included. Skipped where no
+    /// GPU encodes HEVC that way.
+    #[test]
+    fn a_framebuffer_is_encoded_directly() {
+        gst::init().unwrap();
+        let (width, height) = (320, 240);
+        let file = rustix::fs::memfd_create("fb", rustix::fs::MemfdFlags::CLOEXEC).unwrap();
+        rustix::fs::ftruncate(&file, u64::from(width * height * 4)).unwrap();
+        let settings = Settings {
+            codec: Codec::Hevc,
+            full_chroma: true,
+            bitrate: 1000,
+            ten_bits: false,
+            software: false,
+            max_bitrate: 4000,
+            direct: true,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let Ok(mut encoder) = Encoder::new(&settings, move |frame: &gst::Buffer| {
+            let delta = frame.flags().contains(gst::BufferFlags::DELTA_UNIT);
+            let _ = tx.send((frame.map_readable().unwrap().to_vec(), delta));
+        }) else {
+            eprintln!("no HEVC encoder: skipped");
+            return;
+        };
+        if !matches!(encoder.backend, Backend::Direct(_)) {
+            eprintln!("no direct HEVC encoder: skipped");
+            return;
+        }
+        encoder
+            .set_shared_framebuffer(
+                &file,
+                width,
+                height,
+                gst_video::VideoFormat::Bgrx,
+                0,
+                width * 4,
+            )
+            .unwrap();
+        // The NAL unit types of a frame (H.265 table 7-1).
+        let types = |frame: &[u8]| -> Vec<u8> {
+            frame
+                .windows(4)
+                .filter(|w| w[..3] == [0, 0, 1])
+                .map(|w| (w[3] >> 1) & 0x3f)
+                .collect()
+        };
+        let wait = std::time::Duration::from_secs(10);
+        encoder.keyframe().unwrap();
+        let (frame, delta) = rx.recv_timeout(wait).unwrap();
+        // VPS, SPS, PPS, IDR.
+        assert_eq!(types(&frame), [32, 33, 34, 19]);
+        assert!(!delta);
+        encoder.set_bitrate(2000);
+        encoder.frame().unwrap();
+        let (frame, delta) = rx.recv_timeout(wait).unwrap();
+        assert_eq!(types(&frame), [1]);
+        assert!(delta);
+        encoder.restart(&settings).unwrap();
+        let (frame, _) = rx.recv_timeout(wait).unwrap();
+        assert_eq!(types(&frame), [32, 33, 34, 19]);
         encoder.finish();
     }
 

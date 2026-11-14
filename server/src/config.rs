@@ -104,6 +104,9 @@ struct Video {
     codec: Option<String>,
     chroma: Option<String>,
     software: Option<bool>,
+    /// Encode on the GPU's own API where this program does (HEVC), rather than through
+    /// GStreamer: true by default.
+    direct: Option<bool>,
     record: Option<String>,
 }
 
@@ -380,6 +383,8 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
                 bitrate: start,
                 ten_bits: false,
                 software,
+                max_bitrate: max,
+                direct: video.direct.unwrap_or(true),
             },
             codec_given,
             bitrates,

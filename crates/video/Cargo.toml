@@ -14,5 +14,6 @@ gstreamer.workspace = true
 gstreamer-allocators.workspace = true
 gstreamer-app.workspace = true
 gstreamer-video.workspace = true
-rustix = { workspace = true, features = ["fs"] }
+qdw-hw-encoder.workspace = true
+rustix = { workspace = true, features = ["fs", "mm"] }
 tracing.workspace = true

@@ -894,6 +894,8 @@ mod tests {
             bitrate: 2000,
             ten_bits: false,
             software: false,
+            max_bitrate: 30_000,
+            direct: true,
         };
         let video_out = viewers.clone();
         let mut encoder = qdw_video::encode::Encoder::new(&settings, move |frame| {

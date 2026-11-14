@@ -1763,6 +1763,7 @@ dependencies = [
  "gstreamer-allocators",
  "gstreamer-app",
  "gstreamer-video",
+ "qdw-hw-encoder",
  "rustix",
  "tracing",
 ]

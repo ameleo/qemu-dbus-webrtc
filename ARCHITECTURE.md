@@ -34,7 +34,11 @@ libvirt, plain QEMU) starts and stops it.
   scanouts (DMA-BUF, `ScanoutDMABUF2`), cursor, keyboard, mouse, audio and clipboard.
 - **Video:** GStreamer, VA-API hardware encoding. The guest framebuffer is a linear DMA-BUF
   that VA-API cannot import as RGB, so `vapostproc` uploads it (one CPU copy) and converts it to
-  YUV on the GPU, where the encoder reads it.
+  YUV on the GPU, where the encoder reads it. HEVC leaves GStreamer out of the encoding: the
+  `qdw-hw-encoder` crate drives VA-API itself (the same copy and conversion), and writes
+  the stream's headers, so that a keyframe or a bitrate change comes with the very next frame
+  and the stream says what its colours are. `[video] direct = false` goes back to GStreamer's
+  elements.
 - **Transport:** GStreamer `webrtcbin`, with congestion control (GCC) driving the encoder bitrate.
 - **Transport, per viewer:** each viewer has its own `webrtcbin`, fed with the encoded frames
   of the console it watches: one encoder per console, whatever the number of viewers. A viewer

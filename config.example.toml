@@ -52,6 +52,9 @@ chroma = "444"
 # Encode on the CPU (VP9), without a GPU. Default: false, and true when the host has no GPU
 # encoder.
 software = false
+# Encode HEVC on the GPU's own API (VA-API), without GStreamer's VA elements. Default: true;
+# false goes back to them.
+# direct = true
 # Record each screen's stream to <prefix>-<vm uuid>-<console>.<extension>.
 # record = "/var/tmp/qdw"
 
