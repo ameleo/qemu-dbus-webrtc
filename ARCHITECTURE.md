@@ -41,7 +41,11 @@ libvirt, plain QEMU) starts and stops it.
   or a bitrate change comes with the very next frame and the stream says what its colours are.
   Up to 60 frames a second per screen: the encoders measure the frame rate the guest draws at,
   and spread the bitrate over it.
-- **Transport:** GStreamer `webrtcbin`, with congestion control (GCC) driving the encoder bitrate.
+- **Transport:** GStreamer `webrtcbin`, with congestion control (GCC) driving the encoder bitrate;
+  or, with `[webrtc] stack = "str0m"`, str0m (`peer.rs`), being tried to replace it: a task per
+  session owns its state and its UDP sockets (one host candidate per address of the host),
+  packetizes the frames, paces them to its GCC estimate (with probes), retransmits what the
+  client misses (NACK, RTX), carries the data channels and decodes the microphone's Opus.
 - **Transport, per viewer:** each viewer has its own `webrtcbin`, fed with the encoded frames
   of the console it watches: one encoder per console, whatever the number of viewers. A viewer
   that loses a frame asks for a keyframe (PLI), which goes back to the encoder.

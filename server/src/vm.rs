@@ -17,7 +17,7 @@ use qdw_video::encode::{Encoder, Settings};
 use qdw_video::record;
 
 use crate::config::VmConfig;
-use crate::session::{self, Viewers};
+use crate::transport::{self, Viewers};
 use crate::web::{self, Request};
 use crate::{agent, audio, cameras, clipboard, copied, drives, input, layout, pointer, printers};
 
@@ -76,7 +76,7 @@ fn stream_sink(
     };
     Ok(move |frame: &gst::Buffer| {
         if let Some(viewers) = &viewers {
-            session::fan_out(viewers, frame);
+            transport::fan_out(viewers, frame);
         }
         if let Some(r) = &mut recorder {
             let written = frame
@@ -215,13 +215,13 @@ async fn start_in(
     // as many as a session carries. The others are not listened to: no viewer could see them,
     // and each would take an encoder.
     graphic.sort_by_key(|(head, id, _)| (*head, *id));
-    if graphic.len() > session::MAX_SCREENS {
+    if graphic.len() > transport::MAX_SCREENS {
         warn!(
             screens = graphic.len(),
-            shown = session::MAX_SCREENS,
+            shown = transport::MAX_SCREENS,
             "more guest screens than a session carries: the last ones are not shown"
         );
-        graphic.truncate(session::MAX_SCREENS);
+        graphic.truncate(transport::MAX_SCREENS);
     }
     if graphic.is_empty() {
         bail!("the VM has no graphic console");
@@ -253,7 +253,7 @@ async fn start_in(
     let first = screens[0].console;
     let (requests_tx, mut requests) = mpsc::unbounded_channel();
     // The guest's sound, encoded once for every viewer.
-    let audio_viewers = session::AudioViewers::default();
+    let audio_viewers = Viewers::default();
     let audio = audio::start(&vm_connection, audio_viewers.clone()).await?;
     let (pointer_tx, pointer_rx) =
         tokio::sync::watch::channel(vec![pointer::Pointer::default(); screens.len()]);
@@ -307,6 +307,7 @@ async fn start_in(
         layout: layout.clone(),
         user: Default::default(),
         bitrates: args.bitrates,
+        stack: args.stack,
         depths: Default::default(),
     };
     let (stop_tx, stop_rx) = oneshot::channel::<()>();

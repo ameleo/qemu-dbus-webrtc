@@ -5,7 +5,7 @@ members = ["crates/*", "server"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "MPL-2.0"
 repository = "https://github.com/ameleo/qemu-dbus-webrtc"
 publish = false
@@ -26,6 +26,7 @@ gstreamer-app = "0.24"
 gstreamer-sdp = "0.24"
 gstreamer-video = "0.24"
 gstreamer-webrtc = "0.24"
+if-addrs = "0.15"
 base64 = "0.22"
 bindgen = "0.72"
 futures-util = "0.3"
@@ -41,6 +42,9 @@ rustix = "1"
 subtle = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# WebRTC without a media framework; its crypto in pure Rust, as the rest of the server.
+str0m = { version = "0.25", default-features = false }
+str0m-rust-crypto = "0.7"
 tokio = "1"
 toml = { version = "0.9", default-features = false, features = ["parse", "display", "serde", "std"] }
 tracing = "0.1"

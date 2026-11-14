@@ -38,7 +38,7 @@ use crate::input::{AgentMouse, ViewerInput};
 use crate::layout::{Layout, Size};
 use crate::pointer::{self, Pointer};
 use crate::printers::{Printers, PrintersFollow, ViewerPrinters};
-use crate::session::{AudioViewers, Bitrates, Channel, Session, Signal, Viewers};
+use crate::transport::{Bitrates, Channel, Session, Signal, Stack, Start, Viewers};
 use crate::vms::{Client, Vms};
 
 const PAGE: &str = include_str!("../web/index.html");
@@ -64,7 +64,7 @@ pub struct Shared {
     /// The guest's screens, in order: what the viewers get, one video track each.
     pub screens: Vec<Screen>,
     /// The viewers of the guest's sound.
-    pub audio_viewers: AudioViewers,
+    pub audio_viewers: Viewers,
     /// The guest's microphone.
     pub mic: Arc<Mic>,
     pub requests: mpsc::UnboundedSender<Request>,
@@ -89,6 +89,8 @@ pub struct Shared {
     pub user: Arc<User>,
     /// The bounds of the bandwidth estimation.
     pub bitrates: Bitrates,
+    /// The WebRTC stack of the sessions.
+    pub stack: Stack,
     /// Which viewers decode the video in 10 bits.
     pub depths: Arc<Depths>,
 }
@@ -509,16 +511,20 @@ async fn viewer(
     let requests = shared.requests.clone();
     let consoles: Vec<u32> = shared.screens.iter().map(|s| s.console).collect();
     let started = Session::start(
-        shared.codec,
-        shared.full_chroma,
-        // The depth the encoders take now. A known limit: when it changes later (another
-        // viewer comes or goes), the stream's HEVC profile changes and the offer does not say
-        // it: webrtcbin 1.26 cannot change the format of a track in a new offer (measured).
-        ten_bits,
-        shared.screens.iter().map(|s| s.viewers.clone()).collect(),
-        shared.audio_viewers.clone(),
-        (!shadow).then(|| shared.mic.clone()),
-        shared.bitrates,
+        shared.stack,
+        Start {
+            codec: shared.codec,
+            full_chroma: shared.full_chroma,
+            // The depth the encoders take now. A known limit: when it changes later (another
+            // viewer comes or goes), the stream's HEVC profile changes and the offer does not
+            // say it: webrtcbin 1.26 cannot change the format of a track in a new offer
+            // (measured).
+            ten_bits,
+            viewers: shared.screens.iter().map(|s| s.viewers.clone()).collect(),
+            audio_viewers: shared.audio_viewers.clone(),
+            mic: (!shadow).then(|| shared.mic.clone()),
+            bitrates: shared.bitrates,
+        },
         signals_tx,
         move |screen| {
             if let Some(&console) = consoles.get(screen) {

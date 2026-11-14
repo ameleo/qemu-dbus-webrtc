@@ -10,8 +10,8 @@
 //! caller, as `Signal`s out and `apply_answer`/`add_ice_candidate` in.
 
 use std::str::FromStr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
 use gstreamer as gst;
@@ -23,21 +23,17 @@ use gstreamer_webrtc as gst_webrtc;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use qdw_protocol::{
-    CAMERA_CHANNEL, CLIPBOARD_CHANNEL, CONTROL_CHANNEL, DRIVE_CHANNEL, INPUT_CHANNEL,
-    MAX_CAMERA_STREAMS, POINTER_CHANNEL, PRINTER_CHANNEL,
-};
+use qdw_protocol::MAX_CAMERA_STREAMS;
+#[cfg(test)]
 use qdw_video::encode::Codec;
 
 use crate::audio::Mic;
+use crate::transport::{Channel, MAX_SCREENS, Signal, Start, Viewer, Viewers, leave};
 
 /// The payload type of the first screen's video; the next screens take every other one after
 /// it (98, 100, 102), leaving room for the retransmission streams webrtcbin adds: webrtcbin and
 /// browsers tell the streams of a bundle apart by their payload type.
 const VIDEO_PT: u32 = 96;
-
-/// The guest screens a session carries, at most: one video track each.
-pub const MAX_SCREENS: usize = 4;
 
 /// The payload type of the sound: apart from the video's, which may grow to several screens.
 const AUDIO_PT: u32 = 111;
@@ -46,160 +42,25 @@ const AUDIO_PT: u32 = 111;
 /// streams of a bundle apart by their payload type.
 const CAMERA_PT: u32 = 104;
 
-/// What the session has to send to the browser.
-#[derive(Debug)]
-pub enum Signal {
-    Offer(String),
-    IceCandidate {
-        mline_index: u32,
-        candidate: String,
-    },
-    /// A data channel is open: messages can go on it.
-    Open(Channel),
-    /// A message came on a data channel.
-    Message(Channel, Vec<u8>),
-    /// An H.264 access unit (Annex B) from a client camera, on the track of `mid`.
-    CameraFrame {
-        mid: String,
-        timestamp_us: u64,
-        data: Vec<u8>,
-    },
-    /// A new estimate of the bandwidth to the client, in kbit/s.
-    Estimate(u32),
-    /// The connection failed or ended; the session is over.
-    Closed,
-}
-
-/// The data channels of a session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Channel {
-    /// Keyboard and pointer, from the client.
-    Input,
-    /// The guest pointer, to the client.
-    Pointer,
-    /// The clipboard, both ways.
-    Clipboard,
-    /// What the client wants of its session, from the client.
-    Control,
-    /// The client's drives, both ways.
-    Drive,
-    /// The client's printers, both ways.
-    Printer,
-    /// The client's cameras, both ways.
-    Camera,
-}
-
-impl Channel {
-    const ALL: [Self; 7] = [
-        Self::Input,
-        Self::Pointer,
-        Self::Clipboard,
-        Self::Control,
-        Self::Drive,
-        Self::Printer,
-        Self::Camera,
-    ];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Input => INPUT_CHANNEL,
-            Self::Pointer => POINTER_CHANNEL,
-            Self::Clipboard => CLIPBOARD_CHANNEL,
-            Self::Control => CONTROL_CHANNEL,
-            Self::Drive => DRIVE_CHANNEL,
-            Self::Printer => PRINTER_CHANNEL,
-            Self::Camera => CAMERA_CHANNEL,
-        }
-    }
-}
-
-/// The appsrcs of a console's current viewers, which its encoder feeds.
-pub type Viewers = Arc<Mutex<Vec<gst_app::AppSrc>>>;
-
-/// A viewer of the guest's sound, with the offset from the encoder's timestamps to its clock.
-pub struct AudioViewer {
-    src: gst_app::AppSrc,
-    offset: Option<i64>,
-}
-
-/// The current viewers of the guest's sound.
-pub type AudioViewers = Arc<Mutex<Vec<AudioViewer>>>;
-
-/// Send an encoded sound frame to every viewer. Unlike the video, the sound keeps the encoder's
-/// timestamps, moved once to each viewer's clock: they become the RTP timestamps, from which the
-/// receiver places the samples, and frames stamped on arrival come out of the encoder two at a
-/// time, nearly on the same stamp: the receiver took one of each pair for a duplicate and
-/// concealed half of the sound.
-pub fn fan_out_audio(viewers: &AudioViewers, frame: &gst::Buffer) {
-    let Some(pts) = frame.pts() else { return };
-    let pts = pts.nseconds() as i64;
-    for viewer in viewers.lock().unwrap().iter_mut() {
-        let Some(now) = viewer.src.current_running_time() else {
-            continue;
-        };
-        let offset = *viewer.offset.get_or_insert(now.nseconds() as i64 - pts);
-        let Ok(stamp) = u64::try_from(pts + offset) else {
-            continue;
-        };
-        let mut moved = frame.copy();
-        {
-            let moved = moved.get_mut().unwrap();
-            moved.set_pts(gst::ClockTime::from_nseconds(stamp));
-            moved.set_dts(gst::ClockTime::NONE);
-        }
-        let _ = viewer.src.push_buffer(moved);
-    }
-}
-
-/// Send an encoded frame to every viewer.
-pub fn fan_out(viewers: &Viewers, frame: &gst::Buffer) {
-    let viewers = viewers.lock().unwrap();
-    if viewers.is_empty() {
-        return;
-    }
-    // Each viewer's pipeline has its own clock, started when the viewer came: drop the
-    // encoder's timestamps so that its appsrc stamps the frame on arrival. Kept, they would be
-    // ahead of the viewer's clock by the time between the two starts, and the frame held back
-    // for that long.
-    let mut unstamped = frame.copy();
-    {
-        let unstamped = unstamped.get_mut().unwrap();
-        unstamped.set_pts(gst::ClockTime::NONE);
-        unstamped.set_dts(gst::ClockTime::NONE);
-    }
-    for viewer in viewers.iter() {
-        // A viewer that is going away refuses it; it is removed with its session.
-        let _ = viewer.push_buffer(unstamped.clone());
-    }
-}
-
 /// The transport-wide congestion control header extension: the client reports when each packet
 /// arrived, which the bandwidth estimation needs.
 const TWCC_URI: &str = "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01";
-
-/// The bounds of the bandwidth estimation, in kbit/s: the estimate starts at `start` and stays
-/// within `min` and `max`.
-#[derive(Debug, Clone, Copy)]
-pub struct Bitrates {
-    pub min: u32,
-    pub start: u32,
-    pub max: u32,
-}
 
 pub struct Session {
     pipeline: gst::Pipeline,
     webrtc: gst::Element,
     /// The data channels, in the order of [`Channel::ALL`].
     channels: Vec<gst_webrtc::WebRTCDataChannel>,
-    /// One appsrc per guest screen, and the viewers of that screen's encoder.
+    /// One appsrc per guest screen, and the viewers of that screen's encoder, where the
+    /// session is the viewer `id`.
     srcs: Vec<gst_app::AppSrc>,
     viewers: Vec<Viewers>,
+    id: u64,
     /// How many screens: the first video tracks, before the sound's.
     screens: usize,
-    /// The client paused the video: its appsrcs are out of the viewers.
+    /// The client paused the video: it is out of the viewers.
     paused: Arc<AtomicBool>,
-    audio_src: gst_app::AppSrc,
-    audio_viewers: AudioViewers,
+    audio_viewers: Viewers,
     /// Ends the session: an answer webrtcbin refuses.
     closed: mpsc::UnboundedSender<Signal>,
 }
@@ -222,22 +83,23 @@ impl Drop for StopOnDrop {
 }
 
 impl Session {
-    /// Start a session for the streams of the guest's screens, encoded with `codec` (in 10 bits
-    /// with `ten_bits`, as the offer says), one video track each in the order of `viewers`, and
-    /// the guest's sound. `keyframe` is called with a
-    /// screen's index when the client needs a keyframe of it (a lost frame, or the start).
-    #[allow(clippy::too_many_arguments)]
+    /// Start a session for the streams of the guest's screens, one video track each in the
+    /// order of `viewers`, and the guest's sound. `keyframe` is called with a screen's index
+    /// when the client needs a keyframe of it (a lost frame, or the start).
     pub fn start(
-        codec: Codec,
-        full_chroma: bool,
-        ten_bits: bool,
-        viewers: Vec<Viewers>,
-        audio_viewers: AudioViewers,
-        mic: Option<Arc<Mic>>,
-        bitrates: Bitrates,
+        start: Start,
         signals: mpsc::UnboundedSender<Signal>,
         keyframe: impl Fn(usize) + Send + Sync + 'static,
     ) -> Result<Self> {
+        let Start {
+            codec,
+            full_chroma,
+            ten_bits,
+            viewers,
+            audio_viewers,
+            mic,
+            bitrates,
+        } = start;
         let (payloader, encoding) = codec.rtp();
         let screens = viewers.len().min(MAX_SCREENS);
         // The stream's fmtp parameters the payloader does not give, added to its caps, which
@@ -587,13 +449,17 @@ rtcp-fb-transport-cc=(boolean)true,extmap-1=(string){TWCC_URI} \
             channels.push(data_channel);
         }
         pipeline.set_state(gst::State::Playing)?;
+        let id = Viewer::next_id();
         for (screen, src) in srcs.iter().enumerate() {
-            viewers[screen].lock().unwrap().push(src.clone());
+            viewers[screen]
+                .lock()
+                .unwrap()
+                .push(video_viewer(id, src.clone()));
         }
-        audio_viewers.lock().unwrap().push(AudioViewer {
-            src: audio_src.clone(),
-            offset: None,
-        });
+        audio_viewers
+            .lock()
+            .unwrap()
+            .push(audio_viewer(id, audio_src));
         stop_on_failure.disarm();
         Ok(Self {
             pipeline,
@@ -601,27 +467,28 @@ rtcp-fb-transport-cc=(boolean)true,extmap-1=(string){TWCC_URI} \
             channels,
             srcs,
             viewers,
+            id,
             screens,
             paused,
-            audio_src,
             audio_viewers,
             closed: closed_on_answer,
         })
     }
 
-    /// Pause or resume the video. Paused, the client's appsrc leaves the viewers its encoder
-    /// feeds: no frame goes to it, and a console nobody watches is not encoded. True when the
+    /// Pause or resume the video. Paused, the client leaves the viewers its encoders feed: no frame goes to it, and a console nobody watches is not encoded. True when the
     /// video resumes: the client then needs a keyframe.
     pub fn pause_video(&self, paused: bool) -> bool {
         if self.paused.swap(paused, Ordering::Relaxed) == paused {
             return false;
         }
         for (viewers, src) in self.viewers.iter().zip(&self.srcs) {
-            let mut viewers = viewers.lock().unwrap();
             if paused {
-                viewers.retain(|s| s != src);
+                leave(viewers, self.id);
             } else {
-                viewers.push(src.clone());
+                viewers
+                    .lock()
+                    .unwrap()
+                    .push(video_viewer(self.id, src.clone()));
             }
         }
         debug!(paused, "client video");
@@ -833,15 +700,56 @@ rtcp-fb-transport-cc=(boolean)true,extmap-1=(string){TWCC_URI} \
     }
 }
 
+/// A viewer of a screen's video that feeds `src`. Each viewer's pipeline has its own clock,
+/// started when the viewer came: the encoder's timestamps are dropped so that its appsrc stamps
+/// the frame on arrival. Kept, they would be ahead of the viewer's clock by the time between the
+/// two starts, and the frame held back for that long.
+fn video_viewer(id: u64, src: gst_app::AppSrc) -> Viewer {
+    Viewer::new(id, move |frame: &gst::Buffer| {
+        let mut unstamped = frame.copy();
+        {
+            let unstamped = unstamped.get_mut().unwrap();
+            unstamped.set_pts(gst::ClockTime::NONE);
+            unstamped.set_dts(gst::ClockTime::NONE);
+        }
+        // A viewer that is going away refuses it; it is removed with its session.
+        let _ = src.push_buffer(unstamped);
+    })
+}
+
+/// A viewer of the guest's sound that feeds `src`. Unlike the video, the sound keeps the
+/// encoder's timestamps, moved once to the viewer's clock: they become the RTP timestamps, from
+/// which the receiver places the samples, and frames stamped on arrival come out of the encoder
+/// two at a time, nearly on the same stamp: the receiver took one of each pair for a duplicate
+/// and concealed half of the sound.
+fn audio_viewer(id: u64, src: gst_app::AppSrc) -> Viewer {
+    let mut offset: Option<i64> = None;
+    Viewer::new(id, move |frame: &gst::Buffer| {
+        let Some(pts) = frame.pts() else { return };
+        let pts = pts.nseconds() as i64;
+        let Some(now) = src.current_running_time() else {
+            return;
+        };
+        let offset = *offset.get_or_insert(now.nseconds() as i64 - pts);
+        let Ok(stamp) = u64::try_from(pts + offset) else {
+            return;
+        };
+        let mut moved = frame.copy();
+        {
+            let moved = moved.get_mut().unwrap();
+            moved.set_pts(gst::ClockTime::from_nseconds(stamp));
+            moved.set_dts(gst::ClockTime::NONE);
+        }
+        let _ = src.push_buffer(moved);
+    })
+}
+
 impl Drop for Session {
     fn drop(&mut self) {
-        for (viewers, src) in self.viewers.iter().zip(&self.srcs) {
-            viewers.lock().unwrap().retain(|s| s != src);
+        for viewers in &self.viewers {
+            leave(viewers, self.id);
         }
-        self.audio_viewers
-            .lock()
-            .unwrap()
-            .retain(|viewer| viewer.src != self.audio_src);
+        leave(&self.audio_viewers, self.id);
         let _ = self.pipeline.set_state(gst::State::Null);
     }
 }
@@ -865,20 +773,22 @@ mod tests {
             return;
         }
         let viewers = Viewers::default();
-        let audio_viewers = AudioViewers::default();
+        let audio_viewers = Viewers::default();
         let (signals_tx, signals) = std::sync::mpsc::channel();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let session = Session::start(
-            Codec::Hevc,
-            false,
-            false,
-            vec![viewers.clone()],
-            audio_viewers.clone(),
-            None,
-            Bitrates {
-                min: 1000,
-                start: 2000,
-                max: 4000,
+            Start {
+                codec: Codec::Hevc,
+                full_chroma: false,
+                ten_bits: false,
+                viewers: vec![viewers.clone()],
+                audio_viewers: audio_viewers.clone(),
+                mic: None,
+                bitrates: crate::transport::Bitrates {
+                    min: 1000,
+                    start: 2000,
+                    max: 4000,
+                },
             },
             tx,
             |_| {},
@@ -887,7 +797,7 @@ mod tests {
         // The sound flows first: the offer waits for it.
         let audio_out = audio_viewers.clone();
         let _audio = qdw_audio::AudioEncoder::new(move |frame| {
-            fan_out_audio(&audio_out, frame);
+            crate::transport::fan_out(&audio_out, frame);
         })
         .unwrap();
         let file = rustix::fs::memfd_create("fb", rustix::fs::MemfdFlags::CLOEXEC).unwrap();
@@ -902,7 +812,7 @@ mod tests {
         };
         let video_out = viewers.clone();
         let mut encoder = qdw_video::encode::Encoder::new(&settings, move |frame| {
-            fan_out(&video_out, frame);
+            crate::transport::fan_out(&video_out, frame);
         })
         .unwrap();
         encoder
