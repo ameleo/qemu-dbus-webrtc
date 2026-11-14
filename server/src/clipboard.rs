@@ -137,6 +137,10 @@ pub struct Clipboard {
     /// What the guest clipboard holds, as the viewers name the types: empty for nothing.
     guest: watch::Sender<Vec<String>>,
     owner: Mutex<Option<Owner>>,
+    /// The viewer each lock of the guest was taken on, by clip data id: locked file data stays
+    /// readable after the clipboard changes owner (MS-RDPECLIP 2.2.4.1), the guest's own copy
+    /// included.
+    locks: Mutex<HashMap<u32, mpsc::UnboundedSender<HostCall>>>,
     serial: AtomicU32,
     viewers: AtomicU64,
 }
@@ -147,6 +151,7 @@ impl Clipboard {
             agent: Mutex::new(None),
             guest: watch::Sender::new(Vec::new()),
             owner: Mutex::new(None),
+            locks: Mutex::new(HashMap::new()),
             serial: AtomicU32::new(0),
             viewers: AtomicU64::new(0),
         })
@@ -163,6 +168,29 @@ impl Clipboard {
             Some(owner) if serial.is_none_or(|s| s == owner.serial) => Some(owner.calls.clone()),
             _ => None,
         }
+    }
+
+    /// The calls channel for a guest request citing `clip_data_id`: the viewer the guest locked
+    /// it on, whoever owns the clipboard now; the current owner for a request citing no lock.
+    fn calls_for(&self, clip_data_id: Option<u32>) -> Option<mpsc::UnboundedSender<HostCall>> {
+        clip_data_id
+            .and_then(|id| self.locks.lock().unwrap().get(&id).cloned())
+            .or_else(|| self.owner_calls(None))
+    }
+
+    /// The guest locks the file data of the clipboard's owner under `clip_data_id`.
+    fn lock(&self, clip_data_id: u32) -> Option<mpsc::UnboundedSender<HostCall>> {
+        let calls = self.owner_calls(None)?;
+        self.locks
+            .lock()
+            .unwrap()
+            .insert(clip_data_id, calls.clone());
+        Some(calls)
+    }
+
+    /// The guest unlocks `clip_data_id`: the viewer it was locked on.
+    fn unlock(&self, clip_data_id: u32) -> Option<mpsc::UnboundedSender<HostCall>> {
+        self.locks.lock().unwrap().remove(&clip_data_id)
     }
 
     /// Add the interfaces the guest calls back for the clipboard to an agent connection.
@@ -238,7 +266,7 @@ impl Clipboard {
             data: HashMap::new(),
             files: HashMap::new(),
             file_index: None,
-            locks: std::collections::HashSet::new(),
+            locks: HashMap::new(),
             next_request: 0,
             open: false,
         };
@@ -310,7 +338,7 @@ struct HostFileClipboard {
 impl HostFileClipboard {
     async fn lock_clip_data(&self, clip_data_id: u32) -> zbus::fdo::Result<()> {
         debug!(clip_data_id, "guest locks the viewer's clipboard");
-        if let Some(calls) = self.clipboard.owner_calls(None) {
+        if let Some(calls) = self.clipboard.lock(clip_data_id) {
             let _ = calls.send(HostCall::Lock(clip_data_id));
         }
         Ok(())
@@ -318,7 +346,7 @@ impl HostFileClipboard {
 
     async fn unlock_clip_data(&self, clip_data_id: u32) -> zbus::fdo::Result<()> {
         debug!(clip_data_id, "guest unlocks the viewer's clipboard");
-        if let Some(calls) = self.clipboard.owner_calls(None) {
+        if let Some(calls) = self.clipboard.unlock(clip_data_id) {
             let _ = calls.send(HostCall::Unlock(clip_data_id));
         }
         Ok(())
@@ -342,10 +370,13 @@ impl HostFileClipboard {
             has_clip_data_id,
             "guest reads a viewer's file"
         );
-        let Some(calls) = self.clipboard.owner_calls(None) else {
+        let Some(calls) = self
+            .clipboard
+            .calls_for(has_clip_data_id.then_some(clip_data_id))
+        else {
             warn!(
                 lindex,
-                "guest reads a file, but no viewer owns the clipboard"
+                "guest reads a file, but no viewer owns the clipboard nor locked it"
             );
             return Err(no_data());
         };
@@ -394,8 +425,9 @@ pub struct ViewerClipboard {
     /// For each file of the list the guest got from this viewer, its index in the viewer's;
     /// `None` until the guest got one.
     file_index: Option<Vec<u32>>,
-    /// The clipboard contents the guest locked on this viewer, by id.
-    locks: std::collections::HashSet<u32>,
+    /// The clipboard contents the guest locked on this viewer, by id, with the file index of
+    /// the list the guest had then: a later list does not change what a lock reads.
+    locks: HashMap<u32, Option<Vec<u32>>>,
     next_request: u32,
     /// Whether the clipboard data channel is open.
     open: bool,
@@ -458,11 +490,11 @@ impl ViewerClipboard {
             HostCall::File { mut request, reply } => {
                 // The guest's index, in the list it got, to the viewer's: a file of no list the
                 // guest got is none of the viewer's.
-                match self
-                    .file_index
-                    .as_ref()
-                    .and_then(|kept| kept.get(request.index as usize))
-                {
+                let index = match request.clip_data_id.and_then(|id| self.locks.get(&id)) {
+                    Some(locked) => locked.as_ref(),
+                    None => self.file_index.as_ref(),
+                };
+                match index.and_then(|kept| kept.get(request.index as usize)) {
                     Some(&index) => request.index = index,
                     None => {
                         warn!(
@@ -503,11 +535,13 @@ impl ViewerClipboard {
                     length: request.length,
                     // A lock the guest never took here means nothing to the client: ask for the
                     // current content. (The Windows agent may cite one it took on its side.)
-                    clip_data_id: request.clip_data_id.filter(|id| self.locks.contains(id)),
+                    clip_data_id: request
+                        .clip_data_id
+                        .filter(|id| self.locks.contains_key(id)),
                 })
             }
             HostCall::Lock(clip_data_id) => {
-                self.locks.insert(clip_data_id);
+                self.locks.insert(clip_data_id, self.file_index.clone());
                 Message::Lock(ClipboardLock { clip_data_id })
             }
             HostCall::Unlock(clip_data_id) => {
@@ -973,6 +1007,64 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(answer.try_recv().unwrap(), Some(vec![0; 4]));
+    }
+
+    /// A lock keeps a viewer's file data readable after the guest copied something else
+    /// (MS-RDPECLIP 2.2.4.1): requests citing it go to the viewer it was taken on, until the
+    /// guest unlocks it.
+    #[test]
+    fn locked_files_stay_readable_after_a_guest_copy() {
+        let clipboard = Clipboard::new();
+        let (calls, mut viewer) = mpsc::unbounded_channel();
+        *clipboard.owner.lock().unwrap() = Some(Owner {
+            viewer: 1,
+            serial: 1,
+            calls,
+        });
+        assert!(clipboard.lock(7).is_some());
+        // The guest copies: no viewer owns the clipboard any more.
+        *clipboard.owner.lock().unwrap() = None;
+        assert!(clipboard.calls_for(None).is_none());
+        clipboard
+            .calls_for(Some(7))
+            .expect("the viewer the lock was taken on")
+            .send(HostCall::Lock(7))
+            .unwrap();
+        assert!(matches!(viewer.try_recv(), Ok(HostCall::Lock(7))));
+        // Unlocked, the lock routes nothing.
+        assert!(clipboard.unlock(7).is_some());
+        assert!(clipboard.calls_for(Some(7)).is_none());
+    }
+
+    /// A lock reads the file list the guest had when it locked, not a later one.
+    #[test]
+    fn a_lock_keeps_its_file_list() {
+        let clipboard = Clipboard::new();
+        let (mut viewer, _follow) = clipboard.viewer();
+        let request = |viewer: &mut ViewerClipboard, index, clip_data_id| {
+            let (reply, _answer) = oneshot::channel();
+            let request = FilePiece {
+                index,
+                size: true,
+                offset: 0,
+                length: 0,
+                clip_data_id,
+            };
+            let sent = viewer.host_call(HostCall::File { request, reply });
+            match ClipboardMessage::decode(sent[0].as_slice())
+                .unwrap()
+                .message
+            {
+                Some(Message::FileRequest(r)) => (r.index, r.clip_data_id),
+                _ => panic!("not a file request"),
+            }
+        };
+        viewer.file_index = Some(vec![0, 2]);
+        viewer.host_call(HostCall::Lock(5));
+        // The viewer copies another list, which the guest gets.
+        viewer.file_index = Some(vec![9]);
+        assert_eq!(request(&mut viewer, 1, Some(5)), (2, Some(5)));
+        assert_eq!(request(&mut viewer, 0, None), (9, None));
     }
 
     /// A file list from a viewer reaches the agent in the Windows format, and back.
