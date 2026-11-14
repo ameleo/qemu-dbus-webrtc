@@ -1995,7 +1995,7 @@ dependencies = [
 
 [[package]]
 name = "qdw-audio"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "bindgen",
@@ -2006,7 +2006,7 @@ dependencies = [
 
 [[package]]
 name = "qdw-hw-encoder"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bindgen",
  "pkg-config",
@@ -2015,7 +2015,7 @@ dependencies = [
 
 [[package]]
 name = "qdw-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "prost",
  "prost-build",
@@ -2024,7 +2024,7 @@ dependencies = [
 
 [[package]]
 name = "qdw-qemu"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -2036,7 +2036,7 @@ dependencies = [
 
 [[package]]
 name = "qdw-video"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "qdw-hw-encoder",
@@ -2046,7 +2046,7 @@ dependencies = [
 
 [[package]]
 name = "qemu-dbus-webrtc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "argon2",

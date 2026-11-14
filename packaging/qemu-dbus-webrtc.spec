@@ -4,7 +4,7 @@
 # the CI's container has the network. The tarball's top directory is %{name}-%{version}.
 
 Name:           qemu-dbus-webrtc
-Version:        0.1.0
+Version:        0.1.1
 Release:        1%{?dist}
 Summary:        WebRTC console for QEMU virtual machines
 License:        MPL-2.0
@@ -76,5 +76,12 @@ install -d -m 0700 %{buildroot}%{_sysconfdir}/qemu-dbus-webrtc/tls
 %dir %attr(0700,root,root) %{_sysconfdir}/qemu-dbus-webrtc/tls
 
 %changelog
+* Sat Nov 14 2026 Mickaël Bourneuf <mickael.bourneuf@ameleo.fr> - 0.1.1-1
+- On a narrow link, drop frames while the encoder is ahead of its bitrate, rather than let
+  the sender's queue delay the picture and the sound
+- Aim the video at 85 % of what the bandwidth estimate leaves after the sound
+- Take a bandwidth estimate that came within 500 ms of the last bitrate change
+- Log the estimate, the bitrate asked of each screen and the frames dropped
+
 * Sat Nov 14 2026 Mickaël Bourneuf <mickael.bourneuf@ameleo.fr> - 0.1.0-1
 - First release
