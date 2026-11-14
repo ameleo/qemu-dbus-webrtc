@@ -112,12 +112,15 @@ struct Shared {
 
 /// The library's settings for ours.
 fn settings(settings: &Settings) -> Result<hw::Settings> {
-    if settings.codec != Codec::Hevc || settings.software {
-        return Err(anyhow!("only HEVC on a GPU is encoded directly"));
-    }
+    let codec = match settings.codec {
+        _ if settings.software => return Err(anyhow!("encoding on the CPU")),
+        Codec::Av1 => hw::Codec::Av1,
+        Codec::Hevc => hw::Codec::Hevc,
+        Codec::Vp9 => return Err(anyhow!("VP9 is not encoded directly yet")),
+    };
     let bitrate = settings.bitrate.saturating_mul(1000);
     Ok(hw::Settings {
-        codec: hw::Codec::Hevc,
+        codec,
         full_chroma: settings.full_chroma,
         ten_bits: settings.ten_bits,
         bitrate,
@@ -148,10 +151,11 @@ impl Direct {
     pub(crate) fn new(settings_: &Settings, sink: Sink, counters: Counters) -> Result<Self> {
         let encoder = hw::Encoder::open(None, settings(settings_)?)?;
         info!(
+            codec = ?settings_.codec,
             driver = %encoder.driver(),
             full_chroma = settings_.full_chroma,
             ten_bits = settings_.ten_bits,
-            "HEVC encoded on the GPU's own API"
+            "encoded on the GPU's own API"
         );
         let shared = Arc::new(Shared {
             asked: Mutex::new(Asked::default()),

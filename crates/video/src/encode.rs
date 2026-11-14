@@ -12,9 +12,9 @@
 //! appsrc ! queue ! vapostproc ! video/x-raw(memory:VAMemory) ! encoder ! parser ! appsink
 //! ```
 //!
-//! HEVC on a GPU leaves GStreamer out: the `qdw-hw-encoder` crate copies the framebuffer
-//! to the GPU and drives its encoder itself (see [`crate::direct`]). The stream that comes
-//! out goes the same way as the pipeline's.
+//! AV1 and HEVC on a GPU leave GStreamer out: the `qdw-hw-encoder` crate imports the
+//! framebuffer on the GPU and drives its encoder itself (see [`crate::direct`]). The stream
+//! that comes out goes the same way as the pipeline's.
 
 use std::os::fd::{AsFd, IntoRawFd, OwnedFd};
 use std::sync::Arc;
@@ -261,10 +261,10 @@ pub struct Settings {
     pub ten_bits: bool,
     /// Encode on the CPU (VP9 only) rather than on the GPU.
     pub software: bool,
-    /// The highest bitrate the stream will be set to, in kbit/s: what an HEVC stream says of
-    /// itself, from its start (its level).
+    /// The highest bitrate the stream will be set to, in kbit/s: what an AV1 or HEVC stream
+    /// says of itself, from its start (its level).
     pub max_bitrate: u32,
-    /// Encode on the GPU's own API where this program does (HEVC), rather than through
+    /// Encode on the GPU's own API where this program does (AV1, HEVC), rather than through
     /// GStreamer's VA elements.
     pub direct: bool,
 }
@@ -369,7 +369,7 @@ enum Backend {
 /// Start what encodes `settings`: the GPU's own API when asked and able, a pipeline
 /// otherwise.
 fn backend(settings: &Settings, sink: &Sink, counters: &Counters) -> Result<Backend> {
-    if settings.direct && !settings.software && settings.codec == Codec::Hevc {
+    if settings.direct && !settings.software && matches!(settings.codec, Codec::Av1 | Codec::Hevc) {
         match Direct::new(settings, sink.clone(), counters.clone()) {
             Ok(direct) => return Ok(Backend::Direct(direct)),
             Err(error) => warn!(
@@ -843,18 +843,17 @@ mod tests {
         encoder.finish();
     }
 
-    /// HEVC on the GPU's own API: a framebuffer comes out as a keyframe with its parameter
-    /// sets, then as pictures predicted from it, a bitrate change included. Skipped where no
-    /// GPU encodes HEVC that way.
-    #[test]
-    fn a_framebuffer_is_encoded_directly() {
+    /// Three frames of a framebuffer in shared memory, encoded on the GPU's own API in
+    /// `codec`: a keyframe, a frame after a change of bitrate, and the keyframe of a restart,
+    /// each with whether it is a delta unit. `None` where no GPU encodes `codec` that way.
+    fn encoded_directly(codec: Codec, full_chroma: bool) -> Option<Vec<(Vec<u8>, bool)>> {
         gst::init().unwrap();
         let (width, height) = (320, 240);
         let file = rustix::fs::memfd_create("fb", rustix::fs::MemfdFlags::CLOEXEC).unwrap();
         rustix::fs::ftruncate(&file, u64::from(width * height * 4)).unwrap();
         let settings = Settings {
-            codec: Codec::Hevc,
-            full_chroma: true,
+            codec,
+            full_chroma,
             bitrate: 1000,
             ten_bits: false,
             software: false,
@@ -866,12 +865,12 @@ mod tests {
             let delta = frame.flags().contains(gst::BufferFlags::DELTA_UNIT);
             let _ = tx.send((frame.map_readable().unwrap().to_vec(), delta));
         }) else {
-            eprintln!("no HEVC encoder: skipped");
-            return;
+            eprintln!("no {codec:?} encoder: skipped");
+            return None;
         };
         if !matches!(encoder.backend, Backend::Direct(_)) {
-            eprintln!("no direct HEVC encoder: skipped");
-            return;
+            eprintln!("no direct {codec:?} encoder: skipped");
+            return None;
         }
         encoder
             .set_shared_framebuffer(
@@ -883,6 +882,26 @@ mod tests {
                 width * 4,
             )
             .unwrap();
+        let wait = std::time::Duration::from_secs(10);
+        let mut frames = Vec::new();
+        encoder.keyframe().unwrap();
+        frames.push(rx.recv_timeout(wait).unwrap());
+        encoder.set_bitrate(2000);
+        encoder.frame().unwrap();
+        frames.push(rx.recv_timeout(wait).unwrap());
+        encoder.restart(&settings).unwrap();
+        frames.push(rx.recv_timeout(wait).unwrap());
+        encoder.finish();
+        Some(frames)
+    }
+
+    /// HEVC on the GPU's own API: a keyframe with its parameter sets, then pictures predicted
+    /// from it, a bitrate change included.
+    #[test]
+    fn hevc_is_encoded_directly() {
+        let Some(frames) = encoded_directly(Codec::Hevc, true) else {
+            return;
+        };
         // The NAL unit types of a frame (H.265 table 7-1).
         let types = |frame: &[u8]| -> Vec<u8> {
             frame
@@ -891,21 +910,56 @@ mod tests {
                 .map(|w| (w[3] >> 1) & 0x3f)
                 .collect()
         };
-        let wait = std::time::Duration::from_secs(10);
-        encoder.keyframe().unwrap();
-        let (frame, delta) = rx.recv_timeout(wait).unwrap();
-        // VPS, SPS, PPS, IDR.
-        assert_eq!(types(&frame), [32, 33, 34, 19]);
-        assert!(!delta);
-        encoder.set_bitrate(2000);
-        encoder.frame().unwrap();
-        let (frame, delta) = rx.recv_timeout(wait).unwrap();
-        assert_eq!(types(&frame), [1]);
-        assert!(delta);
-        encoder.restart(&settings).unwrap();
-        let (frame, _) = rx.recv_timeout(wait).unwrap();
-        assert_eq!(types(&frame), [32, 33, 34, 19]);
-        encoder.finish();
+        // VPS, SPS, PPS, IDR; a trailing picture; the keyframe of the restart.
+        let expected: [(&[u8], bool); 3] = [
+            (&[32, 33, 34, 19], false),
+            (&[1], true),
+            (&[32, 33, 34, 19], false),
+        ];
+        for ((frame, delta), (nal_types, delta_unit)) in frames.iter().zip(expected) {
+            assert_eq!(types(frame), nal_types);
+            assert_eq!(*delta, delta_unit);
+        }
+    }
+
+    /// AV1 on the GPU's own API: temporal units of OBUs, a key frame with the sequence header,
+    /// then frames predicted from it, a bitrate change included.
+    #[test]
+    fn av1_is_encoded_directly() {
+        let Some(frames) = encoded_directly(Codec::Av1, false) else {
+            return;
+        };
+        // The OBU types of a temporal unit (AV1 5.3.1, 6.2.2), each OBU with its size.
+        let types = |mut unit: &[u8]| -> Vec<u8> {
+            let mut types = Vec::new();
+            while let Some(&header) = unit.first() {
+                types.push((header >> 3) & 0x0f);
+                let mut at = 1 + usize::from(header & 0x04 != 0);
+                let (mut size, mut shift) = (0, 0);
+                loop {
+                    let byte = unit[at];
+                    at += 1;
+                    size |= usize::from(byte & 0x7f) << shift;
+                    shift += 7;
+                    if byte & 0x80 == 0 {
+                        break;
+                    }
+                }
+                unit = &unit[at + size..];
+            }
+            types
+        };
+        // Temporal delimiter, sequence header, frame header, tile group; then without the
+        // sequence header; then a key frame again.
+        let expected: [(&[u8], bool); 3] = [
+            (&[2, 1, 3, 4], false),
+            (&[2, 3, 4], true),
+            (&[2, 1, 3, 4], false),
+        ];
+        for ((frame, delta), (obu_types, delta_unit)) in frames.iter().zip(expected) {
+            assert_eq!(types(frame), obu_types);
+            assert_eq!(*delta, delta_unit);
+        }
     }
 
     #[test]

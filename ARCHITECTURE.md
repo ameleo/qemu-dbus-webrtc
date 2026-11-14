@@ -32,13 +32,14 @@ libvirt, plain QEMU) starts and stops it.
   leaving closes cleanly too.
 - **QEMU attachment:** the D-Bus display (a libvirt bus, or peer to peer through QMP) for
   scanouts (DMA-BUF, `ScanoutDMABUF2`), cursor, keyboard, mouse, audio and clipboard.
-- **Video:** GStreamer, VA-API hardware encoding. The guest framebuffer is a linear DMA-BUF
-  that VA-API cannot import as RGB, so `vapostproc` uploads it (one CPU copy) and converts it to
-  YUV on the GPU, where the encoder reads it. HEVC leaves GStreamer out of the encoding: the
-  `qdw-hw-encoder` crate drives VA-API itself (the same copy and conversion), and writes
-  the stream's headers, so that a keyframe or a bitrate change comes with the very next frame
-  and the stream says what its colours are. `[video] direct = false` goes back to GStreamer's
-  elements.
+- **Video:** VA-API hardware encoding. AV1 and HEVC go straight to VA-API through the
+  `qdw-hw-encoder` crate: the guest framebuffer, a linear DMA-BUF, is imported as a VA surface
+  and converted to YUV on the GPU where it is (with virgl it is in the GPU's own memory, which
+  the CPU would read through the bus at a frame or two a second), and the crate writes the
+  stream's headers, so that a keyframe or a bitrate change comes with the very next frame and
+  the stream says what its colours are. A framebuffer in memory shared with QEMU is copied to
+  the GPU first. VP9 and the CPU encoder go through GStreamer, as `[video] direct = false`
+  does for every codec: `vapostproc` uploads the framebuffer and converts it.
 - **Transport:** GStreamer `webrtcbin`, with congestion control (GCC) driving the encoder bitrate.
 - **Transport, per viewer:** each viewer has its own `webrtcbin`, fed with the encoded frames
   of the console it watches: one encoder per console, whatever the number of viewers. A viewer
