@@ -17,8 +17,8 @@ pub(crate) const ENTRYPOINT: sys::VAEntrypoint = sys::VAEntrypointEncSliceLP;
 pub(crate) const INTRA_PERIOD: u32 = 1024;
 
 /// Check that the GPU encodes `profile` with pictures of the family `rt_format`, at a
-/// constant bitrate, and takes `headers` (`VA_ENC_PACKED_HEADER_*`) from the application;
-/// `what` names the codec and profile in the error.
+/// constant bitrate, and takes `headers` (`VA_ENC_PACKED_HEADER_*`, none when 0) from the
+/// application; `what` names the codec and profile in the error.
 pub(crate) fn check(
     display: &Display,
     profile: sys::VAProfile,
@@ -36,8 +36,9 @@ pub(crate) fn check(
     if attribute(sys::VAConfigAttribRateControl).is_none_or(|modes| modes & sys::VA_RC_CBR == 0) {
         return Err(Error::Unsupported("constant bitrate".into()));
     }
-    if attribute(sys::VAConfigAttribEncPackedHeaders)
-        .is_none_or(|packed| packed & headers != headers)
+    if headers != 0
+        && attribute(sys::VAConfigAttribEncPackedHeaders)
+            .is_none_or(|packed| packed & headers != headers)
     {
         return Err(Error::Unsupported("headers from the application".into()));
     }

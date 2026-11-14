@@ -1,6 +1,6 @@
 [package]
 name = "qdw-hw-encoder"
-description = "Low-latency hardware video encoding of a desktop, straight on the GPU's own API"
+description = "Low-latency video encoding of a desktop, straight on the GPU's own API, or with libvpx on the CPU"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -7,13 +7,15 @@
 //! bench [width height [frames [420|444 [8|10 [kbit/s [output.h265 [frames.bgrx [fps]]]]]]]]
 //! ```
 //!
+//! The codec is `BENCH_CODEC`: `hevc` (the default), `av1`, `vp9`, or `vp9-cpu` for libvpx.
+//!
 //! The frames come at `fps` a second (30 by default), as a desktop's would; the bitrate is
 //! halved for the third quarter of them. `frames.bgrx` gets the frames
 //! as they went in, to compare with the decoded ones.
 
 use std::time::{Duration, Instant};
 
-use qdw_hw_encoder::{Codec, Encoder, Frame, PixelFormat, Settings};
+use qdw_hw_encoder::{Codec, CpuEncoder, Encoder, Frame, Packet, PixelFormat, Result, Settings};
 
 /// A page taller than the screen: rows of small coloured marks on white, like text.
 fn page(width: u32, height: u32) -> Vec<u8> {
@@ -49,7 +51,38 @@ fn page(width: u32, height: u32) -> Vec<u8> {
     pixels
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// The GPU's encoder or the CPU's.
+enum Bench {
+    Gpu(Box<Encoder>),
+    Cpu(Box<CpuEncoder>),
+}
+
+impl Bench {
+    fn encode(&mut self, frame: &Frame<'_>, keyframe: bool) -> Result<Packet> {
+        match self {
+            Self::Gpu(encoder) => encoder.encode(frame, keyframe),
+            Self::Cpu(encoder) => encoder.encode(frame, keyframe),
+        }
+    }
+
+    fn set_bitrate(&mut self, bitrate: u32) -> Result<()> {
+        match self {
+            Self::Gpu(encoder) => {
+                encoder.set_bitrate(bitrate);
+                Ok(())
+            }
+            Self::Cpu(encoder) => encoder.set_bitrate(bitrate),
+        }
+    }
+}
+
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let (codec, cpu) = match std::env::var("BENCH_CODEC").as_deref() {
+        Ok("av1") => (Codec::Av1, false),
+        Ok("vp9") => (Codec::Vp9, false),
+        Ok("vp9-cpu") => (Codec::Vp9, true),
+        _ => (Codec::Hevc, false),
+    };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let number = |index: usize, default: u32| -> u32 {
         args.get(index)
@@ -62,11 +95,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let settings = Settings {
         full_chroma: number(3, 420) == 444,
         ten_bits: number(4, 8) == 10,
-        ..Settings::new(Codec::Hevc, bitrate)
+        ..Settings::new(codec, bitrate)
     };
     let fps = number(8, 30).max(1);
-    let mut encoder = Encoder::open(None, settings)?;
-    println!("{}", encoder.driver());
+    let mut encoder = if cpu {
+        println!("libvpx");
+        Bench::Cpu(Box::new(CpuEncoder::new(settings)?))
+    } else {
+        let encoder = Encoder::open(None, settings)?;
+        println!("{}", encoder.driver());
+        Bench::Gpu(Box::new(encoder))
+    };
     println!("{width}x{height}, {fps} frames a second, {settings:?}");
 
     let rows = height * 3;
@@ -79,9 +118,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for index in 0..frames {
         let quarter = (index * 4 / frames) as usize;
         if index == frames / 2 {
-            encoder.set_bitrate(bitrate / 2);
+            encoder.set_bitrate(bitrate / 2)?;
         } else if index == frames * 3 / 4 {
-            encoder.set_bitrate(bitrate);
+            encoder.set_bitrate(bitrate)?;
         }
         // Scrolls by 6 rows a frame, still for the last quarter.
         let top = if quarter == 3 {

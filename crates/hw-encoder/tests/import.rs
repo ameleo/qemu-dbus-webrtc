@@ -107,6 +107,7 @@ fn encode(codec: Codec, width: u32, height: u32) {
             "hevc",
             (width.next_multiple_of(2), height.next_multiple_of(2)),
         ),
+        Codec::Vp9 => unreachable!("VP9 is tested in vp9.rs, in its IVF container"),
     };
     let Some(pictures) = decoded(&stream, format, decoder, shown, false, false) else {
         eprintln!("no ffmpeg: the stream is not decoded");

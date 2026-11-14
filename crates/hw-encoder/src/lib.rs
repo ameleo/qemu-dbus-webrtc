@@ -25,7 +25,9 @@
 //! # }
 //! ```
 //!
-//! Today, on VA-API (Intel, AMD): AV1 in 4:2:0, and HEVC in 4:2:0 and 4:4:4, 8 and 10 bits each.
+//! Today, on VA-API (Intel, AMD): AV1 in 4:2:0, HEVC in 4:2:0 and 4:4:4, both in 8 and 10
+//! bits; VP9 in 4:2:0 and 4:4:4, 8 bits. On the CPU, for hosts without a GPU that encodes:
+//! VP9 in 4:2:0 and 4:4:4, with libvpx ([`CpuEncoder`]).
 
 mod av1;
 mod av1_encoder;
@@ -36,6 +38,9 @@ mod error;
 pub mod h265;
 mod hevc;
 mod va;
+mod vp9_encoder;
+mod vpx;
+mod yuv;
 
 use std::os::fd::BorrowedFd;
 use std::path::Path;
@@ -47,6 +52,7 @@ use av1_encoder::Av1;
 use convert::Converter;
 use hevc::Hevc;
 use va::Display;
+use vp9_encoder::Vp9;
 
 /// A video codec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +61,8 @@ pub enum Codec {
     Av1,
     /// H.265. Subject to patent royalties.
     Hevc,
+    /// VP9, profile 0 (4:2:0) or 1 (4:4:4). Royalty free.
+    Vp9,
 }
 
 /// How the pixels of a frame are laid out in memory: four bytes each.
@@ -155,7 +163,7 @@ pub struct Packet {
     /// The frame in the codec's stream format: for AV1, a temporal unit of OBUs with their
     /// sizes (the low overhead format of the AV1 specification, 5.2), with the sequence
     /// header before a key frame; for HEVC, an access unit as a byte stream (H.265 annex B),
-    /// with the parameter sets before a keyframe.
+    /// with the parameter sets before a keyframe; for VP9, a frame.
     pub data: Vec<u8>,
     /// A frame that needs no other to be decoded.
     pub keyframe: bool,
@@ -165,6 +173,7 @@ pub struct Packet {
 enum CodecEncoder {
     Av1(Av1),
     Hevc(Hevc),
+    Vp9(Vp9),
 }
 
 impl CodecEncoder {
@@ -172,6 +181,7 @@ impl CodecEncoder {
         Ok(match settings.codec {
             Codec::Av1 => Self::Av1(Av1::new(display, settings, width, height)?),
             Codec::Hevc => Self::Hevc(Hevc::new(display, settings, width, height)?),
+            Codec::Vp9 => Self::Vp9(Vp9::new(display, settings, width, height)?),
         })
     }
 
@@ -179,6 +189,7 @@ impl CodecEncoder {
         match self {
             Self::Av1(codec) => codec.coded_size(),
             Self::Hevc(codec) => codec.coded_size(),
+            Self::Vp9(codec) => codec.coded_size(),
         }
     }
 
@@ -186,6 +197,7 @@ impl CodecEncoder {
         match self {
             Self::Av1(codec) => codec.input(),
             Self::Hevc(codec) => codec.input(),
+            Self::Vp9(codec) => codec.input(),
         }
     }
 
@@ -193,6 +205,7 @@ impl CodecEncoder {
         match self {
             Self::Av1(codec) => codec.set_bitrate(bitrate),
             Self::Hevc(codec) => codec.set_bitrate(bitrate),
+            Self::Vp9(codec) => codec.set_bitrate(bitrate),
         }
     }
 
@@ -200,6 +213,7 @@ impl CodecEncoder {
         match self {
             Self::Av1(codec) => codec.encode(keyframe),
             Self::Hevc(codec) => codec.encode(keyframe),
+            Self::Vp9(codec) => codec.encode(keyframe),
         }
     }
 }
@@ -227,6 +241,7 @@ impl Encoder {
         let encodes = |display: &Display| match settings.codec {
             Codec::Av1 => av1_encoder::supported(display, settings.full_chroma, settings.ten_bits),
             Codec::Hevc => hevc::supported(display, settings.full_chroma, settings.ten_bits),
+            Codec::Vp9 => vp9_encoder::supported(display, settings.full_chroma, settings.ten_bits),
         };
         let display = match device {
             Some(device) => {
@@ -330,6 +345,75 @@ impl Encoder {
         self.settings.bitrate = bitrate.max(1);
         if let Some(session) = &mut self.session {
             session.codec.set_bitrate(self.settings.bitrate);
+        }
+    }
+}
+
+/// An encoder of one video stream on the CPU: VP9, with libvpx. It takes the same frames and
+/// gives the same packets as [`Encoder`], and follows the real frame rate.
+pub struct CpuEncoder {
+    settings: Settings,
+    encoder: Option<vpx::Vpx>,
+}
+
+impl CpuEncoder {
+    pub fn new(settings: Settings) -> Result<Self> {
+        if settings.codec != Codec::Vp9 {
+            return Err(Error::Unsupported(format!(
+                "{:?} on the CPU: VP9 only",
+                settings.codec
+            )));
+        }
+        if settings.bitrate == 0 {
+            return Err(Error::Unsupported("no bitrate".into()));
+        }
+        Ok(Self {
+            settings,
+            encoder: None,
+        })
+    }
+
+    /// Encode a frame: a keyframe when `keyframe` asks for one, and when it has to be, as
+    /// [`Encoder::encode`] does.
+    pub fn encode(&mut self, frame: &Frame<'_>, keyframe: bool) -> Result<Packet> {
+        if frame.width == 0 || frame.height == 0 {
+            return Err(Error::Frame("no pixels".into()));
+        }
+        let needed = frame.stride * (frame.height as usize - 1) + frame.width as usize * 4;
+        if frame.stride < frame.width as usize * 4 || frame.pixels.len() < needed {
+            return Err(Error::Frame(format!(
+                "{} bytes of pixels in rows of {}, for {}x{}",
+                frame.pixels.len(),
+                frame.stride,
+                frame.width,
+                frame.height
+            )));
+        }
+        let new = self
+            .encoder
+            .as_ref()
+            .is_none_or(|encoder| !encoder.takes(frame.width, frame.height));
+        if new {
+            self.encoder = None;
+            self.encoder = Some(vpx::Vpx::new(&self.settings, frame.width, frame.height)?);
+        }
+        let encoder = self.encoder.as_mut().expect("an encoder was just made");
+        match encoder.encode(frame, keyframe || new) {
+            Ok(packet) => Ok(packet),
+            Err(error) => {
+                // The next frame starts again, with a keyframe.
+                self.encoder = None;
+                Err(error)
+            }
+        }
+    }
+
+    /// Change the bitrate, in bit/s, from the next frame on, without a keyframe.
+    pub fn set_bitrate(&mut self, bitrate: u32) -> Result<()> {
+        self.settings.bitrate = bitrate.max(1);
+        match &mut self.encoder {
+            Some(encoder) => encoder.set_bitrate(self.settings.bitrate),
+            None => Ok(()),
         }
     }
 }
