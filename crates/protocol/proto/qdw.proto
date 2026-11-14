@@ -399,7 +399,8 @@ message VideoPause {
 message MonitorLayout {
   // One guest screen per monitor, in the order of the screens' video tracks: the first monitor
   // shows the first screen. A guest with fewer screens takes the first monitors; its screens
-  // beyond the monitors are turned off. The client shows each screen full screen on its
+  // beyond the monitors are turned off, and the server encodes them no more (the guest may
+  // keep one on all the same). The client shows each screen full screen on its
   // monitor: the guest arranges its desktop as the monitors are, and the pointer goes from one
   // screen to the next as from one monitor to the next (PointerMove names the screen).
   repeated Monitor monitors = 1;

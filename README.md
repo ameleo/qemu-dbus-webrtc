@@ -19,7 +19,7 @@ Without anything in the guest:
   the GPU reads where it is, from memory otherwise (`gl=off`, virtio-vga 2D). One encoder per
   screen, shared by every viewer, up to 60 frames a second, as fast as the guest draws; a
   keyframe or a change of bitrate takes effect with the next frame. Nothing is encoded when
-  nobody watches. In 10 bits (AV1, HEVC) for clients that
+  nobody watches, nor a screen the client does not show. In 10 bits (AV1, HEVC) for clients that
   say they decode it: no banding in gradients.
 - **Without a GPU:** VP9 encoded on the CPU with libvpx (`--software`, taken by itself when the
   host has no GPU encoder), in 4:2:0 or 4:4:4. `--codecs` lists what each GPU, and the CPU, encodes.

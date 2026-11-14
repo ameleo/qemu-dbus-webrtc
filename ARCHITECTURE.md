@@ -89,8 +89,8 @@ client.
 
 Each connection estimates its bandwidth with Google Congestion Control (str0m's, from the
 client's transport-wide congestion control reports, with probes when the desktop sends little),
-which also paces its packets. The user's
-estimate sets the bitrate of the video, which all viewers share, within 4 and 30 Mbit/s
+which also paces its packets and probes up to the maximum bitrate. The user's estimate, as it
+is, sets the bitrate of the video, which all viewers share, within 4 and 30 Mbit/s
 (`--bitrate`), starting at 10; each client gets its own estimate on the `control` channel,
 and, once a second, how long each screen's frames took on the server (`EncodeLatency`), which
 with its own figures gives the latency from the guest to its screen. The
@@ -120,8 +120,13 @@ order, at its size and place (`SetUIInfo` with the offsets), and its other scree
 off: the guest's desktop is arranged as the client's, and the pointer goes from one screen to
 the next as on the client. Each guest screen (a graphic console, by head, four at most) has its
 own encoder and its own video track, all in the same payload type, told apart by their mid; the
-offer gives the screens first, in order. The bitrate the user's bandwidth allows is shared among the screens that are on: a
-floor each, the rest by area. The pointer goes through the guest agent (`Mouse1`), which places
+offer gives the screens first, in order. The sound has a stream of its own (its msid), so that
+the client plays it as soon as it comes instead of holding it back to the video's pace. The
+bitrate the user's bandwidth allows is shared among the screens that are on and that the
+client shows: a screen the guest has not drawn on for 2 s keeps 500 kbit/s, and the screens
+in use share the rest by area (all of them by area when none is in use). A screen past the
+client's layout is not encoded, even when the guest keeps it on (Windows' viogpu ignores a
+screen turned off); it comes back with a keyframe when the client shows it again. The pointer goes through the guest agent (`Mouse1`), which places
 it on the head the client names; the QEMU tablet knows a single surface, and serves the first
 screen when there is no agent. The guest pointer's shape names its screen, and the client shows
 it there only. The browser page shows the first screen.
