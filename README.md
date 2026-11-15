@@ -10,6 +10,24 @@ Intel Arc A380). Clients authenticate with the server's username and password; c
 certificates and FIDO security keys are planned. The guest keeps its own Windows logon.
 Design discussions and contributions are welcome, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Why
+
+I wanted a console that shows the whole life of a virtual machine, from power-on: the
+firmware, the boot menu, the "Working on updates" screens. Remote desktops only connect once
+the guest OS runs, so they cannot tell whether a VM is stuck or installing an update.
+
+Recent changes in VMware's licensing pushed many users towards Proxmox VE, libvirt or plain
+QEMU. They find everything there but a console suited to long-distance use: VNC sends the screen
+as compressed rectangles of pixels, with no video codec, which takes a lot of bandwidth for video
+and moving windows. SPICE needs a client to install, and Red Hat Enterprise Linux has dropped it.
+
+I develop this project in my spare time, with the help of AI coding assistants; commits say so
+with an `Assisted-by` trailer. I decide what goes in, test every change on real hardware, and
+answer for it, but I do not master every line: reviews from experienced developers are
+especially welcome. The project is young: it runs day to day on my setup, but is not yet
+recommended for production. To give feedback or contribute, see
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Features
 
 Without guest software:
