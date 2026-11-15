@@ -28,6 +28,8 @@ pub(crate) struct Converter {
     height: u32,
     coded_width: u32,
     coded_height: u32,
+    /// Whether the video processing turns a picture upside down (`VA_MIRROR_VERTICAL`).
+    flips: bool,
 }
 
 impl Converter {
@@ -44,6 +46,9 @@ impl Converter {
         }
         let config = Config::new(display, sys::VAProfileNone, sys::VAEntrypointVideoProc, &[])?;
         let context = Context::new(&config, coded_width, coded_height)?;
+        let flips = context
+            .mirror_flags()
+            .is_ok_and(|flags| flags & sys::VA_MIRROR_VERTICAL != 0);
         Ok(Self {
             display: display.clone(),
             context,
@@ -54,6 +59,7 @@ impl Converter {
             height,
             coded_width,
             coded_height,
+            flips,
         })
     }
 
@@ -77,16 +83,28 @@ impl Converter {
     /// picture's size.
     pub fn convert(&self, frame: &Frame<'_>, target: &Surface) -> Result<()> {
         let rgb = self.upload(frame)?;
-        // The whole surface: the frame, and its edges repeated up to the coded size.
-        self.process(rgb, None, target)
+        // The whole surface: the frame, and its edges repeated up to the coded size. The
+        // upload put the rows top down.
+        self.process(rgb, None, false, target)
     }
 
-    /// Convert `source`, an RGB surface of the frame's size, into `target`. Past the frame,
-    /// up to the coded size, `target` keeps what it had: pixels no decoder shows, the same
-    /// from one picture to the next, which cost the encoder next to nothing.
-    pub fn convert_surface(&self, source: &Surface, target: &Surface) -> Result<()> {
+    /// Convert `source`, an RGB surface of the frame's size, into `target`, turned upside
+    /// down when `bottom_up` (its rows from the bottom). Past the frame, up to the coded size,
+    /// `target` keeps what it had: pixels no decoder shows, the same from one picture to the
+    /// next, which cost the encoder next to nothing.
+    pub fn convert_surface(
+        &self,
+        source: &Surface,
+        bottom_up: bool,
+        target: &Surface,
+    ) -> Result<()> {
         if !source.of(&self.display) {
             return Err(Error::Frame("a frame imported by another encoder".into()));
+        }
+        if bottom_up && !self.flips {
+            return Err(Error::Unsupported(
+                "the GPU's video processing does not turn pictures upside down".into(),
+            ));
         }
         let frame = sys::VARectangle {
             x: 0,
@@ -94,16 +112,17 @@ impl Converter {
             width: self.width as u16,
             height: self.height as u16,
         };
-        self.process(source, Some(&frame), target)
+        self.process(source, Some(&frame), bottom_up, target)
     }
 
     /// One pass of the video processing, from `source` to `target`, of the region `region` of
-    /// both (the whole surfaces when `None`). The conversion is BT.601, limited range, from
-    /// full range RGB.
+    /// both (the whole surfaces when `None`), turned upside down when `flip`. The conversion
+    /// is BT.601, limited range, from full range RGB.
     fn process(
         &self,
         source: &Surface,
         region: Option<&sys::VARectangle>,
+        flip: bool,
         target: &Surface,
     ) -> Result<()> {
         let region = region.map_or(std::ptr::null(), std::ptr::from_ref);
@@ -113,6 +132,11 @@ impl Converter {
             surface_color_standard: sys::VAProcColorStandardSRGB,
             output_region: region,
             output_color_standard: sys::VAProcColorStandardBT601,
+            mirror_state: if flip {
+                sys::VA_MIRROR_VERTICAL
+            } else {
+                sys::VA_MIRROR_NONE
+            },
             ..Default::default()
         };
         pipeline.input_color_properties.color_range = sys::VA_SOURCE_RANGE_FULL as u8;
@@ -180,7 +204,14 @@ impl Converter {
                 ));
             }
             for row in 0..coded_rows {
-                let source = &frame.pixels[frame.stride * row.min(rows - 1)..][..width];
+                // The frame's rows top down, whichever way they are in memory.
+                let from = row.min(rows - 1);
+                let from = if frame.bottom_up {
+                    rows - 1 - from
+                } else {
+                    from
+                };
+                let source = &frame.pixels[frame.stride * from..][..width];
                 let target = &mut mapped.data[mapped.offset + mapped.pitch * row..][..coded_width];
                 let (pixels, padding) = target.split_at_mut(width);
                 pixels.copy_from_slice(source);

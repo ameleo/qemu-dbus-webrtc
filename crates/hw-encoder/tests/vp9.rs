@@ -95,6 +95,7 @@ fn check(mut encoder: Either, full_chroma: bool, width: u32, height: u32, lowest
             width,
             height,
             stride: width as usize * 4,
+            bottom_up: false,
         };
         if index == 4 {
             encoder.set_bitrate(4_000_000);

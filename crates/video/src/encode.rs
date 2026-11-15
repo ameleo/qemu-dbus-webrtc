@@ -330,6 +330,8 @@ struct Framebuffer {
     height: u32,
     offset: usize,
     stride: usize,
+    /// Its rows go from the bottom (OpenGL's order).
+    bottom_up: bool,
 }
 
 /// One console's encoder.
@@ -373,7 +375,14 @@ impl Encoder {
     }
 
     /// A new framebuffer: `fd` is a single-plane DMA-BUF of `width`x`height` pixels in DRM
-    /// format `fourcc`, linear.
+    /// format `fourcc`, linear, encoded the right way up. `y0_top` is QEMU's flag, which,
+    /// despite its name, says the rows go from the bottom: the texture is in OpenGL's
+    /// coordinates with the picture's top at its top (`VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP`, which
+    /// QEMU's virgl sets on every 2D resource, and virglrenderer then stores bottom up). QEMU's
+    /// own displays read it so: `ui/gtk-egl.c` flips such a texture once less when drawing it
+    /// to a window (`egl_fb_blit(.., !y0_top)`), `ui/egl-headless.c` once more before reading
+    /// it top down.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_framebuffer(
         &mut self,
         fd: &OwnedFd,
@@ -382,6 +391,7 @@ impl Encoder {
         fourcc: u32,
         offset: u32,
         stride: u32,
+        y0_top: bool,
     ) -> Result<()> {
         let format = drm_format(fourcc).with_context(|| format!("DRM format {fourcc:#x}"))?;
         let (fd, size) = own(fd, offset, width, stride, height)?;
@@ -390,7 +400,7 @@ impl Encoder {
             size: u32::try_from(size).context("framebuffer size")?,
             fourcc,
         };
-        self.install(source, format, width, height, offset, stride);
+        self.install(source, format, width, height, offset, stride, y0_top);
         Ok(())
     }
 
@@ -407,10 +417,11 @@ impl Encoder {
     ) -> Result<()> {
         let (fd, size) = own(fd, offset, width, stride, height)?;
         let source = Source::Mapped(Mapping::new(&fd, size, false)?);
-        self.install(source, format, width, height, offset, stride);
+        self.install(source, format, width, height, offset, stride, false);
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn install(
         &mut self,
         source: Source,
@@ -419,6 +430,7 @@ impl Encoder {
         height: u32,
         offset: u32,
         stride: u32,
+        bottom_up: bool,
     ) {
         self.framebuffer = Some(Framebuffer {
             source: Arc::new(source),
@@ -427,6 +439,7 @@ impl Encoder {
             height,
             offset: offset as usize,
             stride: stride as usize,
+            bottom_up,
         });
     }
 
@@ -455,6 +468,7 @@ impl Encoder {
             height: fb.height,
             offset: fb.offset,
             stride: fb.stride,
+            bottom_up: fb.bottom_up,
         });
         self.last_frame.set(std::time::Instant::now());
         Ok(())
@@ -789,6 +803,7 @@ mod tests {
                 width: 320,
                 height: 240,
                 stride: 320 * 4,
+                bottom_up: false,
             };
             let stream = encoder.encode(&frame, true).unwrap().data;
             let (idc, compatibility, constraints) = sps_profile(&stream);

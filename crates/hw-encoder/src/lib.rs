@@ -19,6 +19,7 @@
 //!     width,
 //!     height,
 //!     stride: width as usize * 4,
+//!     bottom_up: false,
 //! };
 //! let packet = encoder.encode(&frame, false)?;
 //! # Ok(())
@@ -85,6 +86,9 @@ pub struct Frame<'a> {
     pub width: u32,
     pub height: u32,
     pub stride: usize,
+    /// The rows go from the bottom of the picture, as OpenGL keeps them: the first row of
+    /// `pixels` is its last. The picture is encoded the right way up.
+    pub bottom_up: bool,
 }
 
 /// A frame in a DMA-BUF of one plane: GPU memory, or memory a DMA-BUF exports (a guest's
@@ -103,6 +107,8 @@ pub struct DmaBuf<'a> {
     pub stride: u32,
     pub width: u32,
     pub height: u32,
+    /// The rows go from the bottom of the picture (see [`Frame::bottom_up`]).
+    pub bottom_up: bool,
 }
 
 /// A DMA-BUF imported by an encoder, to encode as often as its contents change.
@@ -111,6 +117,7 @@ pub struct Imported {
     format: PixelFormat,
     width: u32,
     height: u32,
+    bottom_up: bool,
 }
 
 /// The pixel format and libva's format of a DRM format (drm_fourcc.h names the bytes of a
@@ -375,15 +382,18 @@ impl Encoder {
             format,
             width: buffer.width,
             height: buffer.height,
+            bottom_up: buffer.bottom_up,
         })
     }
 
     /// Encode an imported DMA-BUF as it is now, as [`Encoder::encode`] does a frame.
     pub fn encode_imported(&mut self, frame: &Imported, keyframe: bool) -> Result<Packet> {
         let session = self.session(frame.format, frame.width, frame.height)?;
-        session
-            .converter
-            .convert_surface(&frame.surface, session.codec.input())?;
+        session.converter.convert_surface(
+            &frame.surface,
+            frame.bottom_up,
+            session.codec.input(),
+        )?;
         session.codec.encode(keyframe)
     }
 

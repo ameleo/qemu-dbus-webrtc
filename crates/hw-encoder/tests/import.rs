@@ -10,7 +10,7 @@ use std::ffi::c_void;
 use std::os::fd::{AsFd, FromRawFd, OwnedFd};
 
 use common::{check_quality, decoded, picture};
-use qdw_hw_encoder::{Codec, DmaBuf, Settings};
+use qdw_hw_encoder::{Codec, DmaBuf, Frame, PixelFormat, Settings};
 use rustix::ioctl::{Ioctl, IoctlOutput, Opcode, opcode};
 
 /// `struct udmabuf_create` (linux/udmabuf.h).
@@ -93,6 +93,7 @@ fn encode(codec: Codec, width: u32, height: u32) {
             stride: width * 4,
             width,
             height,
+            bottom_up: false,
         })
         .unwrap();
     // The same buffer twice: a key frame, then a frame predicted from it.
@@ -134,6 +135,72 @@ fn av1() {
     encode(Codec::Av1, 1920, 1080);
 }
 
+/// A picture whose rows go from the bottom, as an OpenGL texture of QEMU's, is encoded the
+/// right way up: imported, the GPU's video processing turns it over; in memory, the copy to
+/// the GPU does.
+#[test]
+fn bottom_up_pictures() {
+    let (width, height) = (320, 240);
+    let pixels = picture(width, height, 0);
+    let flipped: Vec<u8> = pixels
+        .chunks_exact(width as usize * 4)
+        .rev()
+        .flatten()
+        .copied()
+        .collect();
+    for imported in [true, false] {
+        let Some(mut encoder) = common::encoder(Settings::new(Codec::Hevc, 4_000_000)) else {
+            return;
+        };
+        let mut stream = Vec::new();
+        if imported {
+            let Some((fd, size)) = udmabuf(&flipped) else {
+                eprintln!("skipped: no udmabuf");
+                continue;
+            };
+            let frame = encoder
+                .import(&DmaBuf {
+                    fd: fd.as_fd(),
+                    size,
+                    fourcc: u32::from_le_bytes(*b"XR24"),
+                    modifier: 0,
+                    offset: 0,
+                    stride: width * 4,
+                    width,
+                    height,
+                    bottom_up: true,
+                })
+                .unwrap();
+            for keyframe in [true, false] {
+                stream.extend(encoder.encode_imported(&frame, keyframe).unwrap().data);
+            }
+        } else {
+            let frame = Frame {
+                pixels: &flipped,
+                format: PixelFormat::Bgrx,
+                width,
+                height,
+                stride: width as usize * 4,
+                bottom_up: true,
+            };
+            for keyframe in [true, false] {
+                stream.extend(encoder.encode(&frame, keyframe).unwrap().data);
+            }
+        }
+        let Some(pictures) = decoded(&stream, "hevc", "hevc", (width, height), false, false) else {
+            eprintln!("no ffmpeg: the stream is not decoded");
+            return;
+        };
+        check_quality(
+            &[pixels.clone(), pixels.clone()],
+            &pictures,
+            (width, height),
+            false,
+            40.0,
+        );
+    }
+}
+
 /// A format the encoder does not take is refused when imported.
 #[test]
 fn unknown_formats_are_refused() {
@@ -153,6 +220,7 @@ fn unknown_formats_are_refused() {
         stride: 64,
         width: 64,
         height: 64,
+        bottom_up: false,
     };
     assert!(encoder.import(&buffer).is_err());
 }
@@ -176,6 +244,7 @@ fn buffers_too_small_are_refused() {
         stride: 64 * 4,
         width: 64,
         height: 64,
+        bottom_up: false,
     };
     assert!(encoder.import(&buffer).is_ok());
     // One row more than the buffer holds; rows shorter than their pixels; an offset past

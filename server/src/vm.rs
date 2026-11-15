@@ -663,6 +663,7 @@ async fn start_in(
                         planes: &planes,
                         fourcc: code,
                         modifier,
+                        y0_top,
                     },
                 ) {
                     warn!(console, error = %format!("{e:#}"), "not encoded");
@@ -928,6 +929,8 @@ enum Source<'a> {
         planes: &'a [display::Plane],
         fourcc: u32,
         modifier: u64,
+        /// QEMU's flag: the rows go from the bottom (see `Encoder::set_framebuffer`).
+        y0_top: bool,
     },
     /// Memory shared with QEMU, or our copy of it.
     Shared {
@@ -976,9 +979,22 @@ fn scanout(
         )?),
     };
     match source {
-        Source::Dmabuf { planes, fourcc, .. } => {
+        Source::Dmabuf {
+            planes,
+            fourcc,
+            y0_top,
+            ..
+        } => {
             let plane = &planes[0];
-            encoder.set_framebuffer(&plane.fd, width, height, fourcc, plane.offset, plane.stride)
+            encoder.set_framebuffer(
+                &plane.fd,
+                width,
+                height,
+                fourcc,
+                plane.offset,
+                plane.stride,
+                y0_top,
+            )
         }
         Source::Shared {
             fd,

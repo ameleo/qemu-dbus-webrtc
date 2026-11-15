@@ -120,6 +120,8 @@ pub(crate) struct Picture {
     pub height: u32,
     pub offset: usize,
     pub stride: usize,
+    /// Its rows go from the bottom.
+    pub bottom_up: bool,
 }
 
 /// The frame of `picture` in its framebuffer's `bytes`.
@@ -130,6 +132,7 @@ fn frame<'a>(picture: &Picture, bytes: &'a [u8]) -> hw::Frame<'a> {
         width: picture.width,
         height: picture.height,
         stride: picture.stride,
+        bottom_up: picture.bottom_up,
     }
 }
 
@@ -244,6 +247,7 @@ impl Engine {
                         stride: u32::try_from(picture.stride)?,
                         width: picture.width,
                         height: picture.height,
+                        bottom_up: picture.bottom_up,
                     });
                     let read = match import {
                         Ok(frame) => Read::Imported(frame),
@@ -256,12 +260,25 @@ impl Engine {
                     *imported = Some((picture.source.clone(), read));
                 }
                 match imported.as_ref().map(|(_, read)| read) {
-                    Some(Read::Imported(frame)) => Ok(encoder.encode_imported(frame, keyframe)?),
+                    Some(Read::Imported(frame)) => match encoder.encode_imported(frame, keyframe) {
+                        // The GPU cannot convert it as it is (it cannot turn it upside
+                        // down): read by the CPU from now on, for this framebuffer.
+                        Err(hw::Error::Unsupported(why)) => {
+                            warn!(%why, "framebuffer not converted by the GPU: read by the CPU");
+                        }
+                        result => return Ok(result?),
+                    },
                     Some(Read::Mapped(mapping)) => {
-                        mapping.read(|bytes| Ok(encoder.encode(&frame(picture, bytes), keyframe)?))
+                        return mapping
+                            .read(|bytes| Ok(encoder.encode(&frame(picture, bytes), keyframe)?));
                     }
                     None => unreachable!("read just above"),
                 }
+                let mapping = Mapping::new(fd, *size as usize, true)?;
+                let packet =
+                    mapping.read(|bytes| Ok(encoder.encode(&frame(picture, bytes), keyframe)?));
+                *imported = Some((picture.source.clone(), Read::Mapped(mapping)));
+                packet
             }
             (Self::Cpu { encoder, mapped }, Source::DmaBuf { fd, size, .. }) => {
                 if !mapped

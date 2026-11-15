@@ -57,6 +57,7 @@ fn encode(ten_bits: bool, width: u32, height: u32, lowest: f64) {
             width,
             height,
             stride: width as usize * 4,
+            bottom_up: false,
         };
         if index == 4 {
             encoder.set_bitrate(4_000_000);
@@ -126,6 +127,7 @@ fn a_size_change_starts_again() {
             width,
             height,
             stride: width as usize * 4,
+            bottom_up: false,
         };
         let packet = encoder.encode(&frame, false).unwrap();
         assert_eq!(packet.keyframe, index % 2 == 0, "frame {index}");

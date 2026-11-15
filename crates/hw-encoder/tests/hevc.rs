@@ -41,6 +41,7 @@ fn encode(full_chroma: bool, ten_bits: bool, width: u32, height: u32, lowest: f6
             width,
             height,
             stride: width as usize * 4,
+            bottom_up: false,
         };
         if index == 4 {
             encoder.set_bitrate(4_000_000);
@@ -116,6 +117,7 @@ fn a_size_change_starts_again() {
             width,
             height,
             stride: width as usize * 4,
+            bottom_up: false,
         };
         let packet = encoder.encode(&frame, false).unwrap();
         assert_eq!(packet.keyframe, index % 2 == 0, "frame {index}");
@@ -141,6 +143,7 @@ fn bad_frames_are_refused() {
         width: 320,
         height: 240,
         stride: 320 * 4,
+        bottom_up: false,
     };
     // Fewer pixels than the size says, rows shorter than their pixels, no pixels at all.
     let short = Frame {

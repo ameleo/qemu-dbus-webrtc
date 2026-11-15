@@ -132,6 +132,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             width,
             height,
             stride,
+            bottom_up: false,
         };
         for index in 0..(still * 4.0) as u32 {
             let due = origin + Duration::from_millis(250 * u64::from(index));
@@ -161,6 +162,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             width,
             height,
             stride,
+            bottom_up: false,
         };
         if args.get(7).is_some_and(|path| !path.is_empty()) {
             source.extend_from_slice(frame.pixels);

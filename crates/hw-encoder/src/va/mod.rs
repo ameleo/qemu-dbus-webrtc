@@ -419,6 +419,24 @@ impl Context {
         })
     }
 
+    /// The mirroring directions this video processing context does, as `VA_MIRROR_*` bits
+    /// (va_vpp.h, `VAProcPipelineCaps::mirror_flags`), with no filter.
+    pub fn mirror_flags(&self) -> Result<u32> {
+        let mut caps = sys::VAProcPipelineCaps::default();
+        // SAFETY: our context; no filters; `caps` outlives the call, and its lists of formats
+        // are left empty (null, 0), which the driver does not fill.
+        check("vaQueryVideoProcPipelineCaps", unsafe {
+            sys::vaQueryVideoProcPipelineCaps(
+                self.display.raw,
+                self.id,
+                ptr::null_mut(),
+                0,
+                &mut caps,
+            )
+        })?;
+        Ok(caps.mirror_flags)
+    }
+
     /// Submit one picture: `buffers`, in order, applied to `target`.
     ///
     /// The buffers go one by one, as libva allows, so that an error names the buffer the

@@ -16,6 +16,12 @@ pub(crate) struct Plane<'a> {
 #[inline]
 fn rgb(frame: &Frame<'_>, x: u32, y: u32) -> (i32, i32, i32) {
     let (x, y) = (x.min(frame.width - 1), y.min(frame.height - 1));
+    // The picture's row `y`, whichever way the rows are in memory.
+    let y = if frame.bottom_up {
+        frame.height - 1 - y
+    } else {
+        y
+    };
     let i = y as usize * frame.stride + x as usize * 4;
     let p = &frame.pixels[i..i + 4];
     match frame.format {
@@ -132,6 +138,7 @@ mod tests {
             width,
             height,
             stride: 12,
+            bottom_up: false,
         };
         let (mut y, mut u, mut v) = (vec![0; 3 * 3], vec![0; 2 * 2], vec![0; 2 * 2]);
         convert(
@@ -157,5 +164,40 @@ mod tests {
         assert_eq!(u[0], 128);
         assert_eq!((u[1], v[1]), chroma((255, 0, 0)));
         assert_eq!((u[3], v[3]), chroma((255, 0, 0)));
+    }
+
+    /// Rows from the bottom: the picture comes out the right way up.
+    #[test]
+    fn bottom_up_frames() {
+        // In memory: a black row, then a white one; from the bottom, the top is white.
+        let pixels = [[0u8; 4], [0; 4], [255; 4], [255; 4]].concat();
+        let frame = Frame {
+            pixels: &pixels,
+            format: PixelFormat::Bgrx,
+            width: 2,
+            height: 2,
+            stride: 8,
+            bottom_up: true,
+        };
+        let (mut y, mut u, mut v) = (vec![0; 4], vec![0; 4], vec![0; 4]);
+        convert(
+            &frame,
+            true,
+            [
+                Plane {
+                    data: &mut y,
+                    stride: 2,
+                },
+                Plane {
+                    data: &mut u,
+                    stride: 2,
+                },
+                Plane {
+                    data: &mut v,
+                    stride: 2,
+                },
+            ],
+        );
+        assert_eq!(y, [235, 235, 16, 16]);
     }
 }
