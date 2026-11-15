@@ -358,30 +358,35 @@ async fn open(
         Ok(Ok(Some(_))) | Err(_) => anyhow::bail!("no hello"),
     };
     let shadow = hello.shadow;
-    match auth {
-        Auth::None => {}
-        Auth::Password(expected) => {
+    // The VMs the client may open: all without accounts, those of its account otherwise.
+    let grant = match auth {
+        Auth::None => crate::access::Grant::All,
+        Auth::Password(accounts) => {
             // No account given: the client asks for one, with no delay (nothing is guessed).
             if hello.user.is_empty() {
                 refuse(&mut socket, ACCOUNT_REQUIRED).await;
                 return Ok(());
             }
-            let (expected, user, password) =
-                (expected.clone(), hello.user.clone(), hello.password.clone());
+            let (accounts, user, password) =
+                (accounts.clone(), hello.user.clone(), hello.password.clone());
             // Argon2 takes its time and memory: off the async threads, a few at once.
             let granted = {
                 let _turn = checks.acquire().await?;
-                tokio::task::spawn_blocking(move || expected.check(&user, &password)).await?
+                tokio::task::spawn_blocking(move || {
+                    accounts.check(&user, &password).map(|a| a.grant.clone())
+                })
+                .await?
             };
-            if !granted {
+            let Some(grant) = granted else {
                 info!(id, user = hello.user, "wrong user or password");
                 tokio::time::sleep(REFUSAL_DELAY).await;
                 refuse(&mut socket, "wrong user or password").await;
                 return Ok(());
-            }
+            };
             info!(id, user = hello.user, "logged in");
+            grant
         }
-    }
+    };
     // A client that does not decode the video is told so before the VM starts for it.
     let config = vms.config();
     let (codec, full_chroma) = (config.settings.codec, config.settings.full_chroma);
@@ -413,6 +418,13 @@ async fn open(
         }
     };
     let uuid = uuid.as_str();
+    // A VM the account may not open is one the client does not know of: the same answer as for
+    // a VM the host does not run, and the VM is neither started nor attached to.
+    if !granted(vms, &grant, uuid).await {
+        info!(id, uuid, user = hello.user, "VM not granted to the user");
+        refuse(&mut socket, "no such VM on this host").await;
+        return Ok(());
+    }
     // The VM now: started if it is off and its manager may, attached if need be.
     let attached = match vms.client(uuid).await {
         Ok(Some(client)) => Ok(client),
@@ -441,6 +453,20 @@ async fn open(
         Err(e) => warn!(error = %format!("{e:#}"), "viewer session ended"),
     }
     Ok(())
+}
+
+/// Whether `grant` names the VM `uuid`: "*", its UUID, or a name the VM goes by now. A name
+/// that names no VM, or several, names none.
+async fn granted(vms: &Vms, grant: &crate::access::Grant, uuid: &str) -> bool {
+    let crate::access::Grant::Only(names) = grant else {
+        return true;
+    };
+    for name in names {
+        if vms.uuid_of(name).await.ok().flatten().as_deref() == Some(uuid) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Close the WebSocket cleanly, with the status `code` (RFC 6455 7.4.1): 1000 for an end the

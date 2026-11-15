@@ -7,13 +7,20 @@
 # leaves (one minute after a lost connection, so that the client can reconnect).
 
 [auth]
-# Client authentication: "password" (default) checks the username and password below before
-# the server starts or attaches to a VM; "none" lets anyone who can reach the server in (for
-# testing only). The password is stored as an Argon2id hash, generated with
-# `qemu-dbus-webrtc hash-password`.
+# Client authentication: "password" (default) checks the client's account, below, before the
+# server starts or attaches to a VM; "none" lets anyone who can reach the server in (for testing
+# only). Passwords are stored as Argon2id hashes, generated with `qemu-dbus-webrtc hash-password`.
 method = "password"
+# An account that may open every VM. Optional with [[account]] entries.
 user = "admin"
 password = "$argon2id$v=19$m=19456,t=2,p=1$..."
+
+# Accounts, each with the VMs it may open: by UUID or name (libvirt domain, Proxmox VM ID or
+# name), or "*" for all of them. A VM that no account names is open to none.
+[[account]]
+user = "alice"
+password = "$argon2id$v=19$m=19456,t=2,p=1$..."
+vms = ["win11-alice", "b8ff54ee-77f5-43dd-aa19-de8eaed5eb75"]
 
 [listen]
 # Address of the client page and signaling endpoint. Default: 127.0.0.1:8090 (local only).

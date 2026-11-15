@@ -58,15 +58,28 @@ struct File {
     libvirt: Libvirt,
     proxmox: ProxmoxFile,
     vm: Vec<Vm>,
+    account: Vec<AccountFile>,
+}
+
+/// An account: its user, its password, and the VMs it may open.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountFile {
+    user: String,
+    /// Its Argon2id hash: `qemu-dbus-webrtc hash-password`.
+    password: String,
+    /// The VMs it may open, each by its UUID or its name; "*" for all of them.
+    vms: Vec<String>,
 }
 
 /// Who may open a VM's console.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct AuthFile {
-    /// "password" (the default): the server's user and password; "none": anyone who reaches
-    /// the server.
+    /// "password" (the default): the accounts' users and passwords; "none": anyone who
+    /// reaches the server.
     method: Option<String>,
+    /// An account that may open every VM, besides those of `[[account]]`.
     user: Option<String>,
     /// Its Argon2id hash: `qemu-dbus-webrtc hash-password`.
     password: Option<String>,
@@ -159,8 +172,8 @@ pub struct VmConfig {
 /// Who may open a VM's console.
 #[derive(Debug, Clone)]
 pub enum Auth {
-    /// The server's user and password (see `access.rs`).
-    Password(crate::access::Password),
+    /// The accounts, and the VMs each may open (see `access.rs`).
+    Password(crate::access::Accounts),
     /// Anyone who reaches the server: for a test, on a trusted network.
     None,
 }
@@ -169,8 +182,9 @@ impl Config {
     /// Who may open a VM's console.
     pub fn auth(&self) -> Result<Auth> {
         self.auth.clone().context(
-            "[auth] takes a user and its password's hash (`qemu-dbus-webrtc hash-password`), \
-             or method = \"none\" for a test",
+            "no account: [[account]] entries, each with a user, its password's hash \
+             (`qemu-dbus-webrtc hash-password`) and its VMs, or method = \"none\" in [auth] for \
+             a test",
         )
     }
 
@@ -361,14 +375,34 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
     };
 
     let auth = match file.auth.method.as_deref() {
-        None | Some("password") => match (file.auth.user, file.auth.password) {
-            (Some(user), Some(hash)) => Some(Auth::Password(
-                crate::access::Password::new(user, hash).context("in [auth]")?,
-            )),
-            (None, None) => None,
-            _ => bail!("[auth] takes both a user and its password's hash"),
-        },
-        Some("none") => Some(Auth::None),
+        None | Some("password") => {
+            use crate::access::{Account, Accounts, Grant};
+            let mut accounts = Vec::new();
+            // [auth]'s user: every VM, as before accounts had their VMs.
+            match (file.auth.user, file.auth.password) {
+                (Some(user), Some(hash)) => {
+                    accounts.push(Account::new(user, hash, Grant::All).context("in [auth]")?)
+                }
+                (None, None) => {}
+                _ => bail!("[auth] takes both a user and its password's hash"),
+            }
+            for account in file.account {
+                let user = account.user.clone();
+                let grant = Grant::new(account.vms)
+                    .with_context(|| format!("in the [[account]] of {user}"))?;
+                accounts.push(
+                    Account::new(account.user, account.password, grant)
+                        .with_context(|| format!("in the [[account]] of {user}"))?,
+                );
+            }
+            if accounts.is_empty() {
+                None
+            } else {
+                Some(Auth::Password(Accounts::new(accounts)?))
+            }
+        }
+        Some("none") if file.account.is_empty() => Some(Auth::None),
+        Some("none") => bail!("[auth] method none lets anyone in: no [[account]] with it"),
         Some(other) => bail!("[auth] method {other}: password or none"),
     };
 
@@ -416,6 +450,50 @@ mod tests {
         assert_eq!(file.bitrate.max, Some(30_000));
         assert_eq!(file.libvirt.enabled, Some(true));
         assert_eq!(file.vm.len(), 1);
+        assert_eq!(file.account.len(), 1);
+        assert_eq!(file.account[0].vms.len(), 2);
+    }
+
+    /// [auth]'s user opens every VM; each [[account]] its own; mistakes fail the start.
+    #[test]
+    fn accounts() {
+        use crate::access::{Grant, hash};
+        let dir = std::env::temp_dir().join(format!("qdw-config-accounts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("host.toml");
+        let (admin, alice) = (hash("root").unwrap(), hash("secret").unwrap());
+        let parse_with = |text: &str| {
+            std::fs::write(&path, text).unwrap();
+            parse(vec!["--config".into(), path.display().to_string()])
+        };
+        let config = parse_with(&format!(
+            "[auth]\nuser = \"admin\"\npassword = \"{admin}\"\n\
+             [[account]]\nuser = \"alice\"\npassword = \"{alice}\"\nvms = [\"win11\"]\n"
+        ))
+        .unwrap();
+        let Auth::Password(accounts) = config.auth().unwrap() else {
+            panic!("accounts expected")
+        };
+        assert_eq!(accounts.check("admin", "root").unwrap().grant, Grant::All);
+        assert_eq!(
+            accounts.check("alice", "secret").unwrap().grant,
+            Grant::Only(vec!["win11".into()])
+        );
+        // Accounts alone, without [auth]'s user.
+        let alone =
+            format!("[[account]]\nuser = \"alice\"\npassword = \"{alice}\"\nvms = [\"*\"]\n");
+        assert!(matches!(
+            parse_with(&alone).unwrap().auth(),
+            Ok(Auth::Password(_))
+        ));
+        // No VM, the same user twice, anyone let in beside accounts: refused.
+        let no_vm = format!("[[account]]\nuser = \"alice\"\npassword = \"{alice}\"\nvms = []\n");
+        assert!(parse_with(&no_vm).is_err());
+        assert!(parse_with(&format!("{alone}{alone}")).is_err());
+        assert!(parse_with(&format!("[auth]\nmethod = \"none\"\n{alone}")).is_err());
+        // No account at all: nothing to serve with.
+        assert!(parse_with("").unwrap().auth().is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

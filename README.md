@@ -6,8 +6,8 @@ web browser or a native client. No guest software is required; an optional guest
 clipboard, file transfer, drive, printer and camera redirection.
 
 **Status: early development.** Tested with Windows 11 and Fedora guests on an Intel Arc A380.
-Clients authenticate with the server's username and password; client certificates and FIDO
-security keys are planned. The guest keeps its own logon.
+Clients authenticate with an account of the server, which names the VMs it may open; client
+certificates and FIDO security keys are planned. The guest keeps its own logon.
 
 ## Why
 
@@ -126,10 +126,13 @@ renews them from an ACME CA, public or private (External Account Binding support
 testing, a self-signed certificate works:
 `openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj /CN=localhost -keyout key.pem -out cert.pem`
 
-Clients authenticate with the server's username and password before the server starts or
-attaches to a VM: `[auth] user` and `password` in the configuration, the password stored as an
-Argon2id hash (`qemu-dbus-webrtc hash-password`). This protects access to the server; the guest
-still requires its own logon.
+Clients authenticate with an account before the server starts or attaches to a VM. Each
+`[[account]]` in the configuration has a user, a password stored as an Argon2id hash
+(`qemu-dbus-webrtc hash-password`), and the VMs it may open, by UUID or name, or `"*"` for all of
+them; `[auth] user` and `password` give one more account, for all the VMs. A VM that no account
+names is open to none, and to a client that asks for a VM its account does not name, the server
+answers as for a VM the host does not run. This protects access to the server; the guest still
+requires its own logon.
 
 Settings can be stored in a TOML file, one per host (`qemu-dbus-webrtc --config <file>`); see
 [config.example.toml](config.example.toml). Command-line options override the file:
