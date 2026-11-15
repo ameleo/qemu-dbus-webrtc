@@ -5,10 +5,9 @@ through QEMU's `-display dbus` interface and streams the display, keyboard, mous
 web browser or a native client. No guest software is required; an optional guest agent adds
 clipboard, file transfer, drive, printer and camera redirection.
 
-**Status: early development.** It is used daily on its developers' setup (Windows 11 guest,
-Intel Arc A380). Clients authenticate with the server's username and password; client
-certificates and FIDO security keys are planned. The guest keeps its own Windows logon.
-Design discussions and contributions are welcome, see [CONTRIBUTING.md](CONTRIBUTING.md).
+**Status: early development.** Tested with Windows 11 and Fedora guests on an Intel Arc A380.
+Clients authenticate with the server's username and password; client certificates and FIDO
+security keys are planned. The guest keeps its own logon.
 
 ## Why
 
