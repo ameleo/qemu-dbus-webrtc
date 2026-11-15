@@ -716,6 +716,11 @@ async fn start_in(
                     encoder.clear_framebuffer();
                 }
                 sizes.remove(&console);
+                // The head shows nothing now: a layout that wants it on is not met, and is
+                // asked again if the guest does not turn it on (a guest can miss a request).
+                if let Some(&screen) = screen_of.get(&console) {
+                    layout.shown(screen, 0, 0);
+                }
                 rebalance = true;
             }
             DisplayEvent::MouseSet {
