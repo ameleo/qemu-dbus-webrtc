@@ -947,6 +947,18 @@ enum Source<'a> {
     },
 }
 
+/// `DRM_FORMAT_MOD_INVALID` (drm_fourcc.h): no modifier given, the buffer's layout implicit.
+const MOD_INVALID: u64 = 0x00ff_ffff_ffff_ffff;
+
+/// Whether a single-plane DMA-BUF of `width` 32-bit pixels, rows of `stride` bytes, with
+/// `modifier`, is linear. QEMU names the layout of what it exports from OpenGL (0 when linear),
+/// but gives no modifier for a blob scanout's udmabuf (`virtio_gpu_create_dmabuf`, in
+/// hw/display/virtio-gpu-udmabuf.c, sets `DRM_FORMAT_MOD_INVALID`): a udmabuf is the guest's
+/// memory, which knows no tiling, so it is linear, its rows at least as long as their pixels.
+fn linear(modifier: u64, stride: u32, width: u32) -> bool {
+    modifier == 0 || (modifier == MOD_INVALID && u64::from(stride) >= u64::from(width) * 4)
+}
+
 /// A console has a new framebuffer: encode it from now on, with a new encoder if it has none.
 #[allow(clippy::too_many_arguments)]
 fn scanout(
@@ -967,7 +979,7 @@ fn scanout(
             if planes.len() != 1 {
                 bail!("{} planes, one expected", planes.len())
             }
-            if *modifier != 0 {
+            if !linear(*modifier, planes[0].stride, width) {
                 bail!("modifier {modifier:#x}, only linear buffers are handled");
             }
         }
@@ -1049,6 +1061,20 @@ fn report_rates(
 
 #[cfg(test)]
 mod tests {
+
+    /// Linear buffers: explicit, or a blob's udmabuf without a modifier; a tiled one is not.
+    #[test]
+    fn linear_buffers() {
+        // The Windows guest's blob at 1716x1304: XR24, no modifier, rows of 1716 * 4 bytes.
+        assert!(linear(MOD_INVALID, 6864, 1716));
+        // QEMU's OpenGL export, linear and aligned.
+        assert!(linear(0, 6912, 1716));
+        // No modifier, rows shorter than their pixels: not a linear frame of that width.
+        assert!(!linear(MOD_INVALID, 6860, 1716));
+        // I915_FORMAT_MOD_Y_TILED, and Intel's 4-tiled (I915_FORMAT_MOD_4_TILED).
+        assert!(!linear(0x0100_0000_0000_0002, 6912, 1716));
+        assert!(!linear(0x0100_0000_0000_0009, 6912, 1716));
+    }
     use super::*;
 
     /// An estimate is taken when it moved enough: at once when it falls far, else once the
