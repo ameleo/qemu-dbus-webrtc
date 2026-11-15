@@ -827,11 +827,18 @@ function view(screen, win, videoElement, cursorElement) {
 const cursor = document.getElementById("cursor");
 const views = [view(0, window, video, cursor)];
 
+// The keys the local system takes for itself unless the page holds the keyboard, which a browser
+// allows in full screen only (the Keyboard Lock API, `keyboard.lock()`): in a window, the Windows
+// key would open both Start menus, the local one and the guest's. As Remote Desktop does by
+// default, it then stays local; in full screen, every key goes to the guest.
+const LOCAL_KEYS = new Set(["MetaLeft", "MetaRight"]);
+const localKey = (v, e) => LOCAL_KEYS.has(e.code) && !v.win.document.fullscreenElement;
+
 function listen(v) {
   v.win.addEventListener("keydown", (e) => {
     if (card.shown()) return;   // a card over the screen: typing in the login form, or nothing
     const scancode = e.code === "Pause" ? "Pause" : SCANCODES[e.code];
-    if (scancode === undefined) return;
+    if (scancode === undefined || localKey(v, e)) return;
     e.preventDefault();
     input.keys.add(scancode);
     input.send(input.withLocks(e, [ev.key(scancode, true)]));
@@ -839,7 +846,7 @@ function listen(v) {
   v.win.addEventListener("keyup", (e) => {
     if (card.shown()) return;
     const scancode = e.code === "Pause" ? "Pause" : SCANCODES[e.code];
-    if (scancode === undefined) return;
+    if (scancode === undefined || !input.keys.has(scancode)) return;
     e.preventDefault();
     input.keys.delete(scancode);
     input.send([ev.key(scancode, false)]);
@@ -1520,7 +1527,7 @@ camButton.addEventListener("click", async () => {
 // the native client. This page shows the first screen full screen on its monitor; a window it
 // opens on each other monitor shows the next screen, full screen after a click in it (browsers
 // want one per window). Closing one of these windows, or leaving full screen here, goes back to
-// one screen in this window. While full screen, Esc goes to the guest: holding it leaves.
+// one screen in this window. While full screen, every key goes to the guest: holding Esc leaves.
 const screensButton = document.getElementById("screens");
 const screens = {
   // The tracks of the guest's screens, in screen order.
@@ -1561,7 +1568,7 @@ const screens = {
       }
       this.monitors = monitorsOf(this.order);
       this.details.addEventListener("screenschange", () => this.stop(), { once: true });
-      navigator.keyboard?.lock?.(["Escape"]).catch(() => {});
+      navigator.keyboard?.lock?.().catch(() => {});
       this.poll = setInterval(() => { if (views.some((v) => v.win.closed)) this.stop(); }, 500);
       control.layout();
     }
@@ -1608,7 +1615,7 @@ const screens = {
     // for the sites its AutomaticFullscreenAllowedForUrls policy names: tried when the window
     // opens.
     const goFull = () => doc.documentElement.requestFullscreen()
-      .then(() => win.navigator.keyboard?.lock?.(["Escape"]));
+      .then(() => win.navigator.keyboard?.lock?.());
     full.addEventListener("click", () => {
       full.blur();
       goFull().catch((e) => console.warn("full screen:", e));
@@ -1675,14 +1682,14 @@ screensButton.addEventListener("click", () => {
 // ---------------------------------------------------------------------------------------------
 // The other tools: full screen, Ctrl+Alt+Del, the details, leaving.
 
-// Full screen for this window; while in it, Esc goes to the guest: holding it leaves.
+// Full screen for this window; while in it, every key goes to the guest: holding Esc leaves.
 $("fullscreen").addEventListener("click", () => {
   if (document.fullscreenElement) {
     document.exitFullscreen().catch(() => {});
     return;
   }
   document.documentElement.requestFullscreen()
-    .then(() => navigator.keyboard?.lock?.(["Escape"]))
+    .then(() => navigator.keyboard?.lock?.())
     .then(() => { if (navigator.keyboard?.lock) toast.show(T.fullScreenHold); })
     .catch((e) => console.warn("full screen:", e));
 });
