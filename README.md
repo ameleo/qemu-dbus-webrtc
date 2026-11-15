@@ -6,8 +6,9 @@ web browser or a native client. No guest software is required; an optional guest
 clipboard, file transfer, drive, printer and camera redirection.
 
 **Status: early development.** Tested with Windows 11 and Fedora guests on an Intel Arc A380.
-Clients authenticate with an account of the server, which names the VMs it may open; client
-certificates and FIDO security keys are planned. The guest keeps its own logon.
+Clients authenticate with an account of the server, which names the VMs it may open; tokens
+from a connection broker, client certificates and FIDO security keys are planned. The guest
+keeps its own logon.
 
 ## Why
 
@@ -132,7 +133,8 @@ Clients authenticate with an account before the server starts or attaches to a V
 them; `[auth] user` and `password` give one more account, for all the VMs. A VM that no account
 names is open to none, and to a client that asks for a VM its account does not name, the server
 answers as for a VM the host does not run. This protects access to the server; the guest still
-requires its own logon.
+requires its own logon. For many users, a connection broker that hands out tokens naming the VM
+is planned: the accounts suit a single host.
 
 Settings can be stored in a TOML file, one per host (`qemu-dbus-webrtc --config <file>`); see
 [config.example.toml](config.example.toml). Command-line options override the file:
