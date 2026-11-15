@@ -3,6 +3,26 @@
 What each release brings. The packages are on the
 [releases page](https://github.com/ameleo/qemu-dbus-webrtc/releases).
 
+## 0.1.3 — 2026-11-15
+
+A clipboard fix, and the guest agents published.
+
+### Fixed
+
+- **Locked clipboard files stay readable after a new guest copy.** When the guest pasted files
+  copied on a client, and copied something else before the paste ended, its reads of the locked
+  files failed: the server sent them to the current clipboard owner, and there was none. As
+  MS-RDPECLIP 2.2.4.1 requires, the data the guest locks now stays readable from the viewer it
+  was locked on until it is unlocked, whatever the guest copies in the meantime.
+
+### Changed
+
+- The README says why the project exists, and links to the guest agents,
+  [ameleo-display-agent-linux](https://github.com/ameleo/ameleo-display-agent-linux) and
+  [ameleo-display-agent-win](https://github.com/ameleo/ameleo-display-agent-win), and to the
+  D-Bus contract they implement,
+  [ameleo-display-protocol](https://github.com/ameleo/ameleo-display-protocol).
+
 ## 0.1.2 — 2026-11-14
 
 Variable bitrate encoding, which fixes the frame rate collapsing to 4 fps after a still screen,
