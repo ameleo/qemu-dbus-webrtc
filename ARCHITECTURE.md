@@ -56,9 +56,12 @@ libvirt, plain QEMU) starts and stops VMs.
   removed from the screen's viewers, and a screen without viewers is not encoded. Audio
   continues. On resume, a keyframe restores the picture immediately.
 - **Signaling:** a WebSocket carrying the SDP offer and answer and the ICE candidates. The
-  client's hello carries the server's username and password (`[auth] method = "password"`, the
-  default, with an Argon2id hash in the configuration), checked before the server starts or
-  attaches to the VM, whatever the VM manager; a wrong password is answered after one second.
+  client's hello carries a username and password (`[auth] method = "password"`, the default),
+  checked against the configuration's accounts (Argon2id hashes, one check whatever the user, so
+  that the time tells nothing), then whether the account may open the VM it asks for, by UUID or
+  name. Both happen before the server starts or attaches to the VM, whatever the VM manager; a
+  wrong password is answered after one second, and a VM the account may not open gets the same
+  answer as a VM the host does not run.
   This protects access to the server; the guest still requires its own logon. Other methods are
   planned: client certificates, FIDO security keys, broker tokens. The server never logs on to
   Windows.
