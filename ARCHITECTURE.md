@@ -130,7 +130,8 @@ keeps it enabled (Windows' viogpu driver ignores disabled screens); it resumes w
 when the client displays it again. The pointer goes through the guest agent (`Mouse1`), which
 places it on the head named by the client; the QEMU tablet only knows a single surface and
 serves the first screen when there is no agent. The cursor shape carries its screen, and the
-client draws it on that screen only. The browser page displays the first screen.
+client draws it on that screen only. The browser page displays the first screen, or, in
+browsers with the Window Management API, each screen in its own window on its own monitor.
 
 ## Codecs
 

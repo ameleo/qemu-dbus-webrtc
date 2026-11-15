@@ -43,9 +43,11 @@ Without guest software:
 - **Congestion control:** the bitrate follows a Google Congestion Control (GCC) bandwidth
   estimate from the client's transport-wide feedback, between 4 and 30 Mbit/s (`--bitrate` sets
   the maximum). On a constrained link, frames are dropped rather than queued.
-- **Multi-monitor** (native client): one guest screen per client monitor, with the client's
-  layout, up to four screens, each on its own video track. The bitrate is shared between them.
-  The browser client displays the first screen.
+- **Multi-monitor:** one guest screen per client monitor, with the client's layout, up to four
+  screens, each on its own video track. The bitrate is shared between them. The browser client
+  does it in Chrome and Edge (the Window Management API): its "All monitors" button shows the
+  first screen full screen on the page's monitor and opens a window on each other monitor; other
+  browsers display the first screen.
 - **Session handling:** the guest resolution follows the client window. One client controls
   the session at a time; a new client takes it over. Shadow clients (`?shadow` in the URL) are
   view-only.
