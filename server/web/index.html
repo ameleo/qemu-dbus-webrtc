@@ -104,6 +104,14 @@
   #login .primary { margin-top: 6px; padding: 10px; }
   #login-message { color: var(--poor); min-height: 1.2em; font-size: 12px; }
 
+  /* Files dragged over the page. */
+  #drop { position: fixed; inset: 12px; z-index: 18; display: flex; align-items: center; justify-content: center;
+          border: 2px dashed var(--accent); border-radius: 16px; background: rgba(79, 142, 247, .12);
+          pointer-events: none; }
+  #drop div { display: flex; align-items: center; gap: 10px; padding: 12px 18px; background: var(--surface);
+              border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); font-size: 14px; }
+  #drop svg { width: 22px; height: 22px; color: var(--accent); }
+
   /* Short messages, at the bottom. */
   .note { position: fixed; bottom: 18px; left: 50%; z-index: 15; max-width: calc(100vw - 32px);
           transform: translateX(-50%); padding: 9px 14px; background: var(--surface); border: 1px solid var(--line);
@@ -173,6 +181,7 @@
   </div>
 </div>
 
+<div id="drop" hidden><div><svg viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg><span id="drop-text"></span></div></div>
 <div id="toast" class="note" hidden></div>
 <div id="hint" class="note" hidden></div>
 <script>
@@ -234,6 +243,9 @@ const WORDS = {
     details: "Connection details",
     leave: "Disconnect",
     hint: "Click the screen to use the guest's mouse; Esc gives it back.",
+    dropHere: "Drop to copy into the virtual machine",
+    filesReady: (n) => `${n} ${n === 1 ? "file" : "files"} ready: paste in the virtual machine (Ctrl+V).`,
+    filesNone: "Nothing to copy: no file in what was dropped.",
     rows: {
       codec: "Codec", decoder: "Decoder", hardware: "hardware", size: "Resolution", fps: "Frame rate",
       bitrate: "Bitrate", estimate: "Bandwidth estimate", latency: "Latency", breakdown: "Of which",
@@ -295,6 +307,9 @@ const WORDS = {
     details: "Détails de la connexion",
     leave: "Se déconnecter",
     hint: "Cliquez sur l'écran pour utiliser la souris de la machine ; Échap la rend.",
+    dropHere: "Déposez pour copier dans la machine virtuelle",
+    filesReady: (n) => `${n} ${n === 1 ? "fichier prêt" : "fichiers prêts"} : collez dans la machine virtuelle (Ctrl+V).`,
+    filesNone: "Rien à copier : aucun fichier dans le dépôt.",
     rows: {
       codec: "Codec", decoder: "Décodeur", hardware: "matériel", size: "Résolution", fps: "Images/s",
       bitrate: "Débit", estimate: "Bande passante estimée", latency: "Latence", breakdown: "Dont",
@@ -413,6 +428,7 @@ $("login-user-label").textContent = T.user;
 $("login-password-label").textContent = T.password;
 $("login-submit").textContent = T.signIn;
 $("hint").textContent = T.hint;
+$("drop-text").textContent = T.dropHere;
 $("watching").textContent = T.watching;
 
 // Protocol Buffers, just what the messages of crates/protocol/proto/qdw.proto need:
@@ -658,6 +674,7 @@ const session = {
     control.latency = [];
     clip.channel = null;
     clip.answers.clear();
+    clip.locked.clear();
     clip.guest = [];
     camera.reset();
     mic.reset();
@@ -924,6 +941,76 @@ function listen(v) {
   }, { passive: false });
   v.win.addEventListener("resize", () => pointer.draw());
   video.addEventListener("resize", () => pointer.draw());
+  acceptDrops(v);
+}
+
+// Files dropped on a window of the page: offered on the guest clipboard, for a paste there. A
+// browser gives a page the files dropped on it, not those of the local clipboard. Whatever is
+// dropped, the browser must not open it in place of the session.
+function acceptDrops(v) {
+  const doc = v.win.document;
+  const files = (e) => e.dataTransfer?.types.includes("Files");
+  let over = 0;
+  const shown = (on) => { if (v.screen === 0) $("drop").hidden = !on; };
+  doc.addEventListener("dragenter", (e) => {
+    if (!files(e)) return;
+    e.preventDefault();
+    if (++over === 1) shown(!shadow && !card.shown());
+  });
+  doc.addEventListener("dragover", (e) => {
+    if (!files(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = shadow || card.shown() ? "none" : "copy";
+  });
+  doc.addEventListener("dragleave", (e) => {
+    if (files(e) && --over <= 0) { over = 0; shown(false); }
+  });
+  doc.addEventListener("drop", (e) => {
+    if (!files(e)) return;
+    e.preventDefault();
+    over = 0;
+    shown(false);
+    if (shadow || card.shown()) return;
+    droppedFiles(e.dataTransfer).then((list) => {
+      const count = list.filter((f) => !f.directory).length;
+      if (list.length === 0) { toast.show(T.filesNone); return; }
+      clip.offerFiles(list);
+      toast.show(T.filesReady(count || list.length), 6000);
+    }).catch((err) => console.warn("drop:", err));
+  });
+}
+
+// What was dropped, as the clipboard's file list: each file and directory with its path within
+// the drop, a directory before what it holds. The entries must be taken during the drop event:
+// the browser empties the DataTransfer after it.
+function droppedFiles(dataTransfer) {
+  const entries = [...dataTransfer.items].filter((i) => i.kind === "file")
+    .map((i) => i.webkitGetAsEntry?.()).filter(Boolean);
+  const plain = [...dataTransfer.files];
+  return (async () => {
+    const out = [];
+    if (entries.length === 0) {
+      for (const file of plain) out.push({ path: file.name, directory: false, size: file.size, modified: file.lastModified, file });
+      return out;
+    }
+    const walk = async (entry, path) => {
+      if (entry.isDirectory) {
+        out.push({ path, directory: true, size: 0, modified: 0 });
+        const reader = entry.createReader();
+        // A directory's entries come in batches, until an empty one.
+        for (;;) {
+          const batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+          if (batch.length === 0) break;
+          for (const child of batch) await walk(child, `${path}/${child.name}`);
+        }
+      } else {
+        const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+        out.push({ path, directory: false, size: file.size, modified: file.lastModified, file });
+      }
+    };
+    for (const entry of entries) await walk(entry, entry.name);
+    return out;
+  })();
 }
 
 // The pixel of the guest screen under the pointer, the video being scaled to fit the window
@@ -1055,16 +1142,75 @@ listen(views[0]);
 
 // CHUNK: MAX_CHUNK of qdw-protocol, so that a whole message fits in 64 KiB.
 const TEXT = "text/plain;charset=utf-8", PNG = "image/png", CHUNK = 60 * 1024;
+// Files and directories (FILE_LIST_MIME of qdw-protocol): the data is a ClipboardFileList.
+const FILES = "application/vnd.qdw.file-list";
 const clip = {
   channel: null,
   guest: [],             // the types the guest clipboard holds
   guestPending: false,   // the guest copied while the page had no focus
-  local: {},             // what this client copied, offered to the guest: { text, png }
+  local: {},             // what this client copied, offered to the guest: { text, png, files }
+  locked: new Map(),     // clip_data_id -> the files the guest locked, readable until unlocked
   written: {},           // what the page last wrote to the local clipboard, or offered
   answers: new Map(),    // request id -> chunks received
   nextId: 1,
   send(build) {
     if (this.channel?.readyState === "open") this.channel.send(new Uint8Array(pb.message(build)));
+  },
+  // Send, once the channel's buffer is low: a file's pieces would otherwise pile up in it, and a
+  // browser closes a channel whose buffer overflows.
+  async sendPaced(build) {
+    const channel = this.channel;
+    if (channel?.readyState !== "open") return;
+    if (channel.bufferedAmount > 1024 * 1024) {
+      channel.bufferedAmountLowThreshold = 256 * 1024;
+      await new Promise((resolve) => channel.addEventListener("bufferedamountlow", resolve, { once: true }));
+    }
+    if (channel === this.channel && channel.readyState === "open") channel.send(new Uint8Array(pb.message(build)));
+  },
+  // Offer files to the guest, from a drop: its clipboard holds them, and a paste in the guest
+  // copies them there. `files`: [{ path, directory, size, modified, file }], a directory before
+  // what it holds.
+  offerFiles(files) {
+    if (files.length === 0) return;
+    this.local = { files };
+    this.send((o) => pb.bytes(o, 1, pb.message((g) => pb.string(g, 1, FILES))));
+  },
+  // ClipboardFileList: files = 1; ClipboardFile: path = 1, directory = 2, size = 3,
+  // modified_ms = 4.
+  fileList(files) {
+    return new Uint8Array(pb.message((l) => files.forEach((f) => pb.bytes(l, 1, pb.message((m) => {
+      pb.string(m, 1, f.path);
+      if (f.directory) pb.uint(m, 2, 1);
+      if (f.size) pb.uint(m, 3, f.size);
+      if (f.modified > 0) pb.uint(m, 4, f.modified);
+    })))));
+  },
+  // The guest reads a dropped file: its size, or a piece. ClipboardFileRequest: id = 1, index = 2,
+  // size = 3, offset = 4, length = 5, clip_data_id = 6; ClipboardFileData: id = 1, size = 2,
+  // data = 3, last = 4, failed = 5.
+  async fileRequest(r) {
+    const id = uint(r, 1);
+    const files = r.has(6) ? this.locked.get(uint(r, 6)) : this.local.files;
+    const f = files?.[uint(r, 2)];
+    const reply = (build) => this.sendPaced((o) => pb.bytes(o, 8, pb.message((d) => { pb.uint(d, 1, id); build(d); })));
+    if (!f || f.directory) return reply((d) => { pb.uint(d, 4, 1); pb.uint(d, 5, 1); });
+    if (uint(r, 3)) return reply((d) => { pb.uint(d, 2, f.size); pb.uint(d, 4, 1); });
+    const offset = uint(r, 4);
+    let bytes;
+    try {
+      bytes = new Uint8Array(await f.file.slice(offset, offset + uint(r, 5)).arrayBuffer());
+    } catch (e) {
+      // The file went, or changed, since the drop.
+      console.warn("dropped file", f.path, e);
+      return reply((d) => { pb.uint(d, 4, 1); pb.uint(d, 5, 1); });
+    }
+    let at = 0;
+    do {
+      const chunk = bytes.subarray(at, at + CHUNK);
+      at += CHUNK;
+      const last = at >= bytes.length;
+      await reply((d) => { pb.bytes(d, 3, chunk); if (last) pb.uint(d, 4, 1); });
+    } while (at < bytes.length);
   },
   // One of the page's windows has the focus: offer what was copied locally, or take what the
   // guest copied.
@@ -1111,6 +1257,7 @@ const clip = {
         })));
       } while (offset < bytes.length);
     };
+    if (mimes.includes(FILES) && this.local.files) return send(FILES, this.fileList(this.local.files));
     if (mimes.includes(TEXT) && this.local.text !== undefined) return send(TEXT, pb.utf8.encode(this.local.text));
     if (mimes.includes(PNG) && this.local.png) {
       return this.local.png.arrayBuffer().then((b) => send(PNG, new Uint8Array(b)));
@@ -1121,7 +1268,14 @@ const clip = {
 
 async function clipboardMessage(bytes) {
   const message = pb.parse(bytes);
-  if (message.has(1)) {
+  // ClipboardLock, ClipboardUnlock: clip_data_id = 1.
+  if (message.has(5)) {
+    if (clip.local.files) clip.locked.set(uint(pb.parse(message.get(5)[0]), 1), clip.local.files);
+  } else if (message.has(6)) {
+    clip.locked.delete(uint(pb.parse(message.get(6)[0]), 1));
+  } else if (message.has(7)) {
+    await clip.fileRequest(pb.parse(message.get(7)[0]));
+  } else if (message.has(1)) {
     clip.guest = (pb.parse(message.get(1)[0]).get(1) || []).map((m) => pb.text.decode(m));
     if (focusedWindow()) clip.fetchGuest(); else clip.guestPending = true;
   } else if (message.has(2)) {

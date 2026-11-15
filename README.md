@@ -95,7 +95,8 @@ README).
 Clients: the web page served by the server, and a native client based on libwebrtc (in
 development). The web page speaks English or French, as the browser does; its tools are in a bar
 that comes down from the top (microphone, camera, all monitors, full screen, Ctrl+Alt+Del,
-connection details, disconnect), and it connects again by itself after a lost connection. The client protocol is defined in Protocol Buffers
+connection details, disconnect), files and folders dropped on it go to the guest's clipboard for
+a paste there, and it connects again by itself after a lost connection. The client protocol is defined in Protocol Buffers
 ([qdw.proto](crates/protocol/proto/qdw.proto)), so other clients can be implemented from it.
 
 ## Usage
