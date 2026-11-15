@@ -5,8 +5,8 @@
 //!
 //! The thread encodes the framebuffer as it is when it gets to it: frames asked for while it
 //! is busy make one, the latest. On the GPU, a DMA-BUF framebuffer is imported once and read
-//! where it is; memory shared with QEMU is read by the CPU and copied to the GPU. On the CPU,
-//! both are read where they are mapped.
+//! where it is, its import kept for when the guest scans it out again; memory shared with QEMU
+//! is read by the CPU and copied to the GPU. On the CPU, both are read where they are mapped.
 
 use std::ffi::c_void;
 use std::os::fd::{AsFd, OwnedFd};
@@ -106,7 +106,13 @@ pub(crate) enum Source {
     /// In memory shared with QEMU.
     Mapped(Mapping),
     /// In a DMA-BUF of one linear plane, of `size` bytes, in the DRM format `fourcc`.
-    DmaBuf { fd: OwnedFd, size: u32, fourcc: u32 },
+    /// `buffer` is the DMA-BUF's device and inode: the same for every descriptor of it.
+    DmaBuf {
+        fd: OwnedFd,
+        size: u32,
+        fourcc: u32,
+        buffer: (u64, u64),
+    },
 }
 
 /// A framebuffer to encode.
@@ -136,6 +142,22 @@ fn frame<'a>(picture: &Picture, bytes: &'a [u8]) -> hw::Frame<'a> {
     }
 }
 
+/// The framebuffers a GPU encoder keeps imported (see `Engine::Gpu`): a guest flips between
+/// two, or three.
+const IMPORTS: usize = 4;
+
+/// A framebuffer as imported: its DMA-BUF, and the frame read in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Import {
+    buffer: (u64, u64),
+    fourcc: u32,
+    offset: usize,
+    stride: usize,
+    width: u32,
+    height: u32,
+    bottom_up: bool,
+}
+
 /// How a GPU reads a DMA-BUF framebuffer: imported, where it is; or, when the GPU cannot
 /// import it, mapped and read by the CPU, slowly but read.
 enum Read {
@@ -148,7 +170,11 @@ enum Read {
 enum Engine {
     Gpu {
         encoder: Box<hw::Encoder>,
-        imported: Option<(Arc<Source>, Read)>,
+        /// The latest framebuffers read, the latest first, at most [`IMPORTS`]: a guest that
+        /// flips between buffers scans out the same few again and again, and an import costs
+        /// (on an Intel GPU without a shared last-level cache, i915 writes back and empties
+        /// the caches of every CPU, wbinvd, when it takes an imported DMA-BUF's pages).
+        imported: Vec<(Import, Read)>,
         /// Why the last framebuffer the GPU could not import was read by the CPU: logged when
         /// it changes, not for each framebuffer (a guest that flips between buffers gives a
         /// new one at every frame).
@@ -202,7 +228,7 @@ impl Engine {
         );
         Ok(Self::Gpu {
             encoder: Box::new(encoder),
-            imported: None,
+            imported: Vec::new(),
             not_imported: None,
         })
     }
@@ -226,8 +252,9 @@ impl Engine {
         }
     }
 
-    /// Encode `picture`; a DMA-BUF is imported or mapped once, and kept with the framebuffer
-    /// it is.
+    /// Encode `picture`; a DMA-BUF is imported or mapped once: on the GPU, kept for as long as
+    /// the guest scans it out again among its latest framebuffers, on the CPU with the
+    /// framebuffer it is.
     fn encode(&mut self, picture: &Picture, keyframe: bool) -> Result<hw::Packet> {
         match (self, &*picture.source) {
             (Self::Gpu { encoder, .. }, Source::Mapped(mapping)) => {
@@ -242,43 +269,58 @@ impl Engine {
                     imported,
                     not_imported,
                 },
-                Source::DmaBuf { fd, size, fourcc },
+                Source::DmaBuf {
+                    fd,
+                    size,
+                    fourcc,
+                    buffer,
+                },
             ) => {
-                if !imported
-                    .as_ref()
-                    .is_some_and(|(source, _)| Arc::ptr_eq(source, &picture.source))
-                {
-                    // The previous framebuffer's import goes first.
-                    *imported = None;
-                    let import = encoder.import(&hw::DmaBuf {
-                        fd: fd.as_fd(),
-                        size: *size,
-                        fourcc: *fourcc,
-                        modifier: 0,
-                        offset: u32::try_from(picture.offset)?,
-                        stride: u32::try_from(picture.stride)?,
-                        width: picture.width,
-                        height: picture.height,
-                        bottom_up: picture.bottom_up,
-                    });
-                    let read = match import {
-                        Ok(frame) => {
-                            *not_imported = None;
-                            Read::Imported(frame)
-                        }
-                        Err(error) => {
-                            let why = error.to_string();
-                            if not_imported.as_deref() != Some(why.as_str()) {
-                                warn!(%error, "framebuffer not imported: read by the CPU");
-                                *not_imported = Some(why);
+                let key = Import {
+                    buffer: *buffer,
+                    fourcc: *fourcc,
+                    offset: picture.offset,
+                    stride: picture.stride,
+                    width: picture.width,
+                    height: picture.height,
+                    bottom_up: picture.bottom_up,
+                };
+                match imported.iter().position(|(import, _)| *import == key) {
+                    // Read before: the latest now.
+                    Some(at) => imported[..=at].rotate_right(1),
+                    None => {
+                        let import = encoder.import(&hw::DmaBuf {
+                            fd: fd.as_fd(),
+                            size: *size,
+                            fourcc: *fourcc,
+                            modifier: 0,
+                            offset: u32::try_from(picture.offset)?,
+                            stride: u32::try_from(picture.stride)?,
+                            width: picture.width,
+                            height: picture.height,
+                            bottom_up: picture.bottom_up,
+                        });
+                        let read = match import {
+                            Ok(frame) => {
+                                *not_imported = None;
+                                Read::Imported(frame)
                             }
-                            Read::Mapped(Mapping::new(fd, *size as usize, true)?)
-                        }
-                    };
-                    *imported = Some((picture.source.clone(), read));
+                            Err(error) => {
+                                let why = error.to_string();
+                                if not_imported.as_deref() != Some(why.as_str()) {
+                                    warn!(%error, "framebuffer not imported: read by the CPU");
+                                    *not_imported = Some(why);
+                                }
+                                Read::Mapped(Mapping::new(fd, *size as usize, true)?)
+                            }
+                        };
+                        // The oldest goes first.
+                        imported.truncate(IMPORTS - 1);
+                        imported.insert(0, (key, read));
+                    }
                 }
-                match imported.as_ref().map(|(_, read)| read) {
-                    Some(Read::Imported(frame)) => match encoder.encode_imported(frame, keyframe) {
+                match &imported[0].1 {
+                    Read::Imported(frame) => match encoder.encode_imported(frame, keyframe) {
                         // The GPU cannot convert it as it is (it cannot turn it upside
                         // down): read by the CPU from now on, for this framebuffer.
                         Err(hw::Error::Unsupported(why)) => {
@@ -289,16 +331,15 @@ impl Engine {
                         }
                         result => return Ok(result?),
                     },
-                    Some(Read::Mapped(mapping)) => {
+                    Read::Mapped(mapping) => {
                         return mapping
                             .read(|bytes| Ok(encoder.encode(&frame(picture, bytes), keyframe)?));
                     }
-                    None => unreachable!("read just above"),
                 }
                 let mapping = Mapping::new(fd, *size as usize, true)?;
                 let packet =
                     mapping.read(|bytes| Ok(encoder.encode(&frame(picture, bytes), keyframe)?));
-                *imported = Some((picture.source.clone(), Read::Mapped(mapping)));
+                imported[0].1 = Read::Mapped(mapping);
                 packet
             }
             (Self::Cpu { encoder, mapped }, Source::DmaBuf { fd, size, .. }) => {

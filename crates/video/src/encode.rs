@@ -395,10 +395,14 @@ impl Encoder {
     ) -> Result<()> {
         let format = drm_format(fourcc).with_context(|| format!("DRM format {fourcc:#x}"))?;
         let (fd, size) = own(fd, offset, width, stride, height)?;
+        // The buffer, whatever the descriptor: QEMU sends a new one with each scanout, also of
+        // a buffer it sent before.
+        let stat = rustix::fs::fstat(&fd).context("framebuffer")?;
         let source = Source::DmaBuf {
             fd,
             size: u32::try_from(size).context("framebuffer size")?,
             fourcc,
+            buffer: (stat.st_dev as u64, stat.st_ino as u64),
         };
         self.install(source, format, width, height, offset, stride, y0_top);
         Ok(())
