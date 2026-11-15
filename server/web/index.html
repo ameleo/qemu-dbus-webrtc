@@ -1058,28 +1058,38 @@ const screens = {
     const win = window.open("", `screen-${i}`,
       `popup,left=${m.availLeft},top=${m.availTop},width=${m.availWidth},height=${m.availHeight}`);
     if (!win) return false;
+    // The first document of a new window has no doctype, and renders in quirks mode: a
+    // standards-mode one instead, as this page, which the same styles fit to the window.
     const doc = win.document;
+    doc.open();
+    doc.write("<!doctype html><html><head></head><body></body></html>");
+    doc.close();
     doc.title = `${document.title}: screen ${i + 1}`;
-    const style = doc.createElement("style");
-    style.textContent = `
-      html, body { margin: 0; height: 100%; background: #000; color: #eee; font: 13px/1.4 system-ui, sans-serif; }
-      video { width: 100%; height: 100%; object-fit: contain; display: block; }
-      img { position: fixed; pointer-events: none; display: none; }
-      button { position: fixed; top: 8px; left: 50%; transform: translateX(-50%); padding: 6px 10px; border: 0;
-               border-radius: 4px; background: rgba(0, 0, 0, .65); color: #eee; font: inherit; cursor: pointer; }
-      button[hidden] { display: none; }`;
-    doc.head.append(style);
+    // Styled through the elements' properties: the page's Content-Security-Policy, which the
+    // window inherits, allows no <style> but the page's own.
+    const css = (element, properties) => Object.assign(element.style, properties);
+    const bar = { padding: "6px 10px", border: "0", borderRadius: "4px", background: "rgba(0, 0, 0, .65)",
+                  color: "#eee", font: "inherit", cursor: "pointer" };
+    css(doc.documentElement, { height: "100%" });
+    css(doc.body, { margin: "0", height: "100%", background: "#000", color: "#eee",
+                    font: "13px/1.4 system-ui, sans-serif" });
     const videoElement = doc.createElement("video");
     videoElement.autoplay = videoElement.muted = videoElement.playsInline = true;
+    css(videoElement, { width: "100%", height: "100%", objectFit: "contain", display: "block" });
     const cursorElement = doc.createElement("img");
     cursorElement.alt = "";
+    css(cursorElement, { position: "fixed", pointerEvents: "none", display: "none" });
     const full = doc.createElement("button");
     full.type = "button";
     full.textContent = "Full screen";
+    css(full, { ...bar, position: "fixed", top: "8px", left: "50%", transform: "translateX(-50%)" });
+    // Full screen on a click in the window: the click on this page's button has opened the
+    // window, and a browser hands a click on to another window only while it is unused
+    // (capability delegation, tried: NotAllowedError).
     full.addEventListener("click", () => {
       full.blur();
       doc.documentElement.requestFullscreen()
-        .then(() => win.navigator.keyboard?.lock?.(["Escape"]).catch(() => {}))
+        .then(() => win.navigator.keyboard?.lock?.(["Escape"]))
         .catch((e) => console.warn("full screen:", e));
     });
     doc.addEventListener("fullscreenchange", () => { full.hidden = !!doc.fullscreenElement; });
