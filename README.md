@@ -53,9 +53,8 @@ Without guest software:
 text and thin colored lines blur. See [ARCHITECTURE.md](ARCHITECTURE.md#codecs) for
 measurements and the patent situation.
 
-With the optional guest agent,
-[ameleo-display-agent-windows](https://github.com/ameleo/ameleo-display-agent-windows), in a
-Windows guest:
+With a guest agent implementing the
+[ameleo-display-protocol](https://github.com/ameleo/ameleo-display-protocol) D-Bus interface:
 
 - **Clipboard:** text and images, in both directions.
 - **File copy and paste** in both directions, with Explorer's progress dialog (native client).
@@ -66,6 +65,8 @@ Windows guest:
 - **Camera redirection:** client cameras in the guest, with their controls (brightness, focus,
   zoom...). A camera streams, as H.264 encoded by the client, only while a guest application
   uses it (browser and native client).
+
+Agents for Windows and Linux guests are in preparation.
 
 Clients: the web page served by the server, and a native client based on libwebrtc (in
 development). The client protocol is defined in Protocol Buffers

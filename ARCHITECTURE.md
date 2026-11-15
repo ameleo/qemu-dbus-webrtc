@@ -215,10 +215,9 @@ independently of video latency.
 Touch input does not use MS-RDPEI, which has a listed patent.
 
 The clipboard follows RDP's model: whoever copied last owns the clipboard and announces the
-formats it holds, and the data are only transferred on paste. In the guest, the guest agent
-([ameleo-display-agent-windows](https://github.com/ameleo/ameleo-display-agent-windows)) owns
-the Windows clipboard. A browser page cannot monitor the local clipboard: it reads it when it
-gains focus and offers it to the guest if it changed. Browsers only expose the clipboard to pages
+formats it holds, and the data are only transferred on paste. In the guest, the guest agent owns
+the guest's clipboard. A browser page cannot monitor the local clipboard: it reads it when it gains
+focus and offers it to the guest if it changed. Browsers only expose the clipboard to pages
 served over HTTPS, which the server always uses.
 
 Drive redirection follows RDP: a client announces its drives, the guest agent mounts each one on
