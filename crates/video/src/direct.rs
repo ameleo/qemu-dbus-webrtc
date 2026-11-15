@@ -149,6 +149,10 @@ enum Engine {
     Gpu {
         encoder: Box<hw::Encoder>,
         imported: Option<(Arc<Source>, Read)>,
+        /// Why the last framebuffer the GPU could not import was read by the CPU: logged when
+        /// it changes, not for each framebuffer (a guest that flips between buffers gives a
+        /// new one at every frame).
+        not_imported: Option<String>,
     },
     Cpu {
         encoder: Box<hw::CpuEncoder>,
@@ -199,6 +203,7 @@ impl Engine {
         Ok(Self::Gpu {
             encoder: Box::new(encoder),
             imported: None,
+            not_imported: None,
         })
     }
 
@@ -231,7 +236,14 @@ impl Engine {
             (Self::Cpu { encoder, .. }, Source::Mapped(mapping)) => {
                 mapping.read(|bytes| Ok(encoder.encode(&frame(picture, bytes), keyframe)?))
             }
-            (Self::Gpu { encoder, imported }, Source::DmaBuf { fd, size, fourcc }) => {
+            (
+                Self::Gpu {
+                    encoder,
+                    imported,
+                    not_imported,
+                },
+                Source::DmaBuf { fd, size, fourcc },
+            ) => {
                 if !imported
                     .as_ref()
                     .is_some_and(|(source, _)| Arc::ptr_eq(source, &picture.source))
@@ -250,10 +262,16 @@ impl Engine {
                         bottom_up: picture.bottom_up,
                     });
                     let read = match import {
-                        Ok(frame) => Read::Imported(frame),
+                        Ok(frame) => {
+                            *not_imported = None;
+                            Read::Imported(frame)
+                        }
                         Err(error) => {
-                            // Once for this framebuffer, not at every frame.
-                            warn!(%error, "framebuffer not imported: read by the CPU");
+                            let why = error.to_string();
+                            if not_imported.as_deref() != Some(why.as_str()) {
+                                warn!(%error, "framebuffer not imported: read by the CPU");
+                                *not_imported = Some(why);
+                            }
                             Read::Mapped(Mapping::new(fd, *size as usize, true)?)
                         }
                     };
@@ -264,7 +282,10 @@ impl Engine {
                         // The GPU cannot convert it as it is (it cannot turn it upside
                         // down): read by the CPU from now on, for this framebuffer.
                         Err(hw::Error::Unsupported(why)) => {
-                            warn!(%why, "framebuffer not converted by the GPU: read by the CPU");
+                            if not_imported.as_deref() != Some(why.as_str()) {
+                                warn!(%why, "framebuffer not converted by the GPU: read by the CPU");
+                                *not_imported = Some(why);
+                            }
                         }
                         result => return Ok(result?),
                     },
