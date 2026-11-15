@@ -83,7 +83,11 @@ With a guest agent implementing the
   zoom...). A camera streams, as H.264 encoded by the client, only while a guest application
   uses it (browser and native client).
 
-Agents for Windows and Linux guests are in preparation.
+Agents, both under the GPL version 3:
+[ameleo-display-agent-linux](https://github.com/ameleo/ameleo-display-agent-linux) for Linux
+guests, and [ameleo-display-agent-win](https://github.com/ameleo/ameleo-display-agent-win) for
+Windows guests, where drives, printers and file copy and paste need a companion service (see its
+README).
 
 Clients: the web page served by the server, and a native client based on libwebrtc (in
 development). The client protocol is defined in Protocol Buffers
