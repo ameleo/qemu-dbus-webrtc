@@ -93,7 +93,9 @@ Windows guests, where drives, printers and file copy and paste need a companion 
 README).
 
 Clients: the web page served by the server, and a native client based on libwebrtc (in
-development). The client protocol is defined in Protocol Buffers
+development). The web page speaks English or French, as the browser does; its tools are in a bar
+that comes down from the top (microphone, camera, all monitors, full screen, Ctrl+Alt+Del,
+connection details, disconnect), and it connects again by itself after a lost connection. The client protocol is defined in Protocol Buffers
 ([qdw.proto](crates/protocol/proto/qdw.proto)), so other clients can be implemented from it.
 
 ## Usage

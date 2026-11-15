@@ -299,6 +299,7 @@ async fn start_in(
     // Turns true when the display loop ends: the VM stopped, unless the server detached.
     let (stopped_tx, stopped_rx) = tokio::sync::watch::channel(false);
     let shared = web::Shared {
+        name: name.clone(),
         vm_stopped: stopped_rx,
         codec: args.settings.codec,
         full_chroma: args.settings.full_chroma,

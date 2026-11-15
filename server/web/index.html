@@ -4,57 +4,416 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>qemu-dbus-webrtc</title>
+<meta name="color-scheme" content="dark">
+<title>Console</title>
 <style>
-  html, body { margin: 0; height: 100%; background: #000; color: #eee; font: 13px/1.4 system-ui, sans-serif; }
+  :root {
+    --surface: rgba(30, 31, 36, .92);
+    --surface-solid: #1e1f24;
+    --raised: #2a2b31;
+    --line: rgba(255, 255, 255, .09);
+    --text: #ececf0;
+    --muted: #9a9ba5;
+    --accent: #4f8ef7;
+    --accent-soft: rgba(79, 142, 247, .18);
+    --good: #3ecf8e;
+    --fair: #f5b041;
+    --poor: #f0605a;
+    --danger: #e5484d;
+    --radius: 10px;
+    --shadow: 0 10px 30px rgba(0, 0, 0, .45), 0 1px 0 rgba(255, 255, 255, .04) inset;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; color: var(--text);
+               font: 13px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  [hidden] { display: none !important; }
   video { width: 100%; height: 100%; object-fit: contain; display: block; }
-  #stats { position: fixed; top: 8px; left: 8px; padding: 6px 10px; background: rgba(0, 0, 0, .65);
-           border-radius: 4px; white-space: pre; font-family: ui-monospace, monospace; pointer-events: none; }
-  #stats.error { background: #8b1a1a; }
-  #buttons { position: fixed; top: 8px; right: 8px; display: flex; gap: 6px; }
-  #buttons button { padding: 6px 10px; border: 0; border-radius: 4px;
-                    background: rgba(0, 0, 0, .65); color: #eee; font: inherit; cursor: pointer; }
-  #buttons button[hidden] { display: none; }
-  #mic.on, #cam.on, #screens.on { background: #1a6b2e; }
-  #login { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 260px;
-           padding: 18px; background: #1c1c1e; border-radius: 8px; display: flex; flex-direction: column; gap: 10px; }
-  #login[hidden] { display: none; }
-  #login input, #login button { font: inherit; padding: 7px 9px; border-radius: 4px; border: 1px solid #444;
-                                background: #111; color: #eee; }
-  #login button { background: #2a5db0; border: 0; cursor: pointer; }
-  #login-message { color: #f08a8a; min-height: 1.4em; }
   #cursor { position: fixed; pointer-events: none; display: none; }
-  #hint { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%); padding: 6px 10px;
-          background: rgba(0, 0, 0, .65); border-radius: 4px; pointer-events: none; }
-  #hint[hidden] { display: none; }
+  button { font: inherit; color: inherit; }
+  svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8;
+        stroke-linecap: round; stroke-linejoin: round; flex: none; }
+
+  /* The toolbar: a tab at the top; the bar comes down over it, and goes back up. */
+  #bar { position: fixed; top: 0; left: 50%; z-index: 10; display: flex; flex-direction: column;
+         align-items: center; transform: translate(-50%, 0); transition: transform .22s ease; }
+  #bar.collapsed { transform: translate(-50%, calc(-100% + 13px)); }
+  #bar.collapsed #bar-body { opacity: 0; }
+  #bar-body { display: flex; align-items: center; gap: 2px; padding: 5px 6px; margin-top: 6px; transition: opacity .22s ease;
+              background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+              box-shadow: var(--shadow); backdrop-filter: blur(12px); }
+  #bar-tab { width: 46px; height: 14px; margin-top: -1px; padding: 0; border: 1px solid var(--line);
+             border-top: 0; border-radius: 0 0 8px 8px; background: var(--surface); color: var(--muted);
+             display: flex; align-items: center; justify-content: center; cursor: pointer; }
+  #bar-tab svg { width: 14px; height: 14px; transition: transform .22s ease; }
+  #bar:not(.collapsed) #bar-tab svg { transform: rotate(180deg); }
+  #identity { display: flex; align-items: center; gap: 8px; padding: 0 10px 0 8px; white-space: nowrap; }
+  #vm-name { font-weight: 600; max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+  #latency { color: var(--muted); font-variant-numeric: tabular-nums; }
+  #quality { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  #quality.good { background: var(--good); box-shadow: 0 0 0 3px rgba(62, 207, 142, .18); }
+  #quality.fair { background: var(--fair); box-shadow: 0 0 0 3px rgba(245, 176, 65, .18); }
+  #quality.poor { background: var(--poor); box-shadow: 0 0 0 3px rgba(240, 96, 90, .18); }
+  .badge { padding: 1px 7px; border-radius: 999px; background: var(--raised); color: var(--muted); font-size: 11px; }
+  .sep { width: 1px; height: 20px; margin: 0 4px; background: var(--line); }
+  .tool { position: relative; width: 34px; height: 32px; border: 0; border-radius: 7px; background: transparent;
+          color: var(--text); display: flex; align-items: center; justify-content: center; cursor: pointer; }
+  .tool:hover { background: rgba(255, 255, 255, .08); }
+  .tool:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .tool.on { background: var(--accent-soft); color: var(--accent); }
+  .tool.live { background: var(--accent); color: #fff; }
+  .tool.danger:hover { background: rgba(229, 72, 77, .18); color: var(--danger); }
+  .tool .off-line { display: none; }
+  .tool.off .off-line { display: inline; }
+
+  /* The connection details. */
+  #panel { position: fixed; top: 64px; left: 50%; z-index: 9; width: min(420px, calc(100vw - 32px));
+           transform: translateX(-50%); padding: 14px 16px 12px; background: var(--surface);
+           border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow);
+           backdrop-filter: blur(12px); }
+  #panel header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  #panel h2 { margin: 0; font-size: 13px; font-weight: 600; }
+  #panel dl { display: grid; grid-template-columns: max-content 1fr; gap: 5px 16px; margin: 0; }
+  #panel dt { color: var(--muted); }
+  #panel dd { margin: 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+
+  /* Cards over the screen: connecting, signing in, the end of a session. */
+  #overlay { position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center;
+             padding: 16px; background: radial-gradient(ellipse at center, rgba(20, 22, 30, .82), rgba(0, 0, 0, .94)); }
+  #card { width: min(360px, 100%); padding: 26px 26px 22px; background: var(--surface-solid);
+          border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); text-align: center; }
+  #card h1 { margin: 0 0 6px; font-size: 17px; font-weight: 600; }
+  #card p { margin: 0; color: var(--muted); }
+  #card-icon { width: 44px; height: 44px; margin: 0 auto 14px; border-radius: 50%; display: flex;
+               align-items: center; justify-content: center; background: var(--raised); color: var(--muted); }
+  #card-icon svg { width: 22px; height: 22px; }
+  #card-icon.spinner { background: none; border: 3px solid var(--raised); border-top-color: var(--accent);
+                       animation: spin .9s linear infinite; }
+  #card-icon.spinner svg { display: none; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #card .actions { display: flex; gap: 8px; justify-content: center; margin-top: 18px; }
+  #card .actions:empty { display: none; }
+  .primary, .secondary { min-width: 120px; padding: 8px 14px; border-radius: 8px; cursor: pointer; font-weight: 500; }
+  .primary { border: 0; background: var(--accent); color: #fff; }
+  .primary:hover { filter: brightness(1.08); }
+  .secondary { border: 1px solid var(--line); background: var(--raised); }
+  #login { display: flex; flex-direction: column; gap: 10px; margin-top: 18px; text-align: left; }
+  #login label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; }
+  #login input { padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: #15161a;
+                 color: var(--text); font: inherit; font-size: 14px; }
+  #login input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  #login .primary { margin-top: 6px; padding: 10px; }
+  #login-message { color: var(--poor); min-height: 1.2em; font-size: 12px; }
+
+  /* Short messages, at the bottom. */
+  .note { position: fixed; bottom: 18px; left: 50%; z-index: 15; max-width: calc(100vw - 32px);
+          transform: translateX(-50%); padding: 9px 14px; background: var(--surface); border: 1px solid var(--line);
+          border-radius: var(--radius); box-shadow: var(--shadow); backdrop-filter: blur(12px); pointer-events: none; }
+  #toast { bottom: 64px; transition: opacity .2s ease; }
+  #toast.fading { opacity: 0; }
 </style>
 </head>
 <body>
 <video id="video" autoplay muted playsinline></video>
-<div id="stats">connecting…</div>
 <img id="cursor" alt="">
-<div id="hint" hidden>Click the screen to use the guest's mouse; Esc gives it back.</div>
-<div id="buttons">
-  <button id="screens" type="button" hidden title="Show each of the guest's screens full screen on one of this computer's monitors">All monitors</button>
-  <button id="cam" type="button" title="Show this computer's camera in the guest">Cam off</button>
-  <button id="mic" type="button" title="Let the guest use this computer's microphone: it opens while an application in the guest records">Mic off</button>
+
+<div id="bar" class="collapsed">
+  <div id="bar-body" role="toolbar">
+    <div id="identity">
+      <span id="quality"></span>
+      <span id="vm-name"></span>
+      <span id="latency"></span>
+      <span id="watching" class="badge" hidden></span>
+    </div>
+    <span class="sep"></span>
+    <button id="mic" class="tool off" type="button">
+      <svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/><path class="off-line" d="M4 4l16 16"/></svg>
+    </button>
+    <button id="cam" class="tool off" type="button">
+      <svg viewBox="0 0 24 24"><rect x="3" y="7" width="12" height="10" rx="2"/><path d="M15 10.5l6-3.5v10l-6-3.5"/><path class="off-line" d="M3 4l17 17"/></svg>
+    </button>
+    <button id="screens" class="tool" type="button" hidden>
+      <svg viewBox="0 0 24 24"><rect x="2" y="5" width="9" height="7" rx="1.2"/><rect x="13" y="5" width="9" height="7" rx="1.2"/><path d="M6.5 12v3M17.5 12v3M4.5 15h4M15.5 15h4"/></svg>
+    </button>
+    <button id="fullscreen" class="tool" type="button">
+      <svg viewBox="0 0 24 24"><path id="fullscreen-path" d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+    </button>
+    <button id="cad" class="tool" type="button">
+      <svg viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></svg>
+    </button>
+    <span class="sep"></span>
+    <button id="details" class="tool" type="button">
+      <svg viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>
+    </button>
+    <button id="leave" class="tool danger" type="button">
+      <svg viewBox="0 0 24 24"><path d="M12 3v9M6.3 6.3a8 8 0 1 0 11.4 0"/></svg>
+    </button>
+  </div>
+  <button id="bar-tab" type="button"><svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></button>
 </div>
-<form id="login" hidden>
-  <div>Sign in to this VM</div>
-  <input id="login-user" autocomplete="username" placeholder="User" required>
-  <input id="login-password" type="password" autocomplete="current-password" placeholder="Password" required>
-  <button type="submit">Sign in</button>
-  <div id="login-message"></div>
-</form>
+
+<aside id="panel" hidden>
+  <header><h2 id="panel-title"></h2>
+    <button id="panel-close" class="tool" type="button"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+  </header>
+  <dl id="panel-rows"></dl>
+</aside>
+
+<div id="overlay">
+  <div id="card" role="dialog" aria-live="polite">
+    <div id="card-icon" class="spinner"><svg viewBox="0 0 24 24"><path id="card-icon-path" d=""/></svg></div>
+    <h1 id="card-title"></h1>
+    <p id="card-text"></p>
+    <form id="login" hidden>
+      <label><span id="login-user-label"></span><input id="login-user" autocomplete="username" required></label>
+      <label><span id="login-password-label"></span><input id="login-password" type="password" autocomplete="current-password" required></label>
+      <div id="login-message"></div>
+      <button id="login-submit" class="primary" type="submit"></button>
+    </form>
+    <div id="card-actions" class="actions"></div>
+  </div>
+</div>
+
+<div id="toast" class="note" hidden></div>
+<div id="hint" class="note" hidden></div>
 <script>
 "use strict";
 const video = document.getElementById("video");
-const stats = document.getElementById("stats");
+const $ = (id) => document.getElementById(id);
 
-function fail(message) {
-  stats.textContent = message;
-  stats.className = "error";
+// ---------------------------------------------------------------------------------------------
+// The page's words, in the browser's language when the page has it, English otherwise.
+const WORDS = {
+  en: {
+    console: "Console",
+    connecting: "Connecting…",
+    connectingTo: "Connecting to the virtual machine.",
+    signIn: "Sign in",
+    signInText: "This virtual machine asks for an account.",
+    user: "User",
+    password: "Password",
+    wrongPassword: "Wrong user or password.",
+    reconnecting: "Connection lost",
+    reconnectingIn: (s, n, max) => `Trying again in ${s} s (attempt ${n} of ${max}).`,
+    retryNow: "Try now",
+    reconnect: "Reconnect",
+    takeBack: "Take the session back",
+    lostTitle: "Disconnected",
+    lostText: "The connection to the server was lost.",
+    serverFailed: "The session failed on the server.",
+    serverStopped: "The server stopped.",
+    endedTitle: "Session ended",
+    endedText: "The session ended.",
+    leftText: "You left the session.",
+    takenOverTitle: "Session taken over",
+    takenOverText: "The session was opened from another place.",
+    errorTitle: "Cannot connect",
+    watching: "View only",
+    micOff: "Microphone: off. Click to let the guest use it.",
+    micReady: "Microphone: allowed. It opens when an application of the guest records.",
+    micOn: "Microphone: in use by the guest. Click to stop.",
+    micBlocked: "The browser blocks the microphone for this site.",
+    micHttps: "The microphone needs a secure (HTTPS) connection.",
+    micError: (m) => `Microphone: ${m}`,
+    camOff: "Camera: off. Click to show it in the guest.",
+    camShown: "Camera: shown in the guest. Click to remove it.",
+    camLive: "Camera: in use by the guest. Click to remove it.",
+    camNotShown: (m) => `The guest cannot show the camera: ${m}`,
+    camNone: (m) => `No camera: ${m}`,
+    screensStart: "All monitors: one screen of the guest on each monitor.",
+    screensStop: "Back to one monitor",
+    screensOpen: (n) => `Click to open screen ${n}.`,
+    screensAgain: "Click again to go full screen on all monitors.",
+    screensOne: "This computer has one monitor.",
+    screensUnavailable: (m) => `The monitors are not available: ${m}`,
+    screenTitle: (name, n) => `${name}: screen ${n}`,
+    fullScreen: "Full screen",
+    fullScreenExit: "Exit full screen",
+    fullScreenHold: "Hold Esc to exit full screen.",
+    cad: "Send Ctrl+Alt+Del",
+    cadSent: "Ctrl+Alt+Del sent.",
+    details: "Connection details",
+    leave: "Disconnect",
+    hint: "Click the screen to use the guest's mouse; Esc gives it back.",
+    rows: {
+      codec: "Codec", decoder: "Decoder", hardware: "hardware", size: "Resolution", fps: "Frame rate",
+      bitrate: "Bitrate", estimate: "Bandwidth estimate", latency: "Latency", breakdown: "Of which",
+      breakdownValue: (server, network, here) => `server ${server}, network ${network}, browser ${here}`,
+      lost: "Lost", lostValue: (p, pli, f) => `packets ${p} · keyframe requests ${pli} · freezes ${f}`,
+      jitter: "Jitter", sound: "Sound",
+      soundValue: (jitter, concealed, buffer, lost) => `jitter ${jitter} ms, concealed ${concealed} %, buffer ${buffer} ms, lost ${lost}`,
+      connection: "Connection",
+    },
+  },
+  fr: {
+    console: "Console",
+    connecting: "Connexion…",
+    connectingTo: "Connexion à la machine virtuelle.",
+    signIn: "Connexion",
+    signInText: "Cette machine virtuelle demande un compte.",
+    user: "Utilisateur",
+    password: "Mot de passe",
+    wrongPassword: "Utilisateur ou mot de passe incorrect.",
+    reconnecting: "Connexion perdue",
+    reconnectingIn: (s, n, max) => `Nouvelle tentative dans ${s} s (essai ${n} sur ${max}).`,
+    retryNow: "Réessayer",
+    reconnect: "Se reconnecter",
+    takeBack: "Reprendre la session",
+    lostTitle: "Déconnecté",
+    lostText: "La connexion au serveur a été perdue.",
+    serverFailed: "La session a échoué sur le serveur.",
+    serverStopped: "Le serveur s'est arrêté.",
+    endedTitle: "Session terminée",
+    endedText: "La session est terminée.",
+    leftText: "Vous avez quitté la session.",
+    takenOverTitle: "Session reprise ailleurs",
+    takenOverText: "La session a été ouverte depuis un autre poste.",
+    errorTitle: "Connexion impossible",
+    watching: "Observation",
+    micOff: "Micro : coupé. Cliquez pour le confier à la machine.",
+    micReady: "Micro : autorisé. Il s'ouvre quand une application de la machine enregistre.",
+    micOn: "Micro : utilisé par la machine. Cliquez pour le couper.",
+    micBlocked: "Le navigateur bloque le micro pour ce site.",
+    micHttps: "Le micro demande une connexion sécurisée (HTTPS).",
+    micError: (m) => `Micro : ${m}`,
+    camOff: "Caméra : coupée. Cliquez pour la montrer à la machine.",
+    camShown: "Caméra : présente dans la machine. Cliquez pour la retirer.",
+    camLive: "Caméra : utilisée par la machine. Cliquez pour la retirer.",
+    camNotShown: (m) => `La machine ne peut pas montrer la caméra : ${m}`,
+    camNone: (m) => `Pas de caméra : ${m}`,
+    screensStart: "Tous les écrans : un écran de la machine sur chaque moniteur.",
+    screensStop: "Revenir à un seul écran",
+    screensOpen: (n) => `Cliquez pour ouvrir l'écran ${n}.`,
+    screensAgain: "Cliquez à nouveau pour passer en plein écran sur tous les moniteurs.",
+    screensOne: "Cet ordinateur n'a qu'un moniteur.",
+    screensUnavailable: (m) => `Les moniteurs ne sont pas disponibles : ${m}`,
+    screenTitle: (name, n) => `${name} : écran ${n}`,
+    fullScreen: "Plein écran",
+    fullScreenExit: "Quitter le plein écran",
+    fullScreenHold: "Maintenez Échap pour quitter le plein écran.",
+    cad: "Envoyer Ctrl+Alt+Suppr",
+    cadSent: "Ctrl+Alt+Suppr envoyé.",
+    details: "Détails de la connexion",
+    leave: "Se déconnecter",
+    hint: "Cliquez sur l'écran pour utiliser la souris de la machine ; Échap la rend.",
+    rows: {
+      codec: "Codec", decoder: "Décodeur", hardware: "matériel", size: "Résolution", fps: "Images/s",
+      bitrate: "Débit", estimate: "Bande passante estimée", latency: "Latence", breakdown: "Dont",
+      breakdownValue: (server, network, here) => `serveur ${server}, réseau ${network}, navigateur ${here}`,
+      lost: "Pertes", lostValue: (p, pli, f) => `paquets ${p} · images clés demandées ${pli} · gels ${f}`,
+      jitter: "Gigue", sound: "Son",
+      soundValue: (jitter, concealed, buffer, lost) => `gigue ${jitter} ms, masqué ${concealed} %, tampon ${buffer} ms, perdus ${lost}`,
+      connection: "Connexion",
+    },
+  },
+};
+const lang = (navigator.languages || [navigator.language]).map((l) => l.slice(0, 2).toLowerCase())
+  .find((l) => l in WORDS) || "en";
+const T = WORDS[lang];
+document.documentElement.lang = lang;
+// A number with `digits` decimals, written as the language writes it.
+const num = (v, digits = 1) => v.toLocaleString(lang, { minimumFractionDigits: digits, maximumFractionDigits: digits });
+
+// What the page calls the VM: its name, once the server gave it.
+let vmName = "";
+function setName(name) {
+  vmName = name;
+  $("vm-name").textContent = name || T.console;
+  document.title = name || T.console;
 }
+setName("");
+
+// ---------------------------------------------------------------------------------------------
+// The card over the screen: `icon` "spin" for a wait, or an icon path; `actions` buttons as
+// [label, what to do, primary?]; `login` shows the sign-in form.
+const ICONS = {
+  lost: "M2 8.5a15 15 0 0 1 20 0M5.5 12a10 10 0 0 1 13 0M9 15.5a5 5 0 0 1 6 0M12 19h.01M3 3l18 18",
+  ended: "M12 3v9M6.3 6.3a8 8 0 1 0 11.4 0",
+  error: "M12 8v5M12 16h.01M10.3 3.9L2.4 17.5A2 2 0 0 0 4.1 20.5h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z",
+  lock: "M7 11V7a5 5 0 0 1 10 0v4M5 11h14v10H5z",
+  swap: "M7 7h13l-4-4M17 17H4l4 4",
+};
+const card = {
+  show({ icon = "spin", title = "", text = "", actions = [], login = false }) {
+    $("overlay").hidden = false;
+    // Nothing of the session's over the card: the toolbar up, the details closed.
+    $("panel").hidden = true;
+    $("details").classList.remove("on");
+    bar.el.classList.add("collapsed");
+    $("card-icon").className = icon === "spin" ? "spinner" : "";
+    $("card-icon-path").setAttribute("d", icon === "spin" ? "" : ICONS[icon] || "");
+    $("card-title").textContent = title;
+    $("card-text").textContent = text;
+    $("login").hidden = !login;
+    const box = $("card-actions");
+    box.replaceChildren(...actions.map(([label, run, primary = true]) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = primary ? "primary" : "secondary";
+      b.textContent = label;
+      b.addEventListener("click", run);
+      return b;
+    }));
+    box.querySelector("button")?.focus();
+  },
+  hide() { $("overlay").hidden = true; },
+  shown: () => !$("overlay").hidden,
+};
+
+// A short message at the bottom, for a few seconds.
+const toast = {
+  timer: null,
+  show(text, ms = 3500) {
+    const el = $("toast");
+    el.textContent = text;
+    el.hidden = false;
+    el.classList.remove("fading");
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => {
+      el.classList.add("fading");
+      this.timer = setTimeout(() => { el.hidden = true; }, 220);
+    }, ms);
+  },
+};
+
+// The toolbar: collapsed to its tab, down while the pointer is over it, the details are open,
+// or for a moment when the session starts.
+const bar = {
+  el: $("bar"),
+  timer: null,
+  show(ms) {
+    clearTimeout(this.timer);
+    this.el.classList.remove("collapsed");
+    if (ms) this.timer = setTimeout(() => this.hide(), ms);
+  },
+  hide() {
+    clearTimeout(this.timer);
+    if (!$("panel").hidden || this.el.matches(":hover")) return;
+    this.el.classList.add("collapsed");
+  },
+};
+bar.el.addEventListener("pointerenter", () => bar.show());
+bar.el.addEventListener("pointerleave", () => { bar.timer = setTimeout(() => bar.hide(), 700); });
+$("bar-tab").addEventListener("click", () => {
+  $("bar-tab").blur();
+  if (bar.el.classList.contains("collapsed")) bar.show(); else bar.hide();
+});
+// The tools take no key: keys go to the guest.
+for (const b of document.querySelectorAll("#bar button, #panel button")) {
+  b.addEventListener("click", () => b.blur());
+}
+// Tooltips.
+const tip = (id, text) => { $(id).title = text; $(id).setAttribute("aria-label", text); };
+tip("cad", T.cad);
+tip("details", T.details);
+tip("leave", T.leave);
+tip("fullscreen", T.fullScreen);
+tip("bar-tab", T.console);
+$("panel-title").textContent = T.details;
+$("login-user-label").textContent = T.user;
+$("login-password-label").textContent = T.password;
+$("login-submit").textContent = T.signIn;
+$("hint").textContent = T.hint;
+$("watching").textContent = T.watching;
 
 // Protocol Buffers, just what the messages of crates/protocol/proto/qdw.proto need:
 // varints and length-delimited fields (strings, nested messages).
@@ -110,79 +469,82 @@ const hello = (codecs, account) => pb.message((o) => pb.bytes(o, 1, pb.message((
 const answer = (sdp) => pb.message((o) => pb.bytes(o, 2, pb.message((d) => pb.string(d, 1, sdp))));
 const ice = (candidate, mline) => pb.message((o) => pb.bytes(o, 3, pb.message((c) => { pb.string(c, 1, candidate); pb.uint(c, 2, mline); })));
 
-// The VM's signalling, next to its page (/vm/<uuid>/signal), opened by connect(): first with no
-// account, then, if the server asks for one, with what the login form gets.
+// The VM's signalling, next to its page (/vm/<uuid>/signal), and the peer connection, both new
+// for each connection: first with no account, then, if the server asks for one, with what the
+// login form gets. A connection lost (the network, a failure or a restart of the server) is
+// tried again a few times, with the same account; the end of a session, or a refusal, is not.
 let ws = null;
+let pc = null;
 let account = { user: "", password: "" };
-const pc = new RTCPeerConnection();
-const send = (bytes) => ws.send(new Uint8Array(bytes));
+const send = (bytes) => { if (ws?.readyState === WebSocket.OPEN) ws.send(new Uint8Array(bytes)); };
 
 // The video and the sound play in one element. Browsers play sound only after the user did
 // something on the page: the element starts muted, and the first click or key unmutes it.
-const media = new MediaStream();
-pc.ontrack = (event) => {
-  // The screen and the sound; the camera tracks only go the other way.
-  const screen = pc.getTransceivers().find((t) => t.receiver.track.kind === "video");
-  if (event.track.kind === "video" && event.transceiver !== screen) return;
-  media.addTrack(event.track);
-  if (video.srcObject !== media) video.srcObject = media;
-  // Firefox stops playing when a track joins the stream: play again (nothing in Chrome).
-  video.play().catch(() => {});
-};
+let media = new MediaStream();
 const unmute = () => { video.muted = false; };
 window.addEventListener("pointerdown", unmute, { once: true });
 window.addEventListener("keydown", unmute, { once: true });
-// Every data channel, by its label: those the page uses, and the others, for debugging.
-const channels = {};
-pc.ondatachannel = ({ channel }) => {
-  channels[channel.label] = channel;
-  channel.binaryType = "arraybuffer";
-  if (channel.label === "input") input.channel = channel;
-  if (channel.label === "pointer") channel.onmessage = (event) => pointerUpdate(new Uint8Array(event.data));
-  if (channel.label === "camera") {
-    camera.channel = channel;
-    channel.onmessage = (event) => cameraMessage(new Uint8Array(event.data));
-  }
-  if (channel.label === "control") {
-    control.channel = channel;
-    channel.onopen = () => { control.videoPause(); control.layout(); };
-    // ControlMessage: bandwidth_estimate = 3, microphone = 4, pointer_mode = 5,
-    // encode_latency = 6; BandwidthEstimate: kbps = 1; Microphone: wanted = 1; PointerMode:
-    // relative = 1; EncodeLatency: screen = 1, mean_us = 2, max_us = 3.
-    channel.onmessage = (event) => {
-      const message = pb.parse(new Uint8Array(event.data));
-      if (message.has(3)) control.estimate = uint(pb.parse(message.get(3)[0]), 1);
-      if (message.has(6)) {
-        const latency = pb.parse(message.get(6)[0]);
-        control.latency[uint(latency, 1)] = { mean: uint(latency, 2) / 1000, max: uint(latency, 3) / 1000 };
-      }
-      if (message.has(5)) pointer.setRelative(uint(pb.parse(message.get(5)[0]), 1) === 1);
-      if (message.has(4)) {
-        mic.wanted = uint(pb.parse(message.get(4)[0]), 1) === 1;
-        mic.apply();
-      }
-    };
-  }
-  if (channel.label === "clipboard") {
-    clip.channel = channel;
-    channel.onmessage = (event) => clipboardMessage(new Uint8Array(event.data));
-    channel.onopen = () => clip.focused();
-  }
-};
-pc.onicecandidate = (event) => {
-  if (event.candidate) send(ice(event.candidate.candidate, event.candidate.sdpMLineIndex || 0));
-};
-pc.onconnectionstatechange = () => {
-  if (pc.connectionState === "failed") fail("connection failed");
-};
+// Every data channel of the connection, by its label: those the page uses, and the others, for
+// debugging.
+let channels = {};
 
-const onOpen = () => {
-  // Tell the server which video codecs this browser decodes, and the account, if any.
-  // Each with its parameters ("video/VP9;profile-id=1"): the server checks the profile too.
-  const codecs = (RTCRtpReceiver.getCapabilities("video")?.codecs || [])
-    .map((c) => c.mimeType + (c.sdpFmtpLine ? `;${c.sdpFmtpLine}` : ""));
-  send(hello([...new Set(codecs)], account));
-};
+function newPeer() {
+  const peer = new RTCPeerConnection();
+  pc = peer;
+  peer.ontrack = (event) => {
+    if (peer !== pc) return;
+    // The screen and the sound; the camera tracks only go the other way.
+    const screen = peer.getTransceivers().find((t) => t.receiver.track.kind === "video");
+    if (event.track.kind === "video" && event.transceiver !== screen) return;
+    media.addTrack(event.track);
+    if (video.srcObject !== media) video.srcObject = media;
+    // Firefox stops playing when a track joins the stream: play again (nothing in Chrome).
+    video.play().catch(() => {});
+  };
+  peer.ondatachannel = ({ channel }) => {
+    if (peer !== pc) return;
+    channels[channel.label] = channel;
+    channel.binaryType = "arraybuffer";
+    if (channel.label === "input") input.channel = channel;
+    if (channel.label === "pointer") channel.onmessage = (event) => pointerUpdate(new Uint8Array(event.data));
+    if (channel.label === "camera") {
+      camera.channel = channel;
+      channel.onmessage = (event) => cameraMessage(new Uint8Array(event.data));
+    }
+    if (channel.label === "control") {
+      control.channel = channel;
+      channel.onopen = () => { control.videoPause(); control.layout(); };
+      // ControlMessage: bandwidth_estimate = 3, microphone = 4, pointer_mode = 5,
+      // encode_latency = 6; BandwidthEstimate: kbps = 1; Microphone: wanted = 1; PointerMode:
+      // relative = 1; EncodeLatency: screen = 1, mean_us = 2, max_us = 3.
+      channel.onmessage = (event) => {
+        const message = pb.parse(new Uint8Array(event.data));
+        if (message.has(3)) control.estimate = uint(pb.parse(message.get(3)[0]), 1);
+        if (message.has(6)) {
+          const latency = pb.parse(message.get(6)[0]);
+          control.latency[uint(latency, 1)] = { mean: uint(latency, 2) / 1000, max: uint(latency, 3) / 1000 };
+        }
+        if (message.has(5)) pointer.setRelative(uint(pb.parse(message.get(5)[0]), 1) === 1);
+        if (message.has(4)) {
+          mic.wanted = uint(pb.parse(message.get(4)[0]), 1) === 1;
+          mic.apply();
+        }
+      };
+    }
+    if (channel.label === "clipboard") {
+      clip.channel = channel;
+      channel.onmessage = (event) => clipboardMessage(new Uint8Array(event.data));
+      channel.onopen = () => clip.focused();
+    }
+  };
+  peer.onicecandidate = (event) => {
+    if (peer === pc && event.candidate) send(ice(event.candidate.candidate, event.candidate.sdpMLineIndex || 0));
+  };
+  peer.onconnectionstatechange = () => {
+    if (peer === pc && peer.connectionState === "failed") session.lost(T.lostText);
+  };
+}
+
 // The mids of the video tracks an offer only receives: the cameras' tracks.
 function cameraTracks(sdp) {
   const mids = new Set();
@@ -194,100 +556,188 @@ function cameraTracks(sdp) {
   }
   return mids;
 }
-// The close status says how the session ended (RFC 6455 7.4.1): 1000 a normal end, 1001 the
-// server going away, 1011 a failure of the server; no close frame, the connection lost.
-const onClose = (event) => {
-  if (ended) return;
-  pc.close();
-  fail(!event.wasClean ? "Disconnected."
-    : event.code === 1011 ? "The session failed on the server."
-    : event.code === 1001 ? "The server stopped."
-    : "The session ended.");
+
+// The session, as the page shows it: "connecting", "login", "live", "retrying" (a connection
+// lost, tried again) or "ended".
+const RETRIES = 5;
+const session = {
+  phase: "connecting",
+  // Connections tried since the session last showed the screen.
+  attempt: 0,
+  timer: null,
+  connect() {
+    clearTimeout(this.timer);
+    this.teardown();
+    if (this.phase !== "retrying") this.phase = "connecting";
+    card.show({ title: this.phase === "retrying" ? T.reconnecting : T.connecting, text: T.connectingTo });
+    newPeer();
+    const socket = new WebSocket(`wss://${location.host}${location.pathname.replace(/\/?$/, "/")}signal`);
+    ws = socket;
+    socket.binaryType = "arraybuffer";
+    socket.onopen = () => {
+      // Tell the server which video codecs this browser decodes, and the account, if any.
+      // Each with its parameters ("video/VP9;profile-id=1"): the server checks the profile too.
+      const codecs = (RTCRtpReceiver.getCapabilities("video")?.codecs || [])
+        .map((c) => c.mimeType + (c.sdpFmtpLine ? `;${c.sdpFmtpLine}` : ""));
+      send(hello([...new Set(codecs)], account));
+    };
+    socket.onmessage = (event) => { if (socket === ws) onMessage(event); };
+    // The close status says how the session ended (RFC 6455 7.4.1): 1000 a normal end, 1001 the
+    // server going away, 1011 a failure of the server; no close frame, the connection lost.
+    socket.onclose = (event) => {
+      if (socket !== ws || this.phase === "ended" || this.phase === "login") return;
+      if (!event.wasClean) this.lost(T.lostText);
+      else if (event.code === 1011) this.lost(T.serverFailed);
+      else if (event.code === 1001) this.lost(T.serverStopped);
+      else this.end({ icon: "ended", title: T.endedTitle, text: T.endedText });
+    };
+  },
+  // The screen shows: the session is on.
+  live() {
+    if (this.phase === "live" || this.phase === "ended") return;
+    const first = this.phase === "connecting";
+    this.phase = "live";
+    this.attempt = 0;
+    card.hide();
+    if (first) bar.show(2500);
+  },
+  // The connection is lost: try again, a few times, then give up.
+  lost(reason) {
+    if (this.phase === "ended" || this.phase === "login") return;
+    this.teardown();
+    if (this.attempt >= RETRIES) {
+      this.end({ icon: "lost", title: T.lostTitle, text: reason });
+      return;
+    }
+    this.attempt += 1;
+    this.phase = "retrying";
+    let left = Math.min(15, 2 ** (this.attempt - 1));
+    const tick = () => {
+      card.show({
+        icon: "lost", title: T.reconnecting, text: `${reason} ${T.reconnectingIn(left, this.attempt, RETRIES)}`,
+        actions: [[T.retryNow, () => this.connect()]],
+      });
+      if (left-- <= 0) this.connect();
+      else this.timer = setTimeout(tick, 1000);
+    };
+    tick();
+  },
+  // The session is over: the card says why, with what the user can do.
+  end({ icon, title, text, again = T.reconnect }) {
+    clearTimeout(this.timer);
+    this.teardown();
+    this.phase = "ended";
+    card.show({ icon, title, text, actions: [[again, () => { this.attempt = 0; this.connect(); }]] });
+  },
+  // The user leaves: a clean close, which the server takes as the client leaving.
+  leave() {
+    this.end({ icon: "ended", title: T.endedTitle, text: T.leftText });
+  },
+  // Close the connection, and forget what came on it.
+  teardown() {
+    const socket = ws, peer = pc;
+    ws = null;
+    pc = null;
+    if (socket) {
+      socket.onopen = socket.onmessage = socket.onclose = null;
+      if (socket.readyState <= WebSocket.OPEN) socket.close(1000, "the client leaves");
+    }
+    peer?.close();
+    screens.stop();
+    screens.transceivers = [];
+    screens.offered();
+    media = new MediaStream();
+    video.srcObject = null;
+    channels = {};
+    input.channel = null;
+    input.keys.clear();
+    input.buttons.clear();
+    input.syncLocks = true;
+    control.channel = null;
+    control.estimate = null;
+    control.latency = [];
+    clip.channel = null;
+    clip.answers.clear();
+    clip.guest = [];
+    camera.reset();
+    mic.reset();
+    pointer.reset();
+    quality.reset();
+  },
 };
+video.addEventListener("playing", () => session.live());
+
 // Leaving the page (closed, reloaded, or another address) ends the session with a clean close,
 // as the native client does: the server takes it as the client leaving, not as a network failure.
 window.addEventListener("pagehide", () => {
-  ended = true;
   for (const v of views.slice(1)) v.win.close();
-  pc.close();
-  ws?.close(1000, "the client leaves");
+  session.phase = "ended";
+  session.teardown();
 });
-// ServerMessage: offer = 1, ice = 2, error = 3, ended = 4; Ended: reason = 1 (1 another client
-// took the session over, 2 the server stops). The server ends a session by closing the WebSocket
-// cleanly.
-let ended = false;
+
+// ServerMessage: offer = 1, ice = 2, error = 3, ended = 4; SessionDescription: sdp = 1,
+// vm_name = 2; Ended: reason = 1 (1 another client took the session over, 2 the server stops).
+// The server ends a session by closing the WebSocket cleanly.
 const onMessage = async (event) => {
   const message = pb.parse(new Uint8Array(event.data));
+  const peer = pc;
   if (message.has(1)) {
-    await pc.setRemoteDescription({ type: "offer", sdp: str(pb.parse(message.get(1)[0]), 1) });
+    const offer = pb.parse(message.get(1)[0]);
+    setName(str(offer, 2));
+    await peer.setRemoteDescription({ type: "offer", sdp: str(offer, 1) });
+    if (peer !== pc) return;
     // Sound both ways: the microphone can then go on the sound's track without renegotiating.
-    for (const t of pc.getTransceivers()) if (t.receiver.track.kind === "audio") t.direction = "sendrecv";
+    for (const t of peer.getTransceivers()) if (t.receiver.track.kind === "audio") t.direction = "sendrecv";
     // The video tracks the server receives carry the cameras, from here: sending, with no
     // track until the guest opens a camera. The others are the guest's screens.
-    const cameraMids = cameraTracks(str(pb.parse(message.get(1)[0]), 1));
-    for (const t of pc.getTransceivers()) if (cameraMids.has(t.mid)) t.direction = "sendonly";
+    const cameraMids = cameraTracks(str(offer, 1));
+    for (const t of peer.getTransceivers()) if (cameraMids.has(t.mid)) t.direction = "sendonly";
     // The other video tracks, in the offer's order: the guest's screens, the first shown here.
-    screens.transceivers = pc.getTransceivers()
+    screens.transceivers = peer.getTransceivers()
       .filter((t) => t.receiver.track.kind === "video" && !cameraMids.has(t.mid));
     screens.offered();
-    await pc.setLocalDescription(await pc.createAnswer());
-    send(answer(pc.localDescription.sdp));
+    await peer.setLocalDescription(await peer.createAnswer());
+    if (peer === pc) send(answer(peer.localDescription.sdp));
   } else if (message.has(2)) {
     const c = pb.parse(message.get(2)[0]);
-    await pc.addIceCandidate({ candidate: str(c, 1), sdpMLineIndex: uint(c, 2) });
+    await peer.addIceCandidate({ candidate: str(c, 1), sdpMLineIndex: uint(c, 2) });
   } else if (message.has(3)) {
     const error = str(pb.parse(message.get(3)[0]), 1);
     // The server closes next: the error says why, the close adds nothing.
-    ended = true;
     if (error === "an account is required" || error === "wrong user or password") {
-      // The login form; the peer connection, unused yet, serves the next try.
-      login.ask(error === "an account is required" ? "" : "Wrong user or password.");
+      login.ask(error === "an account is required" ? "" : T.wrongPassword);
     } else {
-      pc.close();
-      fail(error);
+      session.end({ icon: "error", title: T.errorTitle, text: error });
     }
   } else if (message.has(4)) {
     const reason = uint(pb.parse(message.get(4)[0]), 1);
-    ended = true;
-    pc.close();
-    fail(reason === 1 ? "Another client took the session over."
-      : reason === 2 ? "The server stopped." : "The session ended.");
+    if (reason === 1) {
+      session.end({ icon: "swap", title: T.takenOverTitle, text: T.takenOverText, again: T.takeBack });
+    } else if (reason === 2) {
+      session.lost(T.serverStopped);
+    } else {
+      session.end({ icon: "ended", title: T.endedTitle, text: T.endedText });
+    }
   }
 };
 
-// Open the signalling, with the account in `account`.
-function connect() {
-  stats.textContent = "connecting…";
-  stats.className = "";
-  ended = false;
-  ws = new WebSocket(`wss://${location.host}${location.pathname.replace(/\/?$/, "/")}signal`);
-  ws.binaryType = "arraybuffer";
-  ws.onopen = onOpen;
-  ws.onclose = onClose;
-  ws.onmessage = onMessage;
-}
-
 // The login form, shown when the server asks for an account of the VM's.
 const login = {
-  form: document.getElementById("login"),
   ask(message) {
-    stats.textContent = "sign in";
-    document.getElementById("login-message").textContent = message;
-    this.form.hidden = false;
-    document.getElementById(account.user ? "login-password" : "login-user").focus();
+    session.teardown();
+    session.phase = "login";
+    card.show({ icon: "lock", title: T.signIn, text: T.signInText, login: true });
+    $("login-message").textContent = message;
+    $(account.user ? "login-password" : "login-user").focus();
   },
 };
-login.form.addEventListener("submit", (e) => {
+$("login").addEventListener("submit", (e) => {
   e.preventDefault();
-  account = {
-    user: document.getElementById("login-user").value,
-    password: document.getElementById("login-password").value,
-  };
-  document.getElementById("login-password").value = "";
-  login.form.hidden = true;
-  connect();
+  account = { user: $("login-user").value, password: $("login-password").value };
+  $("login-password").value = "";
+  session.phase = "connecting";
+  session.connect();
 });
-connect();
 
 // ---------------------------------------------------------------------------------------------
 // Keyboard and pointer, modelled on RDP: keys by position (the guest applies its own layout),
@@ -379,7 +829,7 @@ const views = [view(0, window, video, cursor)];
 
 function listen(v) {
   v.win.addEventListener("keydown", (e) => {
-    if (!login.form.hidden) return;   // typing in the login form
+    if (card.shown()) return;   // a card over the screen: typing in the login form, or nothing
     const scancode = e.code === "Pause" ? "Pause" : SCANCODES[e.code];
     if (scancode === undefined) return;
     e.preventDefault();
@@ -387,7 +837,7 @@ function listen(v) {
     input.send(input.withLocks(e, [ev.key(scancode, true)]));
   });
   v.win.addEventListener("keyup", (e) => {
-    if (!login.form.hidden) return;
+    if (card.shown()) return;
     const scancode = e.code === "Pause" ? "Pause" : SCANCODES[e.code];
     if (scancode === undefined) return;
     e.preventDefault();
@@ -498,6 +948,13 @@ function guestScale(v) {
 const hint = document.getElementById("hint");
 const pointer = {
   relative: false,
+  // Forget the guest pointer of a connection that ended.
+  reset() {
+    for (const v of views) Object.assign(v, { css: "default", image: "", hot: [0, 0], visible: true, position: null });
+    if (this.locked()) document.exitPointerLock();
+    this.relative = false;
+    this.draw();
+  },
   locked: () => document.pointerLockElement === video,
   setRelative(relative) {
     this.relative = relative;
@@ -506,7 +963,7 @@ const pointer = {
   },
   draw() {
     // A shadow client only watches: it sees the guest pointer, and takes none.
-    hint.hidden = !this.relative || this.locked() || !input.channel || shadow;
+    hint.hidden = !this.relative || this.locked() || !input.channel || shadow || card.shown();
     views.forEach((v) => this.drawOn(v));
   },
   // The guest pixel (x, y) on the window, the video being scaled to fit (object-fit: contain).
@@ -670,22 +1127,20 @@ window.addEventListener("focus", () => clip.focused());
 // permission), and the microphone then opens only while an application in the guest records
 // (the server says so on the control channel), sent on the sound's track; the browser shows it
 // in use only then. A second click disallows it.
-const micButton = document.getElementById("mic");
+const micButton = $("mic");
 if (shadow) micButton.hidden = true;
 const mic = {
   allowed: false,
   // Whether the guest records.
   wanted: false,
   track: null,
-  // Why it cannot open, shown on the button until the next click.
-  error: null,
   // Opening and closing, one after the other.
   queue: Promise.resolve(),
   apply() {
     this.queue = this.queue.then(() => this.update());
   },
   async update() {
-    const sender = pc.getTransceivers().find((t) => t.receiver.track.kind === "audio")?.sender;
+    const sender = pc?.getTransceivers().find((t) => t.receiver.track.kind === "audio")?.sender;
     if (this.allowed && this.wanted && !this.track && sender) {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
@@ -707,20 +1162,29 @@ const mic = {
   refused(e) {
     // NotAllowedError: refused, or blocked for this site (the address bar shows it).
     this.allowed = false;
-    this.error = e.name === "NotAllowedError" ? "Mic: blocked by the browser" : `Mic: ${e.message}`;
+    toast.show(e.name === "NotAllowedError" ? T.micBlocked : T.micError(e.message));
   },
-  label(text) {
-    micButton.textContent = text ?? this.error ?? (!this.allowed ? "Mic off" : this.track ? "Mic on" : "Mic ready");
-    micButton.classList.toggle("on", !!this.track);
+  // The connection ended: the microphone closes; allowed, it opens again on the next when the
+  // guest records.
+  reset() {
+    this.track?.stop();
+    this.track = null;
+    this.wanted = false;
+    this.label();
+  },
+  label() {
+    micButton.classList.toggle("off", !this.allowed);
+    micButton.classList.toggle("on", this.allowed && !this.track);
+    micButton.classList.toggle("live", !!this.track);
+    tip("mic", !this.allowed ? T.micOff : this.track ? T.micOn : T.micReady);
   },
 };
+mic.label();
 micButton.addEventListener("click", () => {
-  micButton.blur();   // keys go to the guest, not to the button
   if (!navigator.mediaDevices) {
-    mic.label("Mic: needs HTTPS");
+    toast.show(T.micHttps);
     return;
   }
-  mic.error = null;
   mic.allowed = !mic.allowed;
   if (mic.allowed && !mic.wanted) {
     // Ask the permission now, on the click, rather than when the guest starts recording.
@@ -774,81 +1238,132 @@ control.layout = function () {
 };
 window.addEventListener("resize", () => { if (!screens.monitors) control.layout(); });
 
-// Once a second: what is decoded, and how well, for the screen shown.
-let last = null, lastAudio = null;
-// The mean of `total` per `count` over the last second, from two reports of a statistic.
+// Once a second: what is decoded, and how well, for the screen shown here: the latency and a
+// coloured dot in the toolbar, the rest in the details panel.
 const perUnit = (now, before, total, count) => {
   if (!before) return null;
   const n = now[count] - before[count];
   return n > 0 ? (now[total] - before[total]) / n : null;
 };
-setInterval(async () => {
-  if (stats.className === "error") return;
-  const report = await pc.getStats();
-  let inbound = null, audio = null, pair = null;
-  const codecs = new Map();
-  // The video statistics of the screen shown, the first: not of another screen's track.
-  const shown = pc.getTransceivers().find((t) => t.receiver.track.kind === "video");
-  report.forEach((s) => {
-    if (s.type === "inbound-rtp" && s.kind === "video"
-      && (!shown || s.trackIdentifier === shown.receiver.track.id)) inbound = s;
-    if (s.type === "candidate-pair" && s.nominated && s.state === "succeeded") pair = s;
-    if (s.type === "inbound-rtp" && s.kind === "audio") audio = s;
-    if (s.type === "codec") codecs.set(s.id, s);
-  });
-  if (!inbound) { stats.textContent = `connection: ${pc.connectionState}`; return; }
-  const codec = codecs.get(inbound.codecId);
-  let kbps = 0;
-  if (last) kbps = (8 * (inbound.bytesReceived - last.bytesReceived)) / (inbound.timestamp - last.timestamp);
-  // From the guest's drawing to the decoded picture, over the last second, in ms: the server's
-  // share, half the round trip, then here from the first packet of a frame to its decoding
-  // (the jitter buffer within it). The display is not counted.
-  const server = control.latency[0];
-  const network = pair?.currentRoundTripTime != null ? (pair.currentRoundTripTime * 1000) / 2 : null;
-  const processing = perUnit(inbound, last, "totalProcessingDelay", "framesDecoded");
-  const buffered = perUnit(inbound, last, "jitterBufferDelay", "jitterBufferEmittedCount");
-  const decoding = perUnit(inbound, last, "totalDecodeTime", "framesDecoded");
-  const ms = (v, scale = 1000) => (v == null ? "?" : (v * scale).toFixed(1));
-  const total = server && network != null && processing != null
-    ? (server.mean + network + processing * 1000).toFixed(1) : "?";
-  last = inbound;
-  // The sound over the last second: the share of samples the browser made up for packets
-  // late or lost, and how long its jitter buffer holds them.
-  let sound = "sound    -";
-  if (audio && lastAudio) {
-    const samples = audio.totalSamplesReceived - lastAudio.totalSamplesReceived;
-    const concealed = audio.concealedSamples - lastAudio.concealedSamples;
-    const emitted = audio.jitterBufferEmittedCount - lastAudio.jitterBufferEmittedCount;
-    const held = audio.jitterBufferDelay - lastAudio.jitterBufferDelay;
-    sound = `sound    jitter ${((audio.jitter || 0) * 1000).toFixed(1)} ms, `
-      + `concealed ${samples > 0 ? ((100 * concealed) / samples).toFixed(1) : "0.0"} %, `
-      + `buffer ${emitted > 0 ? ((1000 * held) / emitted).toFixed(0) : "?"} ms, `
-      + `lost ${audio.packetsLost || 0}`;
-  }
-  lastAudio = audio;
-  stats.textContent = [
-    `codec    ${codec ? codec.mimeType + (codec.sdpFmtpLine ? " " + codec.sdpFmtpLine : "") : "?"}`,
-    `decoder  ${inbound.decoderImplementation || "?"}${inbound.powerEfficientDecoder ? " (hardware)" : ""}`,
-    `size     ${inbound.frameWidth || 0}x${inbound.frameHeight || 0}`,
-    `fps      ${(inbound.framesPerSecond || 0).toFixed(0)}`,
-    `bitrate  ${kbps.toFixed(0)} kbit/s, estimate ${control.estimate ?? "?"} kbit/s`,
-    `lost     ${inbound.packetsLost || 0} packets, ${inbound.pliCount || 0} PLI, ${inbound.freezeCount || 0} freezes`,
-    `jitter   ${((inbound.jitter || 0) * 1000).toFixed(1)} ms`,
-    `latency  ${total} ms: server ${server ? server.mean.toFixed(1) : "?"} (max `
-      + `${server ? server.max.toFixed(1) : "?"}), network ${ms(network, 1)}, here `
-      + `${ms(processing)} (buffer ${ms(buffered)}, decoding ${ms(decoding)})`,
-    sound,
-  ].join("\n");
-}, 1000);
+const quality = {
+  last: null, lastAudio: null,
+  reset() {
+    this.last = this.lastAudio = null;
+    $("quality").className = "";
+    $("latency").textContent = "";
+  },
+  // The details panel: [label, value] rows.
+  rows(rows) {
+    if ($("panel").hidden) return;
+    $("panel-rows").replaceChildren(...rows.flatMap(([label, value]) => {
+      const dt = document.createElement("dt"), dd = document.createElement("dd");
+      dt.textContent = label;
+      dd.textContent = value;
+      return [dt, dd];
+    }));
+  },
+  async sample() {
+    const peer = pc;
+    if (!peer || session.phase !== "live") {
+      this.rows([[T.rows.connection, peer?.connectionState ?? "-"]]);
+      return;
+    }
+    const report = await peer.getStats();
+    let inbound = null, audio = null, pair = null;
+    const codecs = new Map();
+    // The video statistics of the screen shown, the first: not of another screen's track.
+    const shown = peer.getTransceivers().find((t) => t.receiver.track.kind === "video");
+    report.forEach((s) => {
+      if (s.type === "inbound-rtp" && s.kind === "video"
+        && (!shown || s.trackIdentifier === shown.receiver.track.id)) inbound = s;
+      if (s.type === "candidate-pair" && s.nominated && s.state === "succeeded") pair = s;
+      if (s.type === "inbound-rtp" && s.kind === "audio") audio = s;
+      if (s.type === "codec") codecs.set(s.id, s);
+    });
+    if (!inbound) {
+      this.rows([[T.rows.connection, peer.connectionState]]);
+      return;
+    }
+    const last = this.last;
+    const codec = codecs.get(inbound.codecId);
+    const kbps = last ? (8 * (inbound.bytesReceived - last.bytesReceived)) / (inbound.timestamp - last.timestamp) : 0;
+    // From the guest's drawing to the decoded picture, over the last second, in ms: the
+    // server's share, half the round trip, then here from the first packet of a frame to its
+    // decoding (the jitter buffer within it). The display is not counted.
+    const server = control.latency[0];
+    const network = pair?.currentRoundTripTime != null ? (pair.currentRoundTripTime * 1000) / 2 : null;
+    const processing = perUnit(inbound, last, "totalProcessingDelay", "framesDecoded");
+    const total = server && network != null && processing != null ? server.mean + network + processing * 1000 : null;
+    const ms = (v) => (v == null ? "?" : `${num(v)} ms`);
+    // The dot: green under 60 ms with nothing lost over the last second, red past 150 ms or
+    // with frozen frames, amber otherwise.
+    const lost = last ? (inbound.packetsLost || 0) - (last.packetsLost || 0) : 0;
+    const froze = last ? (inbound.freezeCount || 0) - (last.freezeCount || 0) : 0;
+    $("quality").className = total == null ? "" : total > 150 || froze > 0 ? "poor" : total > 60 || lost > 0 ? "fair" : "good";
+    $("latency").textContent = total == null ? "" : `${Math.round(total)} ms`;
+    this.last = inbound;
+    // The sound over the last second: the share of samples the browser made up for packets
+    // late or lost, and how long its jitter buffer holds them.
+    let sound = "-";
+    const lastAudio = this.lastAudio;
+    if (audio && lastAudio) {
+      const samples = audio.totalSamplesReceived - lastAudio.totalSamplesReceived;
+      const concealed = audio.concealedSamples - lastAudio.concealedSamples;
+      const emitted = audio.jitterBufferEmittedCount - lastAudio.jitterBufferEmittedCount;
+      const held = audio.jitterBufferDelay - lastAudio.jitterBufferDelay;
+      sound = T.rows.soundValue(num((audio.jitter || 0) * 1000),
+        num(samples > 0 ? (100 * concealed) / samples : 0),
+        emitted > 0 ? num((1000 * held) / emitted, 0) : "?", audio.packetsLost || 0);
+    }
+    this.lastAudio = audio;
+    const r = T.rows;
+    this.rows([
+      [r.codec, codec ? codec.mimeType.replace(/^video\//, "") + (codec.sdpFmtpLine ? ` (${codec.sdpFmtpLine})` : "") : "?"],
+      [r.decoder, `${inbound.decoderImplementation || "?"}${inbound.powerEfficientDecoder ? ` (${r.hardware})` : ""}`],
+      [r.size, `${inbound.frameWidth || 0} × ${inbound.frameHeight || 0}`],
+      [r.fps, (inbound.framesPerSecond || 0).toFixed(0)],
+      [r.bitrate, `${num(kbps / 1000)} Mbit/s`],
+      [r.estimate, control.estimate == null ? "?" : `${num(control.estimate / 1000)} Mbit/s`],
+      [r.latency, ms(total)],
+      [r.breakdown, r.breakdownValue(ms(server?.mean), ms(network), ms(processing == null ? null : processing * 1000))],
+      [r.lost, r.lostValue(inbound.packetsLost || 0, inbound.pliCount || 0, inbound.freezeCount || 0)],
+      [r.jitter, ms((inbound.jitter || 0) * 1000)],
+      [r.sound, sound],
+    ]);
+  },
+};
+setInterval(() => quality.sample().catch(() => {}), 1000);
 
 // ---------------------------------------------------------------------------------------------
 // The camera, on demand: the button shows it in the guest, which opens it only when an
 // application uses it; it then goes as H.264 on the track the server names.
 // CameraMessage: announce = 1, remove = 2, control_value = 3 (to the server); added = 4,
 // start = 5, stop = 6, set_control = 7 (from the server).
-const camButton = document.getElementById("cam");
+const camButton = $("cam");
 if (shadow) camButton.hidden = true;
-const camera = { channel: null, announced: false, formats: [], controls: [], track: null, sender: null };
+const camera = {
+  channel: null, announced: false, formats: [], controls: [], track: null, sender: null,
+  label() {
+    camButton.classList.toggle("off", !this.announced);
+    camButton.classList.toggle("on", this.announced && !this.track);
+    camButton.classList.toggle("live", this.announced && !!this.track);
+    tip("cam", !this.announced ? T.camOff : this.track ? T.camLive : T.camShown);
+  },
+  // Stop sending the camera; `announced` false when the guest no longer has it.
+  async close() {
+    await this.sender?.replaceTrack(null).catch(() => {});
+    this.track?.stop();
+    this.track = null;
+    this.label();
+  },
+  // The connection ended: the guest's camera goes with it; the button shows it again.
+  reset() {
+    this.track?.stop();
+    Object.assign(this, { channel: null, announced: false, track: null, sender: null });
+    this.label();
+  },
+};
+camera.label();
 // The browser's camera settings, as MS-RDPECAM numbers them: set 1 CameraControl, 2
 // VideoProcAmp; `mode` is the setting that switches it to automatic.
 const CAMERA_CONTROLS = [
@@ -911,12 +1426,16 @@ async function cameraMessage(bytes) {
   if (message.has(4)) {
     const added = pb.parse(message.get(4)[0]);
     const error = str(added, 2);
-    camButton.title = error ? `Camera not shown: ${error}` : "The camera is shown in the guest";
-    if (error) console.warn("camera not shown:", error);
+    if (error) {
+      console.warn("camera not shown:", error);
+      camera.announced = false;
+      camera.label();
+      toast.show(T.camNotShown(error));
+    }
   } else if (message.has(5)) {
     const start = pb.parse(message.get(5)[0]);
     const f = camera.formats[uint(start, 2)];
-    const transceiver = pc.getTransceivers().find((t) => t.mid === str(start, 3));
+    const transceiver = pc?.getTransceivers().find((t) => t.mid === str(start, 3));
     if (!f || !transceiver) return;
     // How long each step takes, in the console: from the server's start.
     const t0 = performance.now();
@@ -952,12 +1471,13 @@ async function cameraMessage(bytes) {
         at("no frame encoded in 15 s");
       })();
       for (const c of camera.controls) await cameraApply(c);
-      camButton.className = "on";
-    } catch (e) { console.warn("camera:", e); }
+      camera.label();
+    } catch (e) {
+      console.warn("camera:", e);
+      toast.show(T.camNone(e.message));
+    }
   } else if (message.has(6)) {
-    await camera.sender?.replaceTrack(null);
-    camera.track?.stop();
-    camera.track = null;
+    await camera.close();
   } else if (message.has(7)) {
     const v = pb.parse(message.get(7)[0]);
     const c = camera.controls.find((c) => c.set === uint(v, 2) && c.property === uint(v, 3));
@@ -971,12 +1491,8 @@ async function cameraMessage(bytes) {
 camButton.addEventListener("click", async () => {
   if (camera.announced) {
     camSend(2, (r) => pb.uint(r, 1, 1));
-    await camera.sender?.replaceTrack(null);
-    camera.track?.stop();
-    camera.track = null;
     camera.announced = false;
-    camButton.textContent = "Cam off";
-    camButton.className = "";
+    await camera.close();
     return;
   }
   try {
@@ -992,10 +1508,10 @@ camButton.addEventListener("click", async () => {
       }));
     });
     camera.announced = true;
-    camButton.textContent = "Cam on";
+    camera.label();
   } catch (e) {
-    camButton.title = `No camera: ${e.message}`;
     console.warn("camera:", e);
+    toast.show(T.camNone(e.message));
   }
 });
 // ---------------------------------------------------------------------------------------------
@@ -1017,13 +1533,14 @@ const screens = {
   poll: null,
   offered() {
     screensButton.hidden = shadow || !("getScreenDetails" in window) || this.transceivers.length < 2;
+    this.label();
   },
   async start() {
     if (!this.monitors) {
       try {
         this.details ??= await window.getScreenDetails();
       } catch (e) {
-        screensButton.title = `The monitors are not available: ${e.message}`;
+        toast.show(T.screensUnavailable(e.message));
         return;
       }
       const here = this.details.currentScreen;
@@ -1031,7 +1548,7 @@ const screens = {
         .sort((a, b) => a.left - b.left || a.top - b.top);
       this.order = [here, ...others].slice(0, this.transceivers.length);
       if (this.order.length < 2) {
-        screensButton.title = "This computer has one monitor.";
+        toast.show(T.screensOne);
         return;
       }
       try {
@@ -1039,7 +1556,7 @@ const screens = {
       } catch (e) {
         // The permission prompt can outlast the click: the next one goes on.
         console.warn("full screen:", e);
-        screensButton.textContent = "Click again";
+        toast.show(T.screensAgain);
         return;
       }
       this.monitors = monitorsOf(this.order);
@@ -1051,6 +1568,7 @@ const screens = {
     // A browser may open one window per click: the button then opens the next.
     while (views.length < this.order.length && this.open(views.length));
     this.label();
+    if (views.length < this.order.length) toast.show(T.screensOpen(views.length + 1));
   },
   // Open the window of screen `i` on its monitor. False if the browser refused.
   open(i) {
@@ -1064,15 +1582,16 @@ const screens = {
     doc.open();
     doc.write("<!doctype html><html><head></head><body></body></html>");
     doc.close();
-    doc.title = `${document.title}: screen ${i + 1}`;
+    doc.title = T.screenTitle(vmName || T.console, i + 1);
     // Styled through the elements' properties: the page's Content-Security-Policy, which the
     // window inherits, allows no <style> but the page's own.
     const css = (element, properties) => Object.assign(element.style, properties);
-    const bar = { padding: "6px 10px", border: "0", borderRadius: "4px", background: "rgba(0, 0, 0, .65)",
-                  color: "#eee", font: "inherit", cursor: "pointer" };
+    const bar = { padding: "8px 14px", border: "0", borderRadius: "8px", background: "#4f8ef7",
+                  color: "#fff", font: "inherit", fontWeight: "500", cursor: "pointer",
+                  boxShadow: "0 10px 30px rgba(0, 0, 0, .45)" };
     css(doc.documentElement, { height: "100%" });
-    css(doc.body, { margin: "0", height: "100%", background: "#000", color: "#eee",
-                    font: "13px/1.4 system-ui, sans-serif" });
+    css(doc.body, { margin: "0", height: "100%", overflow: "hidden", background: "#000", color: "#ececf0",
+                    font: '13px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif' });
     const videoElement = doc.createElement("video");
     videoElement.autoplay = videoElement.muted = videoElement.playsInline = true;
     css(videoElement, { width: "100%", height: "100%", objectFit: "contain", display: "block" });
@@ -1081,8 +1600,8 @@ const screens = {
     css(cursorElement, { position: "fixed", pointerEvents: "none", display: "none" });
     const full = doc.createElement("button");
     full.type = "button";
-    full.textContent = "Full screen";
-    css(full, { ...bar, position: "fixed", top: "8px", left: "50%", transform: "translateX(-50%)" });
+    full.textContent = T.fullScreen;
+    css(full, { ...bar, position: "fixed", top: "12px", left: "50%", transform: "translateX(-50%)" });
     // Full screen on a click in the window: the click on this page's button has opened the
     // window, and a browser hands a click on to another window only while it is unused
     // (capability delegation, tried: NotAllowedError). Chrome goes full screen without a click
@@ -1120,8 +1639,8 @@ const screens = {
   },
   label() {
     screensButton.classList.toggle("on", !!this.monitors);
-    screensButton.textContent = !this.monitors ? "All monitors"
-      : views.length < this.order.length ? `Open screen ${views.length + 1}` : "One monitor";
+    tip("screens", !this.monitors ? T.screensStart
+      : views.length < this.order.length ? T.screensOpen(views.length + 1) : T.screensStop);
   },
 };
 // The monitors' layout in device pixels, the first at 0, 0. With one scale on all, their places
@@ -1149,11 +1668,59 @@ function monitorsOf(order) {
   return order.map((m) => ({ x: x.get(m) - x.get(order[0]), y: 0, ...size(m) }));
 }
 screensButton.addEventListener("click", () => {
-  screensButton.blur();   // keys go to the guest, not to the button
   if (screens.monitors && views.length >= screens.order.length) screens.stop();
   else screens.start();
 });
-document.addEventListener("fullscreenchange", () => { if (!document.fullscreenElement) screens.stop(); });
+
+// ---------------------------------------------------------------------------------------------
+// The other tools: full screen, Ctrl+Alt+Del, the details, leaving.
+
+// Full screen for this window; while in it, Esc goes to the guest: holding it leaves.
+$("fullscreen").addEventListener("click", () => {
+  if (document.fullscreenElement) {
+    document.exitFullscreen().catch(() => {});
+    return;
+  }
+  document.documentElement.requestFullscreen()
+    .then(() => navigator.keyboard?.lock?.(["Escape"]))
+    .then(() => { if (navigator.keyboard?.lock) toast.show(T.fullScreenHold); })
+    .catch((e) => console.warn("full screen:", e));
+});
+document.addEventListener("fullscreenchange", () => {
+  const full = !!document.fullscreenElement;
+  $("fullscreen-path").setAttribute("d", full
+    ? "M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5" : "M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5");
+  tip("fullscreen", full ? T.fullScreenExit : T.fullScreen);
+  if (!full) {
+    navigator.keyboard?.unlock?.();
+    screens.stop();
+  }
+});
+
+// Ctrl+Alt+Del, which the local system keeps for itself: pressed and released in the guest.
+$("cad").addEventListener("click", () => {
+  const keys = [0x1d, 0x38, 0xe053];
+  input.send([...keys.map((k) => ev.key(k, true)), ...keys.reverse().map((k) => ev.key(k, false))]);
+  toast.show(T.cadSent, 1800);
+});
+for (const id of ["cad"]) if (shadow) $(id).hidden = true;
+$("watching").hidden = !shadow;
+
+const panel = {
+  toggle(open = $("panel").hidden) {
+    $("panel").hidden = !open;
+    $("details").classList.toggle("on", open);
+    if (open) { bar.show(); quality.sample().catch(() => {}); } else bar.hide();
+  },
+};
+$("details").addEventListener("click", () => panel.toggle());
+$("panel-close").addEventListener("click", () => panel.toggle(false));
+$("leave").addEventListener("click", () => {
+  panel.toggle(false);
+  session.leave();
+});
+
+session.connect();
 </script>
 </body>
 </html>

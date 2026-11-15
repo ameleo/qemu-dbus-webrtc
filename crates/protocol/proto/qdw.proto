@@ -90,6 +90,10 @@ message Hello {
 
 message SessionDescription {
   string sdp = 1;
+  // In the server's offer: the VM's name, for the client to show. The server sends the offer
+  // once the client is accepted, its account checked: a client that is not learns nothing of
+  // the VM, not even its name.
+  string vm_name = 2;
 }
 
 message IceCandidate {

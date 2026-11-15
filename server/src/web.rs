@@ -56,6 +56,8 @@ pub enum Request {
 
 #[derive(Clone)]
 pub struct Shared {
+    /// The VM's name, which the offer gives its viewers.
+    pub name: String,
     /// Turns true when the VM stops: its viewers' sessions end.
     pub vm_stopped: watch::Receiver<bool>,
     pub codec: Codec,
@@ -758,7 +760,7 @@ async fn run(
             }
             signal = signals.recv() => match signal {
                 Some(Signal::Offer(sdp)) => {
-                    send(socket, server_message::Message::Offer(SessionDescription { sdp })).await?
+                    send(socket, server_message::Message::Offer(SessionDescription { sdp, vm_name: shared.name.clone() })).await?
                 }
                 Some(Signal::Message(Channel::Input | Channel::Clipboard | Channel::Drive | Channel::Printer | Channel::Camera, _)) if !user => {}
                 Some(Signal::Message(Channel::Camera, bytes)) => {
@@ -904,7 +906,7 @@ async fn run(
             Some(call) = follow.cameras.calls.recv() => send_all(session, Channel::Camera, cameras.call(call, session)),
             Some(message) = follow.cameras.outgoing.recv() => session.send(Channel::Camera, message),
             message = receive(socket) => match message? {
-                Some(client_message::Message::Answer(SessionDescription { sdp })) => session.apply_answer(&sdp)?,
+                Some(client_message::Message::Answer(SessionDescription { sdp, .. })) => session.apply_answer(&sdp)?,
                 // An empty candidate marks the end of the client's candidates.
                 Some(client_message::Message::Ice(ice)) if !ice.candidate.is_empty() => {
                     session.add_ice_candidate(ice.sdp_mline_index, &ice.candidate)
