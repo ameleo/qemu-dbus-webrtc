@@ -30,8 +30,10 @@ const RETRIES: u8 = 3;
 /// 200 to 8192 pixels, the width even; the height is made even too, for the video's 4:2:0).
 const MIN_SIZE: u32 = 200;
 const MAX_SIZE: u32 = 8192;
-/// The physical sizes taken, in millimetres (MS-RDPEDISP 2.2.2.2.1): 10 to 10,000.
-const PHYSICAL_SIZE: std::ops::RangeInclusive<u32> = 10..=10_000;
+/// The density the guest's screens are given, in dots per inch: Windows' 100 % scale, whatever
+/// the user's monitor. A guest screen at the monitor's real density would have Windows offer to
+/// scale it up on a dense monitor, on top of the client's own scaling.
+const DPI: u32 = 96;
 
 /// A guest screen's size and place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,26 +54,24 @@ impl Size {
             return None;
         }
         let bounded = |v: u32| v.clamp(MIN_SIZE, MAX_SIZE) & !1;
-        // MS-RDPEDISP 2.2.2.2.1: the physical size is ignored when either dimension is out of
-        // its bounds; 0 tells QEMU it is unknown.
-        let physical =
-            PHYSICAL_SIZE.contains(&monitor.width_mm) && PHYSICAL_SIZE.contains(&monitor.height_mm);
-        let mm = |v: u32| {
-            if physical {
-                u16::try_from(v).unwrap_or(0)
-            } else {
-                0
-            }
-        };
+        let (width, height) = (bounded(monitor.width), bounded(monitor.height));
         Some(Self {
             x: monitor.x,
             y: monitor.y,
-            width: bounded(monitor.width),
-            height: bounded(monitor.height),
-            width_mm: mm(monitor.width_mm),
-            height_mm: mm(monitor.height_mm),
+            width,
+            height,
+            width_mm: millimetres(width),
+            height_mm: millimetres(height),
         })
     }
+}
+
+/// The physical size, in millimetres, of `pixels` at `DPI` (25.4 mm an inch). QEMU puts it in
+/// the screen's EDID, and its own density from it is `DPI` again (`qemu_edid_dpi_from_mm`).
+/// The monitor's own physical size, which its client may send, is not used.
+fn millimetres(pixels: u32) -> u16 {
+    // At most 8192 pixels: 2167 mm.
+    u16::try_from(pixels * 254 / (DPI * 10)).unwrap_or(0)
 }
 
 /// The layout wanted of the guest's screens, and the sizes they show at.
@@ -205,26 +205,32 @@ async fn run(
 mod tests {
     use super::*;
 
+    /// Whatever the monitor's physical size, the guest's screens are at 96 dpi, as QEMU computes
+    /// it from the size given.
     #[test]
-    fn physical_sizes_out_of_bounds_are_ignored() {
-        let monitor = |width_mm, height_mm| Monitor {
-            width: 1920,
-            height: 1080,
+    fn screens_are_at_96_dpi() {
+        let monitor = |width, height, width_mm, height_mm| Monitor {
+            width,
+            height,
             width_mm,
             height_mm,
             ..Default::default()
         };
-        let mm = |m: Monitor| {
+        // A 27-inch 4K monitor (163 dpi), one without a size, a large ultrawide one.
+        for m in [
+            monitor(3840, 2160, 597, 336),
+            monitor(1920, 1080, 0, 0),
+            monitor(3440, 1440, 800, 340),
+            monitor(8192, 8192, 0, 0),
+        ] {
             let size = Size::of(&m).unwrap();
-            (size.width_mm, size.height_mm)
-        };
-        assert_eq!(mm(monitor(600, 340)), (600, 340));
-        assert_eq!(mm(monitor(10, 10_000)), (10, 10_000));
-        // Either out of bounds: both ignored.
-        assert_eq!(mm(monitor(9, 340)), (0, 0));
-        assert_eq!(mm(monitor(600, 10_001)), (0, 0));
-        assert_eq!(mm(monitor(70_000, 340)), (0, 0));
-        assert_eq!(mm(monitor(0, 0)), (0, 0));
+            // QEMU's qemu_edid_dpi_from_mm.
+            let dpi = |res: u32, mm: u16| res * 254 / 10 / u32::from(mm);
+            assert_eq!(dpi(size.width, size.width_mm), 96);
+            assert_eq!(dpi(size.height, size.height_mm), 96);
+        }
+        let size = Size::of(&monitor(1920, 1080, 600, 340)).unwrap();
+        assert_eq!((size.width_mm, size.height_mm), (508, 285));
     }
 
     #[test]
@@ -239,7 +245,6 @@ mod tests {
         };
         let size = Size::of(&monitor(3441, 1439)).unwrap();
         assert_eq!((size.x, size.width, size.height), (1920, 3440, 1438));
-        assert_eq!((size.width_mm, size.height_mm), (800, 340));
         let size = Size::of(&monitor(100, 9000)).unwrap();
         assert_eq!((size.width, size.height), (200, 8192));
         assert_eq!(Size::of(&monitor(0, 1080)), None);

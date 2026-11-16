@@ -116,10 +116,12 @@ The guest resolution follows the user's window: once the size has been stable fo
 server requests it from the guest (`SetUIInfo`, rounded to even values between 200 and 8192
 pixels). A request sent while the guest boots is lost, as its display driver restores the mode
 Windows remembered, so the server requests it again if the guest still shows another size 3 s
-later, up to three times. The guest keeps the resolution after the user leaves.
+later, up to three times. The guest keeps the resolution after the user leaves. Each guest screen
+is given the physical size of 96 dpi at its resolution, whatever the user's monitor: Windows then
+stays at 100 % scale, and only the client scales.
 
 With several monitors (native client), the client sends its monitor layout with each monitor's
-position and physical size in millimeters. The guest gets one screen per monitor, in order, at
+position (and the physical size it may send, unused). The guest gets one screen per monitor, in order, at
 its size and position (`SetUIInfo` with offsets), and its other screens are disabled: the guest
 desktop mirrors the client's layout, and the pointer moves between screens as on the client.
 Each guest screen (a graphic console per head, up to four) has its own encoder and video track,
