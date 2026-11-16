@@ -192,6 +192,11 @@ The hosts can then stay on a private network for the media: only the relay, and 
 signaling (through a reverse proxy), need to be reachable from the internet. With `stun = ""` on
 the hosts, outside clients always go through the relay.
 
+Behind a connection broker (`[broker]`), the host connects to the broker over gRPC in TLS and
+keeps the connection: it announces its VMs, and serves the sessions the broker relays to it,
+the broker having signed the user in and checked their access. The host then needs no inbound
+port at all: without accounts or a certificate of its own, it serves no page itself.
+
 Settings can be stored in a TOML file, one per host (`qemu-dbus-webrtc --config <file>`); see
 [config.example.toml](config.example.toml). Command-line options override the file:
 `--codec av1|vp9|hevc`, `--chroma 420|444`, `--software`, `--bitrate <max kbit/s>`,

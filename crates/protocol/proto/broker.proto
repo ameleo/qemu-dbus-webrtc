@@ -18,8 +18,9 @@ service Broker {
   rpc Control(stream HostMessage) returns (stream BrokerMessage);
   // One relayed connection. The host's first message names it (RelayMessage.connection); then
   // each message carries one WebSocket message, either way. The broker ends the call when the
-  // user's WebSocket closes; the host ends it when it ends the session, cleanly (status OK) or
-  // not (an error status), and the broker closes the user's WebSocket the same way.
+  // user's WebSocket closes. The host ends the session with a Close, then ends its side of the
+  // call; the broker closes the user's WebSocket with the Close's status. A host's side that
+  // ends without a Close is a failure (1011).
   rpc Relay(stream RelayMessage) returns (stream RelayMessage);
 }
 
@@ -127,5 +128,13 @@ message RelayMessage {
     string connection = 1;
     // One WebSocket message, binary as all of the signaling's.
     bytes data = 2;
+    // The host's last message: the session ends.
+    Close close = 3;
   }
+}
+
+message Close {
+  // The WebSocket close status the user's WebSocket closes with (RFC 6455 7.4.1): 1000 a normal
+  // end, 1001 the host goes away, 1011 a failure.
+  uint32 code = 1;
 }

@@ -25,5 +25,5 @@ tonic-prost-build = { workspace = true, optional = true }
 [dev-dependencies]
 # The broker service's test: a real client and server over a local connection.
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
-tokio-stream = { version = "0.1", features = ["net"] }
+tokio-stream = { workspace = true, features = ["net"] }
 tonic = { workspace = true, features = ["codegen", "channel", "router", "server"] }

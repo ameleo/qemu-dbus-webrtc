@@ -41,7 +41,7 @@ use crate::printers::{Printers, PrintersFollow, ViewerPrinters};
 use crate::transport::{Bitrates, Channel, Session, Signal, SoundViewers, Start, VideoViewers};
 use crate::vms::{Client, Vms};
 
-const PAGE: &str = include_str!("../web/index.html");
+pub const PAGE: &str = include_str!("../web/index.html");
 
 /// A request from a viewer to the display loop.
 #[derive(Debug)]
@@ -335,21 +335,40 @@ async fn upgrade(
     let stopping = vms.stopping();
     ws.on_upgrade(move |socket| async move {
         info!(%peer, id, "viewer connected");
-        if let Err(e) = open(socket, &vms, &auth, &checks, &id, stopping).await {
+        let admission = Admission::Local {
+            auth: &auth,
+            checks: &checks,
+        };
+        if let Err(e) = open(Socket::Ws(socket), &vms, admission, &id, stopping).await {
             warn!(%peer, id, error = %format!("{e:#}"), "viewer session ended");
         }
     })
     .into_response()
 }
 
+/// Who decides that a client may open a VM.
+pub enum Admission<'a> {
+    /// This server: its accounts, the client's in its hello.
+    Local {
+        auth: &'a Auth,
+        checks: &'a tokio::sync::Semaphore,
+    },
+    /// The broker that relays the connection, which checked the user's sign-in and their
+    /// access to the VM it names.
+    Broker {
+        user: String,
+        /// View-only, as the broker says; the client may ask it too.
+        shadow: bool,
+    },
+}
+
 /// A client came for the VM `id` (a UUID or a name): its hello, its account checked, whether
 /// it decodes the video, then the VM, found, started or attached to if need be, and the
 /// session.
-async fn open(
-    mut socket: WebSocket,
+pub async fn open(
+    mut socket: Socket,
     vms: &Vms,
-    auth: &Auth,
-    checks: &tokio::sync::Semaphore,
+    admission: Admission<'_>,
     id: &str,
     stopping: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -359,11 +378,25 @@ async fn open(
         Ok(Err(e)) => return Err(e),
         Ok(Ok(Some(_))) | Err(_) => anyhow::bail!("no hello"),
     };
-    let shadow = hello.shadow;
-    // The VMs the client may open: all without accounts, those of its account otherwise.
-    let grant = match auth {
-        Auth::None => crate::access::Grant::All,
-        Auth::Password(accounts) => {
+    let mut shadow = hello.shadow;
+    // The VMs the client may open: all without accounts, those of its account otherwise; the one
+    // the broker names, for a connection it relays.
+    let grant = match admission {
+        Admission::Broker {
+            user,
+            shadow: view_only,
+        } => {
+            shadow |= view_only;
+            info!(id, user, shadow, "relayed by the broker");
+            crate::access::Grant::Only(vec![id.to_owned()])
+        }
+        Admission::Local {
+            auth: Auth::None, ..
+        } => crate::access::Grant::All,
+        Admission::Local {
+            auth: Auth::Password(accounts),
+            checks,
+        } => {
             // No account given: the client asks for one, with no delay (nothing is guessed).
             if hello.user.is_empty() {
                 refuse(&mut socket, ACCOUNT_REQUIRED).await;
@@ -506,50 +539,86 @@ async fn granted(vms: &Vms, grant: &crate::access::Grant, uuid: &str) -> bool {
     false
 }
 
+/// A client's signalling: its WebSocket, or a connection the broker relays (`broker.rs`), which
+/// carries the same messages.
+pub enum Socket {
+    Ws(WebSocket),
+    Relayed(crate::broker::Relayed),
+}
+
+impl Socket {
+    async fn send_binary(&mut self, bytes: Vec<u8>) -> Result<()> {
+        match self {
+            Self::Ws(socket) => socket.send(WsMessage::Binary(bytes.into())).await?,
+            Self::Relayed(relayed) => relayed.send(bytes).await?,
+        }
+        Ok(())
+    }
+
+    /// The next binary message; `None` when the client has gone.
+    async fn receive_binary(&mut self) -> Result<Option<Vec<u8>>> {
+        match self {
+            Self::Ws(socket) => loop {
+                match socket.recv().await {
+                    None | Some(Ok(WsMessage::Close(_))) => return Ok(None),
+                    Some(Ok(WsMessage::Binary(bytes))) => return Ok(Some(bytes.into())),
+                    Some(Ok(_)) => continue,
+                    Some(Err(e)) => return Err(e.into()),
+                }
+            },
+            Self::Relayed(relayed) => relayed.receive().await,
+        }
+    }
+
+    async fn close(&mut self, code: u16) {
+        match self {
+            Self::Ws(socket) => {
+                let frame = axum::extract::ws::CloseFrame {
+                    code,
+                    reason: "".into(),
+                };
+                let _ = socket.send(WsMessage::Close(Some(frame))).await;
+            }
+            Self::Relayed(relayed) => relayed.close(code).await,
+        }
+    }
+}
+
 /// Close the WebSocket cleanly, with the status `code` (RFC 6455 7.4.1): 1000 for an end the
 /// session meant (the client leaves, the VM stops, a refusal its Error explains), 1001 when
 /// the server goes away, 1011 when it failed. Whether the close frame went or not, the
 /// session is over.
-async fn close(socket: &mut WebSocket, code: u16) {
-    let frame = axum::extract::ws::CloseFrame {
-        code,
-        reason: "".into(),
-    };
-    let _ = socket.send(WsMessage::Close(Some(frame))).await;
+async fn close(socket: &mut Socket, code: u16) {
+    socket.close(code).await;
 }
 
 /// Refuse the client, saying why (an Error), then close: the end is a normal one (1000), the
 /// refusal its reason.
-async fn refuse(socket: &mut WebSocket, message: &str) {
+async fn refuse(socket: &mut Socket, message: &str) {
     let message = message.to_owned();
     let _ = send(socket, server_message::Message::Error(Error { message })).await;
     close(socket, axum::extract::ws::close_code::NORMAL).await;
 }
 
 /// One message to the client, as a binary WebSocket message.
-async fn send(socket: &mut WebSocket, message: server_message::Message) -> Result<()> {
+async fn send(socket: &mut Socket, message: server_message::Message) -> Result<()> {
     let bytes = ServerMessage {
         message: Some(message),
     }
     .encode_to_vec();
-    socket.send(WsMessage::Binary(bytes.into())).await?;
-    Ok(())
+    socket.send_binary(bytes).await
 }
 
 /// The next message from the client; `None` when it has gone.
-async fn receive(socket: &mut WebSocket) -> Result<Option<client_message::Message>> {
+async fn receive(socket: &mut Socket) -> Result<Option<client_message::Message>> {
     loop {
-        match socket.recv().await {
-            None | Some(Ok(WsMessage::Close(_))) => return Ok(None),
-            Some(Ok(WsMessage::Binary(bytes))) => {
-                let message = ClientMessage::decode(bytes)?.message;
-                // An empty message is one of a newer client that this server does not know.
-                if message.is_some() {
-                    return Ok(message);
-                }
-            }
-            Some(Ok(_)) => continue,
-            Some(Err(e)) => return Err(e.into()),
+        let Some(bytes) = socket.receive_binary().await? else {
+            return Ok(None);
+        };
+        let message = ClientMessage::decode(bytes.as_slice())?.message;
+        // An empty message is one of a newer client that this server does not know.
+        if message.is_some() {
+            return Ok(message);
         }
     }
 }
@@ -557,7 +626,7 @@ async fn receive(socket: &mut WebSocket) -> Result<Option<client_message::Messag
 /// The session of a client of the VM: `codecs` it decodes, from its hello, and whether it
 /// only watches.
 async fn viewer(
-    mut socket: WebSocket,
+    mut socket: Socket,
     client: &Client,
     codecs: Vec<String>,
     shadow: bool,
@@ -763,7 +832,7 @@ fn send_all(session: &Session, channel: Channel, messages: Vec<Vec<u8>>) {
 }
 
 async fn run(
-    socket: &mut WebSocket,
+    socket: &mut Socket,
     session: &Session,
     signals: &mut mpsc::UnboundedReceiver<Signal>,
     state: &mut ViewerState,

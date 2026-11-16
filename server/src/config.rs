@@ -65,6 +65,20 @@ struct File {
     vm: Vec<Vm>,
     account: Vec<AccountFile>,
     turn: Vec<TurnFile>,
+    broker: Option<BrokerFile>,
+}
+
+/// The connection broker the host reaches (see `broker`).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BrokerFile {
+    url: String,
+    host_id: String,
+    /// The file holding the host's credential, which the broker checks: kept out of this file,
+    /// readable by the service alone (a systemd credential, for one).
+    credential_file: PathBuf,
+    /// The roots that authenticate the broker, instead of the system's.
+    ca_bundle: Option<PathBuf>,
 }
 
 /// A TURN server the clients may relay their media through (see `turn`): its URIs, and either
@@ -250,6 +264,12 @@ impl Config {
         )
     }
 
+    /// Whether the host serves its own pages: with a broker, only when it has both accounts and
+    /// a certificate; without one, always (and `auth` and `tls` say what is missing).
+    pub fn serves_pages(&self) -> bool {
+        self.broker.is_none() || (self.auth.is_some() && self.tls.is_some())
+    }
+
     /// The certificate to serve with.
     pub fn tls(&self) -> Result<web::Tls> {
         // Plain HTTP would carry the session in clear.
@@ -273,6 +293,8 @@ pub struct Config {
     pub providers: Providers,
     /// The certificate from an ACME authority, if one gives it.
     pub acme: Option<crate::acme::Acme>,
+    /// The connection broker the host reaches, if it has one.
+    pub broker: Option<crate::broker::Settings>,
 }
 
 /// The settings from the configuration file, if `--config` names one, then from the other
@@ -497,6 +519,23 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
         Some(other) => bail!("[auth] method {other}: password or none"),
     };
 
+    let broker = match file.broker {
+        None => None,
+        Some(b) => {
+            let credential = std::fs::read_to_string(&b.credential_file).with_context(|| {
+                format!("[broker] credential_file {}", b.credential_file.display())
+            })?;
+            Some(
+                crate::broker::settings(
+                    b.url,
+                    b.host_id,
+                    credential.trim().to_owned(),
+                    b.ca_bundle,
+                )
+                .context("in [broker]")?,
+            )
+        }
+    };
     Ok(Config {
         auth,
         vm: VmConfig {
@@ -517,6 +556,7 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
         tls,
         providers,
         acme,
+        broker,
     })
 }
 

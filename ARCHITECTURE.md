@@ -35,6 +35,17 @@ libvirt, plain QEMU) starts and stops VMs.
   `use-auth-secret`: valid for a day). The server runs no relay and needs no TURN client: a
   relayed client's candidates are ordinary remote candidates to it. The client uses a relay
   only when no direct pair works (`?relay` in the page's address forces it).
+- **Connection broker:** with `[broker]`, the host keeps a gRPC connection to the broker
+  (`qdw_protocol::broker`, `proto/broker.proto`), which it opens, in TLS, with its credential in
+  each call's metadata, and opens again when it drops (1 s, doubled up to 30 s). On the `Control`
+  stream it sends its Hello, its inventory (every VM its providers see, with its UUID, sent again
+  when it changes, checked every 5 s) and its page; the broker sends `Connect` requests. For each,
+  the host calls `Relay`, which carries the user's signalling messages as its WebSocket would
+  (`web::Socket`), and serves it as one of its own clients, the broker's word standing for the
+  account (`web::Admission::Broker`): the VM it names only, view-only when it says. The host
+  ends a relayed session with a `Close` carrying the WebSocket status, then waits for the
+  broker to end the call, since dropping it would cancel the stream and lose the last messages.
+  Without accounts or a certificate, a host with a broker serves no page itself.
 - **Session termination:** the server always ends a session with a clean WebSocket close, so
   that clients treat a clean close as a deliberate end (the native client closes its windows)
   and a lost connection as a failure to recover from. An `Ended` message gives the reason when

@@ -38,6 +38,17 @@ pub struct Candidate {
     pub startable: bool,
 }
 
+/// A VM, as the inventory lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listed {
+    /// Lower case, hyphenated.
+    pub uuid: String,
+    pub names: Vec<String>,
+    pub running: bool,
+    /// Off, the server starts it when a client asks for it.
+    pub startable: bool,
+}
+
 /// A VM manager.
 pub trait Provider: Send + Sync {
     fn name(&self) -> &'static str;
@@ -273,6 +284,52 @@ impl Providers {
             }
         }
         Ok(None)
+    }
+
+    /// Every VM the providers see, with its UUID: read from the VM when the provider does not
+    /// know it and the VM runs; a VM off whose UUID no provider knows is left out, as no client
+    /// could ask for it. A VM two providers see is listed once, as the first one sees it.
+    pub async fn inventory(&self) -> Vec<Listed> {
+        let mut listed: Vec<Listed> = Vec::new();
+        for provider in self.all() {
+            let candidates = match provider.candidates().await {
+                Ok(candidates) => candidates,
+                Err(e) => {
+                    warn!(provider = provider.name(), error = %format!("{e:#}"), "VMs not listed");
+                    continue;
+                }
+            };
+            for candidate in candidates {
+                let probed = match (&candidate.uuid, &candidate.attach) {
+                    (None, Some(attach)) => self.probe(attach).await,
+                    _ => None,
+                };
+                let Some(uuid) = candidate
+                    .uuid
+                    .or_else(|| probed.as_ref().map(|p| p.uuid.clone()))
+                    .and_then(|uuid| crate::vms::normalize(&uuid))
+                else {
+                    continue;
+                };
+                if listed.iter().any(|l| l.uuid == uuid) {
+                    continue;
+                }
+                let mut names = candidate.names;
+                if let Some(probed) = probed
+                    && !probed.name.is_empty()
+                    && !names.contains(&probed.name)
+                {
+                    names.push(probed.name);
+                }
+                listed.push(Listed {
+                    uuid,
+                    names,
+                    running: candidate.attach.is_some(),
+                    startable: candidate.startable,
+                });
+            }
+        }
+        listed
     }
 
     /// The UUID of the VM named `name`, if a provider runs one by that name; an error when

@@ -10,6 +10,7 @@ mod access;
 mod acme;
 mod agent;
 mod audio;
+mod broker;
 mod cameras;
 mod clipboard;
 mod config;
@@ -75,40 +76,26 @@ async fn main() -> Result<()> {
     // Fail now, saying why, rather than at the first frame.
     gpus::check(&found, &vm.settings)?;
 
-    let tls = config.tls()?;
-    let auth = config.auth()?;
+    // With a broker, the host serves its own pages only if it has accounts and a certificate
+    // for them: otherwise it opens no port at all, the broker relaying its users.
+    let pages = if config.serves_pages() {
+        Some((config.tls()?, config.auth()?))
+    } else {
+        info!("no accounts or no certificate: the host serves its VMs through the broker only");
+        None
+    };
     let vms = vms::Vms::new(config.providers, config.vm);
     info!(providers = ?vms.providers(), "finding the VMs");
-    if matches!(auth, config::Auth::None) && !config.listen.ip().is_loopback() {
-        warn!(listen = %config.listen, "[auth] method is none: anyone who reaches this address sees the VMs");
+    if let Some(settings) = config.broker {
+        tokio::spawn(broker::keep(settings, vms.clone()));
     }
-    // The certificate from ACME first, when none in place can serve (none, expired, for other
-    // names, or without its key): the pages need one. One that can serve, even due for renewal,
-    // serves at once, and is renewed while it does (`acme::keep`): the start does not wait for
-    // the authority.
-    if let Some(acme) = &config.acme
-        && !acme.usable()
-    {
-        acme.renew().await.context("no certificate")?;
-    }
-    let rustls = web::load_tls(&tls).await?;
-    if let Some(acme) = config.acme {
-        let (rustls, tls) = (rustls.clone(), tls.clone());
-        tokio::spawn(acme::keep(acme, move || {
-            let (rustls, tls) = (rustls.clone(), tls.clone());
-            tokio::spawn(async move {
-                match rustls
-                    .reload_from_pem_file(&tls.certificate, &tls.key)
-                    .await
-                {
-                    Ok(()) => info!("the pages serve the new certificate"),
-                    Err(e) => warn!(error = %e, "the new certificate is not served"),
-                }
-            });
-        }));
-    }
-    let served = vms.clone();
-    let mut serving = tokio::spawn(web::serve(config.listen, rustls, served, auth));
+    let mut serving = match pages {
+        Some((tls, auth)) => {
+            serve_pages(config.listen, tls, auth, config.acme, vms.clone()).await?
+        }
+        // Nothing to serve: only a signal stops the server.
+        None => tokio::spawn(std::future::pending()),
+    };
     // Stopped (Ctrl+C, or systemd): the sessions end cleanly, each telling its client the server
     // stops, before the process goes. Only a crash leaves the clients without a word.
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -139,4 +126,44 @@ async fn main() -> Result<()> {
     }
     info!("stopped");
     Ok(())
+}
+
+/// Serve the VMs' own pages on `listen`, with `tls` (from ACME first, when `acme` gives it and
+/// none in place can serve) and `auth`.
+async fn serve_pages(
+    listen: std::net::SocketAddr,
+    tls: web::Tls,
+    auth: config::Auth,
+    acme: Option<acme::Acme>,
+    vms: std::sync::Arc<vms::Vms>,
+) -> Result<tokio::task::JoinHandle<Result<()>>> {
+    if matches!(auth, config::Auth::None) && !listen.ip().is_loopback() {
+        warn!(%listen, "[auth] method is none: anyone who reaches this address sees the VMs");
+    }
+    // The certificate from ACME first, when none in place can serve (none, expired, for other
+    // names, or without its key): the pages need one. One that can serve, even due for renewal,
+    // serves at once, and is renewed while it does (`acme::keep`): the start does not wait for
+    // the authority.
+    if let Some(acme) = &acme
+        && !acme.usable()
+    {
+        acme.renew().await.context("no certificate")?;
+    }
+    let rustls = web::load_tls(&tls).await?;
+    if let Some(acme) = acme {
+        let (rustls, tls) = (rustls.clone(), tls.clone());
+        tokio::spawn(acme::keep(acme, move || {
+            let (rustls, tls) = (rustls.clone(), tls.clone());
+            tokio::spawn(async move {
+                match rustls
+                    .reload_from_pem_file(&tls.certificate, &tls.key)
+                    .await
+                {
+                    Ok(()) => info!("the pages serve the new certificate"),
+                    Err(e) => warn!(error = %e, "the new certificate is not served"),
+                }
+            });
+        }));
+    }
+    Ok(tokio::spawn(web::serve(listen, rustls, vms, auth)))
 }

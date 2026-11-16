@@ -61,6 +61,20 @@ key = "/etc/qemu-dbus-webrtc/tls/key.pem"
 # two thirds of its lifetime and reloaded without a restart. Authorizations the CA already holds
 # as valid need no challenge; otherwise the server answers HTTP-01 challenges on `http` during
 # validation (a private CA can reach servers on private addresses).
+# A connection broker (ameleo-broker): the deployment's entry point, where users sign in and open
+# their VMs. The host connects to it, over gRPC in TLS, and keeps the connection: it announces its
+# VMs there and serves the connections the broker relays, the broker having checked the user and
+# their access. The host then needs no inbound port: without accounts or without a certificate
+# above, it serves no page of its own. `url` is the broker's host service; `host_id` names this
+# host among the broker's; `credential_file` holds the credential the broker gave this host
+# (readable by the service alone); `ca_bundle`, the roots of the broker's certificate when not
+# the system's.
+# [broker]
+# url = "https://broker.example.com:8443"
+# host_id = "host-1"
+# credential_file = "/etc/qemu-dbus-webrtc/broker-credential"
+# ca_bundle = "/etc/qemu-dbus-webrtc/broker-ca.pem"
+
 # [acme]
 # directory = "https://ca.example.com/acme/acme/directory"
 # domains = ["vdi.example.com"]

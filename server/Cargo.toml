@@ -10,7 +10,7 @@ publish.workspace = true
 
 [dependencies]
 qdw-audio.workspace = true
-qdw-protocol.workspace = true
+qdw-protocol = { workspace = true, features = ["broker"] }
 qdw-qemu.workspace = true
 qdw-video.workspace = true
 rustix = { workspace = true, features = ["fs"] }
@@ -34,8 +34,14 @@ zbus.workspace = true
 axum.workspace = true
 axum-server.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-stream.workspace = true
+# The broker's gRPC client: HTTP/2 on hyper, TLS with rustls and ring, the system's roots.
+tonic = { workspace = true, features = ["codegen", "channel", "tls-ring", "tls-native-roots"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
+# The broker's test: a broker served in TLS, locally.
+tonic = { workspace = true, features = ["codegen", "channel", "router", "server", "tls-ring"] }
+tokio-stream = { workspace = true, features = ["net"] }

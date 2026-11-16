@@ -48,6 +48,7 @@ tokio = "1"
 tonic = { version = "0.14", default-features = false }
 tonic-prost = "0.14"
 tonic-prost-build = { version = "0.14", default-features = false }
+tokio-stream = "0.1"
 toml = { version = "0.9", default-features = false, features = ["parse", "display", "serde", "std"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

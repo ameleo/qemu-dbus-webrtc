@@ -140,6 +140,11 @@ impl Vms {
         &self.config
     }
 
+    /// Every VM the providers see (see `Providers::inventory`).
+    pub async fn inventory(&self) -> Vec<crate::providers::Listed> {
+        self.providers.inventory().await
+    }
+
     /// The UUID of the VM `id`, a UUID or a VM's name: `None` when no provider runs a VM by
     /// that name; an error when several do.
     pub async fn uuid_of(&self, id: &str) -> Result<Option<String>> {
