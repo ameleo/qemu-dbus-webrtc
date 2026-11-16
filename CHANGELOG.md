@@ -3,6 +3,54 @@
 What each release brings. The packages are on the
 [releases page](https://github.com/ameleo/qemu-dbus-webrtc/releases).
 
+## 0.2.0 — 2026-11-16
+
+A web page for daily use, accounts per VM, clients outside the host's network, and guests on a
+plain virtio-vga.
+
+### Added
+
+- **A web page for daily use.** A toolbar comes down from a tab at the top: the VM's name, a
+  quality dot and the latency, then the microphone, the camera, all monitors, full screen,
+  Ctrl+Alt+Del, the connection details and disconnecting. Cards over the screen for connecting,
+  signing in, and the end of a session. The page connects again by itself after a lost
+  connection (up to five tries), and speaks English or French, as the browser does.
+- **Connection details a user understands:** the quality and what holds it back (data lost on
+  the network, a slow or unsteady network, slow decoding on this computer, a busy server, low
+  bandwidth), the responsiveness, the picture, the bitrate, the codec and whether the graphics
+  card decodes it, the sound. The figures stay under "Technical details", folded.
+- **All monitors in the browser** (Chrome and Edge, the Window Management API): one guest
+  screen on each monitor, at its size and place; the other windows go full screen on a click,
+  or at once for the sites Chrome's `AutomaticFullscreenAllowedForUrls` policy names. A guest
+  window dragged from one monitor to the next follows the pointer.
+- **Keys in full screen:** every key goes to the guest, the Windows key and Alt+Tab included
+  (Keyboard Lock API); holding Esc leaves. In a window, the Windows keys stay local.
+- **Files dropped on the page** go to the guest clipboard, for a paste there.
+- **Accounts per VM:** `[[account]]` entries, each with its user, its password's Argon2id hash
+  and the VMs it may open, by UUID or name, or `"*"`. A VM that no account names is open to
+  none, and to a user it does not name the server answers as for a VM the host does not run.
+  `[auth] user` and `password` stay an account for every VM.
+- **Clients outside the host's network.** Each session asks a STUN server for the public
+  address its router gives it, and gives the page the same server: both sides open the way
+  through most routers, with no port to forward. Google's server by default; `[listen] stun`
+  names another, `""` none. Where STUN does not get through, `udp_ports` and `public_address`
+  for forwarded ports. TURN is not supported yet.
+- **Plain virtio-vga with blob scanouts:** a guest's framebuffer, a udmabuf given without a
+  modifier, is imported by the GPU as it is, and its import kept for when the guest flips back
+  to it. For a Windows guest playing a video, the server's share of a CPU went from 18 % to 9 %
+  (i915 no longer empties every CPU's caches at each flip). With QEMU 11.1, this mode needs
+  QEMU's commit 5378d1da44 ("ui/dbus: disable scanout iff dmabuf is current"), in QEMU's
+  master: without it, the picture freezes.
+
+### Fixed
+
+- **OpenGL framebuffers upside down.** A `virtio-vga-gl` guest without blob scanouts (Windows
+  and Linux boot screens included) showed upside down: QEMU's `y0_top` flag, which says the rows
+  go from the bottom despite its name, was not read. The GPU now turns such a picture over in
+  the pass that converts it.
+- **A screen layout the guest missed was not asked again** after a screen went off: with a
+  Fedora guest, two screens asked for could show one.
+
 ## 0.1.3 — 2026-11-15
 
 A clipboard fix, and the guest agents published.

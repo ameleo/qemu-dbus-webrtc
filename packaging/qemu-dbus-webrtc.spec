@@ -4,7 +4,7 @@
 # the CI's container has the network. The tarball's top directory is %{name}-%{version}.
 
 Name:           qemu-dbus-webrtc
-Version:        0.1.3
+Version:        0.2.0
 Release:        1%{?dist}
 Summary:        WebRTC console for QEMU virtual machines
 License:        MPL-2.0
@@ -78,6 +78,14 @@ install -d -m 0700 %{buildroot}%{_sysconfdir}/qemu-dbus-webrtc/tls
 %dir %attr(0700,root,root) %{_sysconfdir}/qemu-dbus-webrtc/tls
 
 %changelog
+* Mon Nov 16 2026 Mickaël Bourneuf <mickael.bourneuf@ameleo.fr> - 0.2.0-1
+- Web page redone: toolbar, connection details, reconnection, English and French
+- All monitors in Chrome and Edge, file drop, every key to the guest in full screen
+- Accounts, each with the VMs it may open
+- Clients outside the host's network: STUN (Google's by default), or forwarded UDP ports
+- Plain virtio-vga with blob scanouts, imported by the GPU and kept between flips
+- OpenGL framebuffers encoded the right way up; missed screen layouts asked again
+
 * Sun Nov 15 2026 Mickaël Bourneuf <mickael.bourneuf@ameleo.fr> - 0.1.3-1
 - Keep the client files the guest locked readable after the guest copies something else
 - Documentation: why the project exists, and links to the guest agents and their protocol
