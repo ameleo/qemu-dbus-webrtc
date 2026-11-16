@@ -13,6 +13,7 @@ use serde::Deserialize;
 
 use crate::providers::{self, Providers, Source};
 use crate::transport;
+use crate::turn;
 use crate::web;
 
 pub const USAGE: &str = "usage: qemu-dbus-webrtc [--config <file.toml>] \
@@ -63,6 +64,43 @@ struct File {
     proxmox: ProxmoxFile,
     vm: Vec<Vm>,
     account: Vec<AccountFile>,
+    turn: Vec<TurnFile>,
+}
+
+/// A TURN server the clients may relay their media through (see `turn`): its URIs, and either
+/// the secret it shares with the server, or fixed credentials.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TurnFile {
+    urls: Vec<String>,
+    secret: Option<String>,
+    username: Option<String>,
+    credential: Option<String>,
+}
+
+impl TurnFile {
+    fn server(self) -> Result<turn::Server> {
+        if self.urls.is_empty() {
+            bail!("no urls");
+        }
+        for url in &self.urls {
+            turn::check_url(url)?;
+        }
+        let credentials = match (self.secret, self.username, self.credential) {
+            (Some(secret), None, None) if !secret.is_empty() => turn::Credentials::Secret(secret),
+            (None, Some(username), Some(credential)) if !username.is_empty() => {
+                turn::Credentials::Fixed {
+                    username,
+                    credential,
+                }
+            }
+            _ => bail!("either a secret, or a username and a credential"),
+        };
+        Ok(turn::Server {
+            urls: self.urls,
+            credentials,
+        })
+    }
 }
 
 /// An account: its user, its password, and the VMs it may open.
@@ -401,6 +439,15 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
             }
             Some(server) => Some(server.to_owned()),
         },
+        turn: file
+            .turn
+            .into_iter()
+            .enumerate()
+            .map(|(i, turn)| {
+                turn.server()
+                    .with_context(|| format!("in [[turn]] {}", i + 1))
+            })
+            .collect::<Result<_>>()?,
     };
     let listen = match listen.address {
         Some(address) => address,
@@ -558,6 +605,39 @@ mod tests {
             Some("stun.example.com:3478")
         );
         assert!(stun("stun = \"stun.example.com\"\n").is_err());
+    }
+
+    /// TURN servers: a secret or fixed credentials, never both, and checked URIs.
+    #[test]
+    fn turn_servers() {
+        let turn = |text: &str| parse_file_listen(&format!("\n{text}")).map(|c| c.vm.network.turn);
+        assert!(turn("").unwrap().is_empty());
+        let servers = turn(
+            "[[turn]]\nurls = [\"turns:relay.example.com:443?transport=tcp\"]\nsecret = \"s\"\n\
+             [[turn]]\nurls = [\"turn:192.0.2.1\"]\nusername = \"u\"\ncredential = \"c\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            servers[0].credentials,
+            turn::Credentials::Secret("s".into())
+        );
+        assert_eq!(
+            servers[1].credentials,
+            turn::Credentials::Fixed {
+                username: "u".into(),
+                credential: "c".into()
+            }
+        );
+        // Both ways, neither, an empty secret, no URI, a wrong URI.
+        for wrong in [
+            "[[turn]]\nurls = [\"turn:a\"]\nsecret = \"s\"\nusername = \"u\"\ncredential = \"c\"\n",
+            "[[turn]]\nurls = [\"turn:a\"]\n",
+            "[[turn]]\nurls = [\"turn:a\"]\nsecret = \"\"\n",
+            "[[turn]]\nurls = []\nsecret = \"s\"\n",
+            "[[turn]]\nurls = [\"stun:a\"]\nsecret = \"s\"\n",
+        ] {
+            assert!(turn(wrong).is_err(), "{wrong}");
+        }
     }
 
     /// A configuration file with `listen`, the [listen] section's settings, parsed.

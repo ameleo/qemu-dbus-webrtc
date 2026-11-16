@@ -97,6 +97,18 @@ message SessionDescription {
   // In the server's offer: the ICE servers the client may use to find its own reflexive
   // address, as URIs (RFC 7064: "stun:host:port"), the same STUN server the server asks.
   repeated string ice_servers = 3;
+  // In the server's offer: the TURN servers the client may relay its media through when it
+  // cannot reach the server directly, with the credentials to use.
+  repeated TurnServer turn_servers = 4;
+}
+
+// A TURN server, as WebRTC's RTCIceServer: the URIs it is reached at (RFC 7065:
+// "turn:host[:port][?transport=udp|tcp]", "turns:..." over TLS), and the long-term
+// credentials of the session (RFC 8489 9.2), possibly valid for a limited time.
+message TurnServer {
+  repeated string urls = 1;
+  string username = 2;
+  string credential = 3;
 }
 
 message IceCandidate {

@@ -839,6 +839,8 @@ async fn run(
                         vm_name: shared.name.clone(),
                         // The client asks the same STUN server for its own address.
                         ice_servers: shared.network.stun.iter().map(|s| format!("stun:{s}")).collect(),
+                        turn_servers: shared.network.turn.iter()
+                            .map(|t| t.for_session(std::time::SystemTime::now())).collect(),
                     })).await?
                 }
                 Some(Signal::Message(Channel::Input | Channel::Clipboard | Channel::Drive | Channel::Printer | Channel::Camera, _)) if !user => {}

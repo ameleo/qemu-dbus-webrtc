@@ -151,8 +151,22 @@ Most often, no port needs forwarding: each session asks a STUN server for the
 public address and port its router gives it, the clients ask it for theirs, and both sides
 open the way through their routers by sending to each other. The STUN server is Google's by
 default (`stun` in `[listen]`; `""` for none, as the server and its clients then reveal their
-addresses to no third party). TURN relays, for the networks neither way reaches, are not
-supported yet.
+addresses to no third party).
+
+For the networks neither way gets through, such as an office that lets only TCP or TLS to port
+443 out, the clients can relay the media through a TURN server (`[[turn]]`). The server runs no
+relay itself: use coturn, or a TURN service. One relay serves all the hosts, which name it in
+their settings. The media stay encrypted end to end, so the relay cannot read them, but they all
+go through it: place it near the hosts, with the bandwidth of the sessions it relays. Clients
+use it only when no direct path works; `?relay` in the page's address forces it, to check it.
+With a secret shared with the relay (coturn's `use-auth-secret` and `static-auth-secret`),
+each session gets its own credentials, valid for a day, and the secret stays on the hosts:
+
+```toml
+[[turn]]
+urls = ["turns:turn.example.com:443?transport=tcp", "turn:turn.example.com:3478"]
+secret = "the static-auth-secret of coturn"
+```
 
 Settings can be stored in a TOML file, one per host (`qemu-dbus-webrtc --config <file>`); see
 [config.example.toml](config.example.toml). Command-line options override the file:

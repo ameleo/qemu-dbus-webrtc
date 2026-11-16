@@ -106,6 +106,9 @@ pub struct Network {
     /// their addresses to no third party, and a client outside the host's network reaches it
     /// only through forwarded ports.
     pub stun: Option<String>,
+    /// The TURN servers the clients may relay their media through, when they cannot reach the
+    /// host directly.
+    pub turn: Vec<crate::turn::Server>,
 }
 
 /// Where a stream's encoded frames `F` go for one viewer, called on the encoder's thread.

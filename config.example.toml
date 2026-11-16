@@ -41,9 +41,21 @@ key = "/etc/qemu-dbus-webrtc/tls/key.pem"
 # public address and port its router gives it, and the clients ask it for theirs; the two
 # sides then open the way through their routers by sending to each other (ICE). This reveals
 # the host's and the clients' addresses to the STUN server, nothing else. Not through every
-# NAT: some (symmetric) need a TURN relay, not supported yet. Default: Google's, as WebRTC
-# clients commonly use; "" for none.
+# NAT: some (symmetric) need a TURN relay, below. Default: Google's, as WebRTC clients
+# commonly use; "" for none.
 # stun = "stun.l.google.com:19302"
+
+# TURN relays, for the clients whose network lets no direct path through (no UDP out, only TCP
+# or TLS to port 443): their media go through the relay, still encrypted end to end. The server
+# runs none: coturn, or a TURN service. The clients use a relay only when no direct path works;
+# "?relay" in the page's address forces it, to check one. Several [[turn]] may be given.
+# `urls` (RFC 7065): "turn:host[:port][?transport=udp|tcp]", "turns:host[:port]" over TLS.
+# Either `secret`, shared with the relay (coturn: use-auth-secret, static-auth-secret): each
+# session gets credentials computed from it, valid for a day; or fixed `username` and
+# `credential`, the same for every session and every client.
+# [[turn]]
+# urls = ["turns:turn.example.com:443?transport=tcp", "turn:turn.example.com:3478"]
+# secret = "..."
 
 # Certificate from an ACME CA, public or private (step-ca, OpenBao, FreeIPA...), renewed after
 # two thirds of its lifetime and reloaded without a restart. Authorizations the CA already holds

@@ -523,6 +523,7 @@ const uint = (fields, n) => fields.get(n)?.[0] || 0;
 // Hello: codecs = 1, shadow = 2, user = 3, password = 4. With ?shadow in the address, the page
 // only watches.
 const shadow = new URLSearchParams(location.search).has("shadow");
+const relayOnly = new URLSearchParams(location.search).has("relay");
 const hello = (codecs, account) => pb.message((o) => pb.bytes(o, 1, pb.message((h) => {
   codecs.forEach((c) => pb.string(h, 1, c));
   if (shadow) pb.uint(h, 2, 1);
@@ -551,7 +552,9 @@ window.addEventListener("keydown", unmute, { once: true });
 let channels = {};
 
 function newPeer() {
-  const peer = new RTCPeerConnection();
+  // With ?relay in the address, the media only go through a TURN relay: a check that the relay
+  // works, as a client whose network lets no UDP out would use it.
+  const peer = new RTCPeerConnection(relayOnly ? { iceTransportPolicy: "relay" } : {});
   pc = peer;
   peer.ontrack = (event) => {
     if (peer !== pc) return;
@@ -739,7 +742,8 @@ window.addEventListener("pagehide", () => {
 });
 
 // ServerMessage: offer = 1, ice = 2, error = 3, ended = 4; SessionDescription: sdp = 1,
-// vm_name = 2, ice_servers = 3; Ended: reason = 1 (1 another client took the session over, 2
+// vm_name = 2, ice_servers = 3, turn_servers = 4 (TurnServer: urls = 1, username = 2,
+// credential = 3); Ended: reason = 1 (1 another client took the session over, 2
 // the server stops). The server ends a session by closing the WebSocket cleanly.
 const onMessage = async (event) => {
   const message = pb.parse(new Uint8Array(event.data));
@@ -748,9 +752,18 @@ const onMessage = async (event) => {
     const offer = pb.parse(message.get(1)[0]);
     setName(str(offer, 2));
     // ice_servers = 3: the STUN server the server asks, for the browser to find its own
-    // public address behind a NAT; the candidates it finds go to the server as the others.
-    const servers = (offer.get(3) || []).map((url) => pb.text.decode(url));
-    if (servers.length) peer.setConfiguration({ ...peer.getConfiguration(), iceServers: [{ urls: servers }] });
+    // public address behind a NAT; turn_servers = 4: the relays it may send through when it
+    // cannot reach the server directly (only TCP or TLS out). The candidates it finds go to the
+    // server as the others; the browser uses a relay only when no direct path works.
+    const iceServers = [];
+    const stun = (offer.get(3) || []).map((url) => pb.text.decode(url));
+    if (stun.length) iceServers.push({ urls: stun });
+    for (const bytes of offer.get(4) || []) {
+      const turn = pb.parse(bytes);
+      const urls = (turn.get(1) || []).map((url) => pb.text.decode(url));
+      if (urls.length) iceServers.push({ urls, username: str(turn, 2), credential: str(turn, 3) });
+    }
+    if (iceServers.length) peer.setConfiguration({ ...peer.getConfiguration(), iceServers });
     await peer.setRemoteDescription({ type: "offer", sdp: str(offer, 1) });
     if (peer !== pc) return;
     // Sound both ways: the microphone can then go on the sound's track without renegotiating.
