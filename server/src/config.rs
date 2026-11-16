@@ -68,14 +68,23 @@ struct File {
 }
 
 /// A TURN server the clients may relay their media through (see `turn`): its URIs, and either
-/// the secret it shares with the server, or fixed credentials.
-#[derive(Debug, Deserialize)]
+/// the secret it shares with the server, or fixed credentials. Its `Debug` shows neither.
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TurnFile {
     urls: Vec<String>,
     secret: Option<String>,
     username: Option<String>,
     credential: Option<String>,
+}
+
+impl std::fmt::Debug for TurnFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TurnFile")
+            .field("urls", &self.urls)
+            .field("username", &self.username)
+            .finish_non_exhaustive()
+    }
 }
 
 impl TurnFile {
@@ -88,7 +97,9 @@ impl TurnFile {
         }
         let credentials = match (self.secret, self.username, self.credential) {
             (Some(secret), None, None) if !secret.is_empty() => turn::Credentials::Secret(secret),
-            (None, Some(username), Some(credential)) if !username.is_empty() => {
+            (None, Some(username), Some(credential))
+                if !username.is_empty() && !credential.is_empty() =>
+            {
                 turn::Credentials::Fixed {
                     username,
                     credential,
@@ -633,6 +644,7 @@ mod tests {
             "[[turn]]\nurls = [\"turn:a\"]\nsecret = \"s\"\nusername = \"u\"\ncredential = \"c\"\n",
             "[[turn]]\nurls = [\"turn:a\"]\n",
             "[[turn]]\nurls = [\"turn:a\"]\nsecret = \"\"\n",
+            "[[turn]]\nurls = [\"turn:a\"]\nusername = \"u\"\ncredential = \"\"\n",
             "[[turn]]\nurls = []\nsecret = \"s\"\n",
             "[[turn]]\nurls = [\"stun:a\"]\nsecret = \"s\"\n",
         ] {

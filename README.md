@@ -168,6 +168,25 @@ urls = ["turns:turn.example.com:443?transport=tcp", "turn:turn.example.com:3478"
 secret = "the static-auth-secret of coturn"
 ```
 
+Credentials let a client relay to any address the relay allows, for a day: restrict the relay to
+the hosts, or a signed-in user could reach the rest of the network through it. With coturn:
+
+```
+use-auth-secret
+static-auth-secret=<the same secret>
+realm=vdi.example.com
+# Relay only to the hosts (here 192.168.1.0/24), nowhere else.
+denied-peer-ip=0.0.0.0-255.255.255.255
+denied-peer-ip=::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+allowed-peer-ip=192.168.1.0-192.168.1.255
+no-multicast-peers
+no-cli
+```
+
+The hosts can then stay on a private network for the media: only the relay, and the page and
+signaling (through a reverse proxy), need to be reachable from the internet. With `stun = ""` on
+the hosts, outside clients always go through the relay.
+
 Settings can be stored in a TOML file, one per host (`qemu-dbus-webrtc --config <file>`); see
 [config.example.toml](config.example.toml). Command-line options override the file:
 `--codec av1|vp9|hevc`, `--chroma 420|444`, `--software`, `--bitrate <max kbit/s>`,

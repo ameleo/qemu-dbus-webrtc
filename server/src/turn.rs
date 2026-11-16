@@ -33,7 +33,7 @@ pub struct Server {
     pub credentials: Credentials,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Credentials {
     /// Computed for each session from this secret.
     Secret(String),
@@ -42,6 +42,19 @@ pub enum Credentials {
         username: String,
         credential: String,
     },
+}
+
+/// Never the secret nor the credential in a log.
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Secret(_) => f.write_str("Secret(..)"),
+            Self::Fixed { username, .. } => f
+                .debug_struct("Fixed")
+                .field("username", username)
+                .finish_non_exhaustive(),
+        }
+    }
 }
 
 impl Server {
@@ -163,6 +176,23 @@ mod tests {
         assert_eq!(
             (told.username.as_str(), told.credential.as_str()),
             ("u", "p")
+        );
+    }
+
+    /// Neither the secret nor the credential shows in a log.
+    #[test]
+    fn credentials_not_logged() {
+        let secret = format!("{:?}", Credentials::Secret("hush".into()));
+        let fixed = format!(
+            "{:?}",
+            Credentials::Fixed {
+                username: "u".into(),
+                credential: "hush".into()
+            }
+        );
+        assert!(
+            !secret.contains("hush") && !fixed.contains("hush"),
+            "{secret} {fixed}"
         );
     }
 
