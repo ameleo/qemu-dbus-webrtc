@@ -22,6 +22,7 @@ mod peer;
 mod pointer;
 mod printers;
 mod providers;
+mod stun;
 mod tools;
 mod transport;
 mod vm;

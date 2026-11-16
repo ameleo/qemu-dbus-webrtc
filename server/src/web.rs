@@ -473,6 +473,25 @@ async fn public_addresses(name: &str) -> Vec<std::net::IpAddr> {
     }
 }
 
+/// The STUN server's address, the first its name resolves to, IPv4 first (the host's NAT is
+/// on IPv4): none when it does not resolve, the session then without a reflexive address.
+async fn stun_server(server: &str) -> Option<std::net::SocketAddr> {
+    match tokio::net::lookup_host(server).await {
+        Ok(addresses) => {
+            let addresses: Vec<std::net::SocketAddr> = addresses.collect();
+            addresses
+                .iter()
+                .find(|a| a.is_ipv4())
+                .or(addresses.first())
+                .copied()
+        }
+        Err(e) => {
+            warn!(server, error = %e, "STUN server not resolved");
+            None
+        }
+    }
+}
+
 /// Whether `grant` names the VM `uuid`: "*", its UUID, or a name the VM goes by now. A name
 /// that names no VM, or several, names none.
 async fn granted(vms: &Vms, grant: &crate::access::Grant, uuid: &str) -> bool {
@@ -558,6 +577,10 @@ async fn viewer(
         Some(name) => public_addresses(name).await,
         None => Vec::new(),
     };
+    let stun = match &shared.network.stun {
+        Some(server) => stun_server(server).await,
+        None => None,
+    };
     let started = Session::start(
         Start {
             codec: shared.codec,
@@ -572,6 +595,7 @@ async fn viewer(
             bitrates: shared.bitrates,
             udp_ports: shared.network.udp_ports,
             public,
+            stun,
         },
         signals_tx,
         move |screen| {
@@ -810,7 +834,12 @@ async fn run(
             }
             signal = signals.recv() => match signal {
                 Some(Signal::Offer(sdp)) => {
-                    send(socket, server_message::Message::Offer(SessionDescription { sdp, vm_name: shared.name.clone() })).await?
+                    send(socket, server_message::Message::Offer(SessionDescription {
+                        sdp,
+                        vm_name: shared.name.clone(),
+                        // The client asks the same STUN server for its own address.
+                        ice_servers: shared.network.stun.iter().map(|s| format!("stun:{s}")).collect(),
+                    })).await?
                 }
                 Some(Signal::Message(Channel::Input | Channel::Clipboard | Channel::Drive | Channel::Printer | Channel::Camera, _)) if !user => {}
                 Some(Signal::Message(Channel::Camera, bytes)) => {

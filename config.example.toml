@@ -37,6 +37,12 @@ key = "/etc/qemu-dbus-webrtc/tls/key.pem"
 # clients reach the host on its own addresses only. Open the ports in the host's firewall too.
 # public_address = "vdi.example.com"
 # udp_ports = "40000-40099"
+# Or, with no port to forward on most routers: a STUN server, which each session asks for the
+# public address and port its router gives it, and which the clients ask for theirs; the two
+# sides then open the way through their routers by sending to each other (ICE). This reveals
+# the host's and the clients' addresses to the STUN server, nothing else. Not through every
+# NAT: some (symmetric) need a TURN relay, not supported yet. None by default.
+# stun = "stun.l.google.com:19302"
 
 # Certificate from an ACME CA, public or private (step-ca, OpenBao, FreeIPA...), renewed after
 # two thirds of its lifetime and reloaded without a restart. Authorizations the CA already holds

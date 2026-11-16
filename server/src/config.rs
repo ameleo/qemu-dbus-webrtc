@@ -114,6 +114,8 @@ struct Listen {
     public_address: Option<String>,
     /// The UDP ports of the sessions, "first-last".
     udp_ports: Option<String>,
+    /// A STUN server, "host:port" (see `transport::Network`).
+    stun: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -386,6 +388,12 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
             .map(udp_ports)
             .transpose()
             .context("in [listen] udp_ports")?,
+        stun: match listen.stun {
+            Some(server) if !server.contains(':') || server.trim().is_empty() => {
+                bail!("[listen] stun: \"host:port\", such as \"stun.example.com:3478\"")
+            }
+            server => server,
+        },
     };
     let listen = match listen.address {
         Some(address) => address,

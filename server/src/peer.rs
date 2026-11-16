@@ -38,6 +38,7 @@ use qdw_protocol::MAX_CAMERA_STREAMS;
 use qdw_video::encode::{Codec, HevcFmtp};
 
 use crate::audio::Mic;
+use crate::stun;
 use crate::transport::{
     Bitrates, Channel, MAX_SCREENS, Signal, SoundViewers, Start, VideoViewers, Viewer, leave,
 };
@@ -128,6 +129,7 @@ impl Peer {
             bitrates,
             udp_ports,
             public,
+            stun,
         } = start;
         let screens = viewers.len().min(MAX_SCREENS);
         let ten_bits = ten_bits && codec.has_ten_bits();
@@ -216,11 +218,27 @@ impl Peer {
                     continue;
                 }
             };
-            socket.set_nonblocking(true)?;
             let local = socket.local_addr()?;
             let candidate =
                 Candidate::host(local, "udp").map_err(|e| anyhow!("candidate {local}: {e}"))?;
             rtc.add_local_candidate(candidate);
+            // The address a NAT maps the socket to, as the STUN server sees it: asked now, the
+            // socket still blocking and read by no one else. A few hundred milliseconds at
+            // most, off the async threads.
+            if let Some(server) = stun.filter(|s| s.is_ipv4() == local.is_ipv4()) {
+                let reflexive = tokio::task::block_in_place(|| stun::reflexive(&socket, server));
+                match reflexive {
+                    Some(mapped) if mapped != local => {
+                        let candidate = Candidate::server_reflexive(mapped, local, "udp")
+                            .map_err(|e| anyhow!("candidate {mapped}: {e}"))?;
+                        debug!(%mapped, %local, "reflexive candidate");
+                        rtc.add_local_candidate(candidate);
+                    }
+                    Some(_) => {}
+                    None => debug!(%local, %server, "no answer from the STUN server"),
+                }
+            }
+            socket.set_nonblocking(true)?;
             sockets.insert(local, Arc::new(UdpSocket::from_std(socket)?));
         }
         if sockets.is_empty() {
@@ -1017,6 +1035,7 @@ mod tests {
                     },
                     udp_ports: None,
                     public: Vec::new(),
+                    stun: None,
                 },
                 signals_tx,
                 |_| {},
@@ -1066,6 +1085,7 @@ mod tests {
                 },
                 udp_ports: None,
                 public: Vec::new(),
+                stun: None,
             },
             signals_tx,
             move |_| {
@@ -1232,6 +1252,7 @@ mod tests {
                 },
                 udp_ports: Some((47100, 47199)),
                 public: vec![public],
+                stun: None,
             },
             signals_tx,
             |_| {},

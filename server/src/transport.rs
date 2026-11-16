@@ -101,6 +101,10 @@ pub struct Network {
     /// The UDP ports the sessions' sockets take, inclusive, those the NAT forwards; any when
     /// `None`.
     pub udp_ports: Option<(u16, u16)>,
+    /// A STUN server, "host:port": each session asks it the address a NAT maps its sockets to,
+    /// and gives it to the clients for theirs. None by default: the server and its clients
+    /// then reveal their addresses to no third party.
+    pub stun: Option<String>,
 }
 
 /// Where a stream's encoded frames `F` go for one viewer, called on the encoder's thread.
@@ -165,6 +169,8 @@ pub struct Start {
     /// The host's public addresses, `Network::public_address` resolved: announced on the
     /// ports of the sockets that reach them.
     pub public: Vec<std::net::IpAddr>,
+    /// The STUN server, `Network::stun` resolved.
+    pub stun: Option<std::net::SocketAddr>,
 }
 
 pub use crate::peer::Peer as Session;

@@ -94,6 +94,9 @@ message SessionDescription {
   // once the client is accepted, its account checked: a client that is not learns nothing of
   // the VM, not even its name.
   string vm_name = 2;
+  // In the server's offer: the ICE servers the client may use to find its own reflexive
+  // address, as URIs (RFC 7064: "stun:host:port"), the same STUN server the server asks.
+  repeated string ice_servers = 3;
 }
 
 message IceCandidate {
