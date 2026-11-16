@@ -91,6 +91,8 @@ pub struct Shared {
     pub user: Arc<User>,
     /// The bounds of the bandwidth estimation.
     pub bitrates: Bitrates,
+    /// How clients reach the host from outside.
+    pub network: crate::transport::Network,
     /// Which viewers decode the video in 10 bits.
     pub depths: Arc<Depths>,
 }
@@ -455,6 +457,22 @@ async fn open(
     Ok(())
 }
 
+/// The addresses of the host's public name or address, for a session's candidates: none when
+/// it does not resolve, the session then reachable on the host's own addresses only.
+async fn public_addresses(name: &str) -> Vec<std::net::IpAddr> {
+    match tokio::net::lookup_host((name, 0)).await {
+        Ok(addresses) => {
+            let mut ips: Vec<std::net::IpAddr> = addresses.map(|a| a.ip()).collect();
+            ips.dedup();
+            ips
+        }
+        Err(e) => {
+            warn!(name, error = %e, "public address not resolved: the session announces none");
+            Vec::new()
+        }
+    }
+}
+
 /// Whether `grant` names the VM `uuid`: "*", its UUID, or a name the VM goes by now. A name
 /// that names no VM, or several, names none.
 async fn granted(vms: &Vms, grant: &crate::access::Grant, uuid: &str) -> bool {
@@ -536,6 +554,10 @@ async fn viewer(
     let (signals_tx, mut signals) = mpsc::unbounded_channel();
     let requests = shared.requests.clone();
     let consoles: Vec<u32> = shared.screens.iter().map(|s| s.console).collect();
+    let public = match &shared.network.public_address {
+        Some(name) => public_addresses(name).await,
+        None => Vec::new(),
+    };
     let started = Session::start(
         Start {
             codec: shared.codec,
@@ -548,6 +570,8 @@ async fn viewer(
             audio_viewers: shared.audio_viewers.clone(),
             mic: (!shadow).then(|| shared.mic.clone()),
             bitrates: shared.bitrates,
+            udp_ports: shared.network.udp_ports,
+            public,
         },
         signals_tx,
         move |screen| {

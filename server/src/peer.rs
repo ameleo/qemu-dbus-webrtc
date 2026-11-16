@@ -126,6 +126,8 @@ impl Peer {
             audio_viewers,
             mic,
             bitrates,
+            udp_ports,
+            public,
         } = start;
         let screens = viewers.len().min(MAX_SCREENS);
         let ten_bits = ten_bits && codec.has_ten_bits();
@@ -207,7 +209,7 @@ impl Peer {
         // checks say which one reaches the client.
         let mut sockets = HashMap::new();
         for address in host_addresses()? {
-            let socket = match std::net::UdpSocket::bind((address, 0)) {
+            let socket = match bind(address, udp_ports) {
                 Ok(socket) => socket,
                 Err(e) => {
                     debug!(%address, error = %e, "no socket");
@@ -223,6 +225,26 @@ impl Peer {
         }
         if sockets.is_empty() {
             bail!("no address to receive the client on");
+        }
+        // The host's public addresses, behind a NAT that forwards the UDP ports keeping their
+        // numbers: each on the port of the socket the host reaches it from (RFC 8445 5.1.1.2,
+        // a server-reflexive candidate whose base is that socket). An address of the host's
+        // own already has its host candidate.
+        for &ip in &public {
+            if sockets.keys().any(|local| local.ip() == ip) {
+                continue;
+            }
+            let base = route_source(ip)
+                .and_then(|source| sockets.keys().find(|local| local.ip() == source).copied());
+            let Some(base) = base else {
+                warn!(%ip, "no socket on the address the host reaches its public address from");
+                continue;
+            };
+            let public = SocketAddr::new(ip, base.port());
+            let candidate = Candidate::server_reflexive(public, base, "udp")
+                .map_err(|e| anyhow!("candidate {public}: {e}"))?;
+            debug!(%public, %base, "public candidate");
+            rtc.add_local_candidate(candidate);
         }
 
         let mut change = rtc.sdp_api();
@@ -422,6 +444,42 @@ fn audio_viewer(id: u64, commands: mpsc::UnboundedSender<Command>) -> Viewer<Opu
 
 /// The addresses of the host a client may reach: neither loopback nor IPv6 link-local (which
 /// would need its interface in the candidate).
+/// A UDP socket on `address`: on a port of `ports` (inclusive) when given, the first free one
+/// from a port picked by the time, any port otherwise.
+fn bind(address: IpAddr, ports: Option<(u16, u16)>) -> std::io::Result<std::net::UdpSocket> {
+    let Some((first, last)) = ports else {
+        return std::net::UdpSocket::bind((address, 0));
+    };
+    let count = u32::from(last - first) + 1;
+    // Not always the first port: a session ending and another starting do not race for it.
+    let start = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos())
+        % count;
+    for i in 0..count {
+        let port = first + ((start + i) % count) as u16;
+        if let Ok(socket) = std::net::UdpSocket::bind((address, port)) {
+            return Ok(socket);
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AddrInUse,
+        format!("no free UDP port in {first}-{last}"),
+    ))
+}
+
+/// The host's address that packets to `ip` leave from, as its routes say: a UDP socket
+/// connected to it, which sends nothing.
+fn route_source(ip: IpAddr) -> Option<IpAddr> {
+    let unspecified: IpAddr = match ip {
+        IpAddr::V4(_) => std::net::Ipv4Addr::UNSPECIFIED.into(),
+        IpAddr::V6(_) => std::net::Ipv6Addr::UNSPECIFIED.into(),
+    };
+    let socket = std::net::UdpSocket::bind((unspecified, 0)).ok()?;
+    socket.connect((ip, 9)).ok()?;
+    socket.local_addr().ok().map(|local| local.ip())
+}
+
 fn host_addresses() -> Result<Vec<IpAddr>> {
     Ok(if_addrs::get_if_addrs()
         .context("listing the host's addresses")?
@@ -957,6 +1015,8 @@ mod tests {
                         start: 2000,
                         max: 4000,
                     },
+                    udp_ports: None,
+                    public: Vec::new(),
                 },
                 signals_tx,
                 |_| {},
@@ -1004,6 +1064,8 @@ mod tests {
                     start: 2000,
                     max: 4000,
                 },
+                udp_ports: None,
+                public: Vec::new(),
             },
             signals_tx,
             move |_| {
@@ -1145,5 +1207,56 @@ mod tests {
         drop(peer);
         assert!(viewers.lock().unwrap().is_empty() && audio_viewers.lock().unwrap().is_empty());
         feeder.join().unwrap();
+    }
+
+    /// With a range of UDP ports and a public address, the offer's candidates are on ports of
+    /// the range, and the public address comes as a server-reflexive candidate on the port of
+    /// the socket the host reaches it from (203.0.113.7: an address of TEST-NET-3, RFC 5737,
+    /// reached through the default route).
+    #[tokio::test]
+    async fn public_address_and_udp_ports() {
+        let (signals_tx, mut signals) = mpsc::unbounded_channel();
+        let public: IpAddr = "203.0.113.7".parse().unwrap();
+        let _peer = Peer::start(
+            Start {
+                codec: Codec::Vp9,
+                full_chroma: false,
+                ten_bits: false,
+                viewers: vec![VideoViewers::default()],
+                audio_viewers: SoundViewers::default(),
+                mic: None,
+                bitrates: Bitrates {
+                    min: 1000,
+                    start: 2000,
+                    max: 4000,
+                },
+                udp_ports: Some((47100, 47199)),
+                public: vec![public],
+            },
+            signals_tx,
+            |_| {},
+        )
+        .unwrap();
+        let Some(Signal::Offer(offer)) = signals.recv().await else {
+            panic!("no offer");
+        };
+        let candidates: Vec<&str> = offer
+            .lines()
+            .filter(|l| l.starts_with("a=candidate:"))
+            .collect();
+        // a=candidate:<foundation> <component> <transport> <priority> <address> <port> typ ...
+        let port = |line: &str| -> u16 { line.split(' ').nth(5).unwrap().parse().unwrap() };
+        assert!(!candidates.is_empty(), "{offer}");
+        for line in &candidates {
+            assert!((47100..=47199).contains(&port(line)), "{line}");
+        }
+        if route_source(public).is_some() {
+            let srflx: Vec<&&str> = candidates
+                .iter()
+                .filter(|l| l.contains(" typ srflx"))
+                .collect();
+            assert_eq!(srflx.len(), 1, "{offer}");
+            assert!(srflx[0].contains(" 203.0.113.7 "), "{}", srflx[0]);
+        }
     }
 }

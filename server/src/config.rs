@@ -110,6 +110,10 @@ struct Listen {
     address: Option<SocketAddr>,
     certificate: Option<PathBuf>,
     key: Option<PathBuf>,
+    /// The address clients reach the host at from outside (see `transport::Network`).
+    public_address: Option<String>,
+    /// The UDP ports of the sessions, "first-last".
+    udp_ports: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -167,6 +171,8 @@ pub struct VmConfig {
     pub bitrates: transport::Bitrates,
     /// Record each console's stream to `<prefix>-<vm uuid>-<console>.<extension>`.
     pub record: Option<String>,
+    /// How clients reach the host from outside.
+    pub network: transport::Network,
 }
 
 /// Who may open a VM's console.
@@ -369,6 +375,18 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
         }
         _ => None,
     };
+    let network = transport::Network {
+        public_address: match listen.public_address {
+            Some(name) if name.trim().is_empty() => bail!("[listen] public_address is empty"),
+            name => name,
+        },
+        udp_ports: listen
+            .udp_ports
+            .as_deref()
+            .map(udp_ports)
+            .transpose()
+            .context("in [listen] udp_ports")?,
+    };
     let listen = match listen.address {
         Some(address) => address,
         None => DEFAULT_LISTEN.parse()?,
@@ -420,12 +438,28 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
             codec_given,
             bitrates,
             record: video.record,
+            network,
         },
         listen,
         tls,
         providers,
         acme,
     })
+}
+
+/// A range of UDP ports, "first-last" (or one port): its bounds.
+fn udp_ports(text: &str) -> Result<(u16, u16)> {
+    let (first, last) = text.split_once('-').unwrap_or((text, text));
+    let port = |p: &str| -> Result<u16> {
+        p.trim()
+            .parse()
+            .with_context(|| format!("{text}: ports \"first-last\", 1 to 65535"))
+    };
+    let (first, last) = (port(first)?, port(last)?);
+    if first == 0 || first > last {
+        bail!("{text}: ports \"first-last\", 1 to 65535, the first no larger than the last");
+    }
+    Ok((first, last))
 }
 
 fn read(path: &Path) -> Result<File> {
@@ -494,6 +528,17 @@ mod tests {
         // No account at all: nothing to serve with.
         assert!(parse_with("").unwrap().auth().is_err());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn udp_port_ranges() {
+        assert_eq!(udp_ports("40000-40099").unwrap(), (40000, 40099));
+        assert_eq!(udp_ports(" 40000 - 40000 ").unwrap(), (40000, 40000));
+        assert_eq!(udp_ports("50000").unwrap(), (50000, 50000));
+        assert!(udp_ports("40099-40000").is_err());
+        assert!(udp_ports("0-10").is_err());
+        assert!(udp_ports("40000-70000").is_err());
+        assert!(udp_ports("udp").is_err());
     }
 
     #[test]

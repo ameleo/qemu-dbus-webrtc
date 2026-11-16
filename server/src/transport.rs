@@ -91,6 +91,18 @@ pub struct Bitrates {
     pub max: u32,
 }
 
+/// How clients reach the host's UDP sockets, beyond its own addresses.
+#[derive(Debug, Clone, Default)]
+pub struct Network {
+    /// The address the clients reach the host at from outside, behind a NAT that forwards the
+    /// UDP ports to it, keeping their numbers: an IP address or a host name, resolved for each
+    /// session (a dynamic DNS name follows the address).
+    pub public_address: Option<String>,
+    /// The UDP ports the sessions' sockets take, inclusive, those the NAT forwards; any when
+    /// `None`.
+    pub udp_ports: Option<(u16, u16)>,
+}
+
 /// Where a stream's encoded frames `F` go for one viewer, called on the encoder's thread.
 pub struct Viewer<F> {
     id: u64,
@@ -148,6 +160,11 @@ pub struct Start {
     /// The guest's microphone, for a client that may speak in it.
     pub mic: Option<Arc<Mic>>,
     pub bitrates: Bitrates,
+    /// The UDP ports the sockets take (see `Network::udp_ports`).
+    pub udp_ports: Option<(u16, u16)>,
+    /// The host's public addresses, `Network::public_address` resolved: announced on the
+    /// ports of the sockets that reach them.
+    pub public: Vec<std::net::IpAddr>,
 }
 
 pub use crate::peer::Peer as Session;

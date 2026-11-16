@@ -319,6 +319,7 @@ async fn start_in(
         layout: layout.clone(),
         user: Default::default(),
         bitrates: args.bitrates,
+        network: args.network.clone(),
         depths: Default::default(),
     };
     let (stop_tx, stop_rx) = oneshot::channel::<()>();

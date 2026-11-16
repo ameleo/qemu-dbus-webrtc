@@ -30,6 +30,13 @@ address = "0.0.0.0:8090"
 # obtained certificate is written (these by default).
 certificate = "/etc/qemu-dbus-webrtc/tls/cert.pem"
 key = "/etc/qemu-dbus-webrtc/tls/key.pem"
+# For clients outside the host's network, behind a NAT (a home or office router): the media
+# go over UDP, to ports the router must forward to the host, keeping their numbers. The
+# sessions take their UDP ports in `udp_ports`, and announce `public_address` (an IP address,
+# or a name resolved at each session, such as a dynamic DNS name) on them. Without these, the
+# clients reach the host on its own addresses only. Open the ports in the host's firewall too.
+# public_address = "vdi.example.com"
+# udp_ports = "40000-40099"
 
 # Certificate from an ACME CA, public or private (step-ca, OpenBao, FreeIPA...), renewed after
 # two thirds of its lifetime and reloaded without a restart. Authorizations the CA already holds

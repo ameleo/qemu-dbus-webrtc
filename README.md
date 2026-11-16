@@ -136,6 +136,12 @@ answers as for a VM the host does not run. This protects access to the server; t
 requires its own logon. For many users, a connection broker that hands out tokens naming the VM
 is planned: the accounts suit a single host.
 
+Clients outside the host's network reach it through the router: forward the HTTPS port (TCP)
+and a range of UDP ports for the media to the host, keeping their numbers, and set them in
+`[listen]`: `udp_ports = "40000-40099"` and `public_address`, the router's public address or
+a name for it. The sessions then take their UDP ports in that range and announce the public
+address on them. TURN relays, for networks that cannot forward ports, are not supported yet.
+
 Settings can be stored in a TOML file, one per host (`qemu-dbus-webrtc --config <file>`); see
 [config.example.toml](config.example.toml). Command-line options override the file:
 `--codec av1|vp9|hevc`, `--chroma 420|444`, `--software`, `--bitrate <max kbit/s>`,
