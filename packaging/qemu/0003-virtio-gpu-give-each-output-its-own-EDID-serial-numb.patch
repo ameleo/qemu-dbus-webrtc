@@ -1,0 +1,41 @@
+From 2f1a01023a5d080c2444f008b64a9ded3ba319aa Mon Sep 17 00:00:00 2001
+From: Super User <root@pc-mike1.home>
+Date: Mon, 16 Nov 2026 14:15:46 +0100
+Subject: [PATCH 3/4] virtio-gpu: give each output its own EDID serial number
+
+The EDID of every output has the same vendor (RHT), product code (0x1234)
+and serial number (0): a guest with several outputs cannot tell its
+monitors apart. Windows then keeps one set of settings for all of them,
+and a guest driver has to rewrite the identity of the secondary ones.
+
+Give output N > 0 the serial number N. Output 0 keeps no serial number,
+so a guest with one output sees the same monitor as before.
+---
+ hw/display/virtio-gpu-base.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/hw/display/virtio-gpu-base.c b/hw/display/virtio-gpu-base.c
+index 270fbaa..e2e2e91 100644
+--- a/hw/display/virtio-gpu-base.c
++++ b/hw/display/virtio-gpu-base.c
+@@ -66,6 +66,17 @@ virtio_gpu_base_generate_edid(VirtIOGPUBase *g, int scanout,
+         .prefy = g->req_state[scanout].height,
+         .refresh_rate = g->req_state[scanout].refresh_rate,
+     };
++    g_autofree char *serial = NULL;
++
++    /*
++     * Tell the outputs apart: the same vendor, model and serial number on
++     * all of them would make the guest take them for one monitor.  The first
++     * one keeps no serial number, as before.
++     */
++    if (scanout > 0) {
++        serial = g_strdup_printf("%d", scanout);
++        info.serial = serial;
++    }
+ 
+     for (output_idx = 0, node = g->conf.outputs;
+          output_idx <= scanout && node; output_idx++, node = node->next) {
+-- 
+2.52.0
+

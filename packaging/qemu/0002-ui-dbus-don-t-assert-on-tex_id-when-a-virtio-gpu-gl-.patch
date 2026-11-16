@@ -1,0 +1,48 @@
+From 532c4049c7e14caf881060169d1c86750b6baea8 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Micka=C3=ABl=20Bourneuf?= <mickael.bourneuf@ameleo.fr>
+Date: Mon, 16 Nov 2026 14:15:23 +0100
+Subject: [PATCH 2/4] ui/dbus: don't assert on tex_id when a virtio-gpu-gl
+ scanout is torn down
+
+dbus_scanout_texture() asserts tex_id != 0, but on a device reset while in
+virgl/GL scanout mode the scanout is being torn down and the function is
+called with tex_id == 0, aborting QEMU:
+
+  qemu-system-x86_64: ui/dbus-listener.c:600: dbus_scanout_texture:
+  Assertion `tex_id' failed.
+
+Reproducer: a Windows guest whose virtio-gpu (viogpu) driver is upgraded to a
+GL/3D version, then reloaded -- the PnP reload resets the device. Backtrace:
+
+  virtio_pci_reset -> virtio_gpu_gl_reset -> virtio_gpu_virgl_reset_scanout
+    -> dpy_gfx_replace_surface -> dbus_gl_gfx_switch -> dbus_scanout_texture
+
+Guard tex_id == 0 (nothing to export, keep the current scanout) instead of
+aborting on a legitimate reset.
+---
+ ui/dbus-listener.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/ui/dbus-listener.c b/ui/dbus-listener.c
+index 5a72c7e..92b6a4f 100644
+--- a/ui/dbus-listener.c
++++ b/ui/dbus-listener.c
+@@ -618,7 +618,14 @@ static void dbus_scanout_texture(DisplayChangeListener *dcl,
+     uint32_t offset[DMABUF_MAX_PLANES], stride[DMABUF_MAX_PLANES], fourcc;
+     uint64_t modifier;
+ 
+-    assert(tex_id);
++    if (!tex_id) {
++        /*
++         * No texture: the scanout is being torn down (e.g. the guest reset
++         * the virtio-gpu device on a driver reload). Nothing to export, keep
++         * the current scanout rather than aborting.
++         */
++        return;
++    }
+     if (!egl_dmabuf_export_texture(tex_id, fd, (EGLint *)offset, (EGLint *)stride,
+                                    (EGLint *)&fourcc, &num_planes, &modifier)) {
+         error_report("%s: failed to export dmabuf for texture", __func__);
+-- 
+2.52.0
+

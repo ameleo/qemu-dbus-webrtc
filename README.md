@@ -105,6 +105,7 @@ a paste there, and it connects again by itself after a lost connection. The clie
 Runtime dependencies: libva with the GPU's VA driver (Intel `iHD` or Mesa for AMD), libvpx,
 libopus, and libvirt-dbus for libvirt VMs. VMs must use `-display dbus` (libvirt:
 `<graphics type='dbus'/>`). WebRTC is implemented in Rust (str0m), without a media framework.
+[packaging/qemu](packaging/qemu) has the QEMU patches the author's hosts run with.
 Building also requires the libva, libvpx and libopus development files, and libclang for the
 generated bindings.
 
@@ -226,4 +227,5 @@ Remote Desktop Protocol's device redirection formats carried over WebRTC data ch
 
 Mozilla Public License 2.0, see [LICENSE](LICENSE). In short: you may use this code in any
 project, open or proprietary; modifications to this project's files must be published under
-the same license.
+the same license. The QEMU patches in [packaging/qemu](packaging/qemu) are under QEMU's license,
+GPL-2.0-or-later.
