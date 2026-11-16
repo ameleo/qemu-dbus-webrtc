@@ -279,6 +279,8 @@ const WORDS = {
       breakdownValue: (server, network, here) => `server ${server}, network ${network}, browser ${here}`,
       lost: "Lost", lostValue: (p, pli, f) => `packets ${p} · keyframe requests ${pli} · freezes ${f}`,
       jitter: "Jitter", sound: "Sound",
+      browser: "In the browser",
+      browserValue: (assembly, buffer, decode) => `receiving ${assembly}, buffer ${buffer}, decoding ${decode}`,
       soundValue: (jitter, concealed, buffer, lost) => `jitter ${jitter} ms, concealed ${concealed} %, buffer ${buffer} ms, lost ${lost}`,
       connection: "Connection",
     },
@@ -357,6 +359,8 @@ const WORDS = {
       breakdownValue: (server, network, here) => `serveur ${server}, réseau ${network}, navigateur ${here}`,
       lost: "Pertes", lostValue: (p, pli, f) => `paquets ${p} · images clés demandées ${pli} · gels ${f}`,
       jitter: "Gigue", sound: "Son",
+      browser: "Dans le navigateur",
+      browserValue: (assembly, buffer, decode) => `réception ${assembly}, tampon ${buffer}, décodage ${decode}`,
       soundValue: (jitter, concealed, buffer, lost) => `gigue ${jitter} ms, masqué ${concealed} %, tampon ${buffer} ms, perdus ${lost}`,
       connection: "Connexion",
     },
@@ -1557,6 +1561,7 @@ const quality = {
     const processing = perUnit(inbound, last, "totalProcessingDelay", "framesDecoded");
     const buffered = perUnit(inbound, last, "jitterBufferDelay", "jitterBufferEmittedCount");
     const decoding = perUnit(inbound, last, "totalDecodeTime", "framesDecoded");
+    const assembly = perUnit(inbound, last, "totalAssemblyTime", "framesAssembledFromMultiplePackets");
     const total = server && network != null && processing != null ? server.mean + network + processing * 1000 : null;
     const ms = (v) => (v == null ? "?" : `${num(v)} ms`);
     const lost = last ? (inbound.packetsLost || 0) - (last.packetsLost || 0) : 0;
@@ -1617,6 +1622,12 @@ const quality = {
       [r.estimate, estimate == null ? "?" : `${estimate} Mbit/s`],
       [r.latency, ms(total)],
       [r.breakdown, r.breakdownValue(ms(server?.mean), ms(network), ms(processing == null ? null : processing * 1000))],
+      // The browser's share, over the last second: from a frame's first packet to its last
+      // (totalAssemblyTime, frames of several packets), held in the jitter buffer, decoded.
+      [r.browser, r.browserValue(
+        ms(assembly == null ? null : assembly * 1000),
+        ms(buffered == null ? null : buffered * 1000),
+        ms(decoding == null ? null : decoding * 1000))],
       [r.lost, r.lostValue(inbound.packetsLost || 0, inbound.pliCount || 0, inbound.freezeCount || 0)],
       [r.jitter, ms((inbound.jitter || 0) * 1000)],
       [r.sound, soundTech],

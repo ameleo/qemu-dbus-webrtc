@@ -54,6 +54,13 @@ const CAMERA_PT: u8 = 104;
 const CAMERA_RTX_PT: u8 = 105;
 const AUDIO_PT: u8 = 111;
 
+/// The playout delay of the screens' frames, minimum and maximum, in RTP's playout-delay
+/// extension (http://www.webrtc.org/experiments/rtp-hdrext/playout-delay): 0 and 0, shown as
+/// soon as decoded. A browser otherwise holds video in its jitter buffer to smooth it out,
+/// some 70 ms in Chrome over the Internet whatever jitterBufferTarget asks (a minimum), where
+/// the native client shows at once: a lag a console feels at every click.
+const PLAYOUT_DELAY: (u64, u64) = (0, 0);
+
 /// A connection whose ICE checks fail this long is over: a short loss of the network lets it
 /// come back.
 const DISCONNECTED_GRACE: Duration = Duration::from_secs(10);
@@ -139,6 +146,9 @@ impl Peer {
             .clear_codecs()
             .enable_bwe(Some(Bitrate::kbps(u64::from(bitrates.start))))
             .set_sctp_max_buffered_amount(MAX_BUFFERED)
+            // The playout delay the screens' frames carry (see `PLAYOUT_DELAY`), an id the
+            // standard mappings leave free.
+            .set_extension(5, str0m::rtp::Extension::PlayoutDelay)
             .set_stats_interval(Some(Duration::from_secs(5)));
         let codecs = config.codec_config();
         // The cameras' H.264 first: a client sends its cameras in the first codec of the
@@ -710,7 +720,12 @@ impl State {
                 let elapsed = at.saturating_duration_since(self.start);
                 let time = MediaTime::from_90khz((elapsed.as_micros() * 9 / 100) as u64);
                 if let Some(writer) = self.rtc.writer(mid)
-                    && let Err(e) = writer.write(VIDEO_PT.into(), at, time, data)
+                    && let Err(e) = writer
+                        .playout_delay(
+                            MediaTime::from_hundredths(PLAYOUT_DELAY.0),
+                            MediaTime::from_hundredths(PLAYOUT_DELAY.1),
+                        )
+                        .write(VIDEO_PT.into(), at, time, data)
                 {
                     debug!(screen, error = %e, "frame not sent");
                 }
@@ -1097,6 +1112,11 @@ mod tests {
             panic!("no offer");
         };
         assert!(offer.contains("a=fmtp:96 profile-id=0"), "{offer}");
+        // The screens' frames carry their playout delay: the extension is offered.
+        assert!(
+            offer.contains("a=extmap:5 http://www.webrtc.org/experiments/rtp-hdrext/playout-delay"),
+            "{offer}"
+        );
 
         // The client, on the first address of the host.
         let address = host_addresses().unwrap()[0];
