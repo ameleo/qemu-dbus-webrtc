@@ -1483,12 +1483,15 @@ const perUnit = (now, before, total, count) => {
   return n > 0 ? (now[total] - before[total]) / n : null;
 };
 // How the session goes over the last second, for the user: "good", "fair" or "poor", and what
-// holds it back the most, if anything. `total` is the latency in ms; `lost` and `froze` count
-// packets lost and frozen frames; `network` (half the round trip), `server`, `buffered` (the
-// jitter buffer) and `decoding` are the shares of the latency, in ms; `estimate` in kbit/s.
-function diagnose({ total, lost, froze, network, server, buffered, decoding, estimate }) {
+// holds it back the most, if anything. `total` is the latency in ms; `lost` counts packets lost;
+// `network` (half the round trip), `server`, `buffered` (the jitter buffer) and `decoding` are
+// the shares of the latency, in ms; `estimate` in kbit/s. The browser's frozen frames do not
+// count: it counts a freeze for an interval between two frames of at least the larger of 3
+// times and 150 ms more than the mean of the last 30 (webrtc-stats, freezeCount), and a
+// desktop that stops moving, sent then at 4 frames a second, makes one with no picture held up.
+function diagnose({ total, lost, network, server, buffered, decoding, estimate }) {
   if (total == null) return { level: null, cause: null };
-  const level = total > 150 || froze > 0 ? "poor" : total > 60 || lost > 0 ? "fair" : "good";
+  const level = total > 150 ? "poor" : total > 60 || lost > 0 ? "fair" : "good";
   if (level === "good") return { level, cause: null };
   if (lost > 0) return { level, cause: "losses" };
   // The largest share past what it takes when all goes well.
@@ -1565,9 +1568,8 @@ const quality = {
     const total = server && network != null && processing != null ? server.mean + network + processing * 1000 : null;
     const ms = (v) => (v == null ? "?" : `${num(v)} ms`);
     const lost = last ? (inbound.packetsLost || 0) - (last.packetsLost || 0) : 0;
-    const froze = last ? (inbound.freezeCount || 0) - (last.freezeCount || 0) : 0;
     const { level, cause } = diagnose({
-      total, lost, froze, network, server: server?.mean,
+      total, lost, network, server: server?.mean,
       buffered: buffered == null ? null : buffered * 1000,
       decoding: decoding == null ? null : decoding * 1000,
       estimate: control.estimate,
