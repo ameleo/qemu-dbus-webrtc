@@ -102,8 +102,9 @@ pub struct Network {
     /// `None`.
     pub udp_ports: Option<(u16, u16)>,
     /// A STUN server, "host:port": each session asks it the address a NAT maps its sockets to,
-    /// and gives it to the clients for theirs. None by default: the server and its clients
-    /// then reveal their addresses to no third party.
+    /// and gives it to the clients for theirs. Without one, the server and its clients reveal
+    /// their addresses to no third party, and a client outside the host's network reaches it
+    /// only through forwarded ports.
     pub stun: Option<String>,
 }
 

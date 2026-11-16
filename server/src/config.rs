@@ -39,6 +39,10 @@ const DEFAULT_CERTIFICATE: &str = "/etc/qemu-dbus-webrtc/tls/cert.pem";
 const DEFAULT_KEY: &str = "/etc/qemu-dbus-webrtc/tls/key.pem";
 const DEFAULT_ACME_DIR: &str = "/etc/qemu-dbus-webrtc/acme";
 
+/// The STUN server by default, as WebRTC clients commonly use: without one, a client outside
+/// the host's network, behind a NAT, reaches no session unless the router forwards ports to it.
+const DEFAULT_STUN: &str = "stun.l.google.com:19302";
+
 /// Where libvirt puts the D-Bus bus of a domain's display.
 const LIBVIRT_DBUS_DIR: &str = "/run/libvirt/qemu/dbus";
 /// Where Proxmox VE puts the VMs' QMP sockets and their configurations.
@@ -114,7 +118,8 @@ struct Listen {
     public_address: Option<String>,
     /// The UDP ports of the sessions, "first-last".
     udp_ports: Option<String>,
-    /// A STUN server, "host:port" (see `transport::Network`).
+    /// A STUN server, "host:port" (see `transport::Network`): `DEFAULT_STUN` when absent, none
+    /// when empty.
     stun: Option<String>,
 }
 
@@ -388,11 +393,13 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
             .map(udp_ports)
             .transpose()
             .context("in [listen] udp_ports")?,
-        stun: match listen.stun {
-            Some(server) if !server.contains(':') || server.trim().is_empty() => {
-                bail!("[listen] stun: \"host:port\", such as \"stun.example.com:3478\"")
+        stun: match listen.stun.as_deref().map(str::trim) {
+            None => Some(DEFAULT_STUN.to_owned()),
+            Some("") => None,
+            Some(server) if !server.contains(':') => {
+                bail!("[listen] stun: \"host:port\", such as \"stun.example.com:3478\", or \"\"")
             }
-            server => server,
+            Some(server) => Some(server.to_owned()),
         },
     };
     let listen = match listen.address {
@@ -536,6 +543,36 @@ mod tests {
         // No account at all: nothing to serve with.
         assert!(parse_with("").unwrap().auth().is_err());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// STUN by default, none when empty, another when named.
+    #[test]
+    fn stun_servers() {
+        let stun = |text: &str| parse_file_listen(text).map(|c| c.vm.network.stun);
+        assert_eq!(stun("").unwrap().as_deref(), Some(DEFAULT_STUN));
+        assert_eq!(stun("stun = \"\"\n").unwrap(), None);
+        assert_eq!(
+            stun("stun = \"stun.example.com:3478\"\n")
+                .unwrap()
+                .as_deref(),
+            Some("stun.example.com:3478")
+        );
+        assert!(stun("stun = \"stun.example.com\"\n").is_err());
+    }
+
+    /// A configuration file with `listen`, the [listen] section's settings, parsed.
+    fn parse_file_listen(listen: &str) -> Result<Config> {
+        let dir = std::env::temp_dir().join(format!(
+            "qdw-config-listen-{}-{}",
+            std::process::id(),
+            listen.len()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("host.toml");
+        std::fs::write(&path, format!("[listen]\n{listen}")).unwrap();
+        let config = parse(vec!["--config".into(), path.display().to_string()]);
+        std::fs::remove_dir_all(&dir).unwrap();
+        config
     }
 
     #[test]

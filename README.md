@@ -136,16 +136,18 @@ answers as for a VM the host does not run. This protects access to the server; t
 requires its own logon. For many users, a connection broker that hands out tokens naming the VM
 is planned: the accounts suit a single host.
 
-Clients outside the host's network reach it through the router: forward the HTTPS port (TCP)
-and a range of UDP ports for the media to the host, keeping their numbers, and set them in
-`[listen]`: `udp_ports = "40000-40099"` and `public_address`, the router's public address or
-a name for it. The sessions then take their UDP ports in that range and announce the public
-address on them. With no port to forward, `stun` names a STUN server: each session asks it for
-the public address and port its router gives it, the clients ask it for theirs, and both
-sides open the way through their routers by sending to each other. This works through most
-home and office routers, and reveals the host's and the clients' addresses to the STUN server;
-none is set by default. TURN relays, for the networks neither way reaches, are not supported
-yet.
+Clients outside the host's network reach it through the router, which forwards the HTTPS port
+(TCP) to the host. For the media, where STUN does not do (below), forward a range of UDP ports
+too, keeping their numbers, and set them in `[listen]`: `udp_ports = "40000-40099"` and
+`public_address`, the router's public address or a name for it. The sessions then take their
+UDP ports in that range and announce the public address on them.
+
+Most often, no port needs forwarding: each session asks a STUN server for the
+public address and port its router gives it, the clients ask it for theirs, and both sides
+open the way through their routers by sending to each other. The STUN server is Google's by
+default (`stun` in `[listen]`; `""` for none, as the server and its clients then reveal their
+addresses to no third party). TURN relays, for the networks neither way reaches, are not
+supported yet.
 
 Settings can be stored in a TOML file, one per host (`qemu-dbus-webrtc --config <file>`); see
 [config.example.toml](config.example.toml). Command-line options override the file:
