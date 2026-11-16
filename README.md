@@ -5,6 +5,10 @@ through QEMU's `-display dbus` interface and streams the display, keyboard, mous
 web browser or a native client. No guest software is required; an optional guest agent adds
 clipboard, file transfer, drive, printer and camera redirection.
 
+[![A Windows 11 VM in Chrome, from boot to desktop (video)](https://i.ytimg.com/vi/7mvYHuT8HmE/hqdefault.jpg)](https://youtu.be/7mvYHuT8HmE)
+
+*A Windows 11 VM in Chrome, from boot to desktop (1 min, YouTube).*
+
 **Status: early development.** Tested with Windows 11 and Fedora guests on an Intel Arc A380.
 Clients authenticate with an account of the server, which names the VMs it may open; tokens
 from a connection broker, client certificates and FIDO security keys are planned. The guest
