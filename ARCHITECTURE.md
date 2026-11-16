@@ -26,6 +26,15 @@ libvirt, plain QEMU) starts and stops VMs.
   and immediately when the VM stops, which it detects by polling every second. A VM without
   clients costs nothing. On shutdown, the server ends all sessions and detaches from all VMs
   before exiting.
+- **Connectivity (ICE):** each session binds its own UDP sockets (in `udp_ports` when set) and
+  offers their host candidates, `public_address` on them when set, and the address a STUN
+  server sees each socket at (server-reflexive, RFC 8489; Google's server by default). The
+  offer also gives the client the STUN server, for its own reflexive address, and the TURN
+  relays of `[[turn]]` (RFC 8656), with fixed credentials or credentials computed for the
+  session from a secret shared with the relay (the TURN REST API draft, as coturn's
+  `use-auth-secret`: valid for a day). The server runs no relay and needs no TURN client: a
+  relayed client's candidates are ordinary remote candidates to it. The client uses a relay
+  only when no direct pair works (`?relay` in the page's address forces it).
 - **Session termination:** the server always ends a session with a clean WebSocket close, so
   that clients treat a clean close as a deliberate end (the native client closes its windows)
   and a lost connection as a failure to recover from. An `Ended` message gives the reason when

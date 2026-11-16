@@ -48,6 +48,11 @@ Without guest software:
 - **Congestion control:** the bitrate follows a Google Congestion Control (GCC) bandwidth
   estimate from the client's transport-wide feedback, between 4 and 30 Mbit/s (`--bitrate` sets
   the maximum). On a constrained link, frames are dropped rather than queued.
+- **Through NATs and firewalls:** ICE, with a STUN server (Google's by default) so that clients
+  outside the host's network connect without any port to forward, and TURN relays (`[[turn]]`:
+  coturn or a TURN service) for the networks no direct path gets through, such as an office that
+  lets only TCP or TLS to port 443 out. Relay credentials are computed for each session from a
+  secret shared with the relay; the user never sees them. See [Usage](#usage).
 - **Multi-monitor:** one guest screen per client monitor, with the client's layout, up to four
   screens, each on its own video track. The bitrate is shared between them. The browser client
   does it in Chrome and Edge (the Window Management API): its "All monitors" button shows the
