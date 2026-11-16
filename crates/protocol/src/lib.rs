@@ -17,6 +17,15 @@ pub mod v1 {
     include!(concat!(env!("OUT_DIR"), "/qdw.v1.rs"));
 }
 
+/// Between a host and its connection broker, over gRPC (`proto/broker.proto`): the host is the
+/// client, the broker the server.
+#[cfg(feature = "broker")]
+pub mod broker {
+    pub mod v1 {
+        include!(concat!(env!("OUT_DIR"), "/qdw.broker.v1.rs"));
+    }
+}
+
 /// The path of the signalling WebSocket of the VM `id` on the server, `id` its UUID or its
 /// name. Its page is `/vm/<id>/`.
 pub fn signalling_path(id: &str) -> String {

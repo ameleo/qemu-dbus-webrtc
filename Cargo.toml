@@ -43,6 +43,11 @@ serde_json = "1"
 str0m = { version = "0.25", default-features = false }
 str0m-rust-crypto = "0.7"
 tokio = "1"
+# gRPC between a host and its connection broker: generated code only here; the transport, on
+# hyper and rustls, where it is used.
+tonic = { version = "0.14", default-features = false }
+tonic-prost = "0.14"
+tonic-prost-build = { version = "0.14", default-features = false }
 toml = { version = "0.9", default-features = false, features = ["parse", "display", "serde", "std"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

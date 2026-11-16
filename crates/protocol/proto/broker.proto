@@ -1,0 +1,131 @@
+// SPDX-License-Identifier: MPL-2.0
+//
+// Between a qemu-dbus-webrtc host and a connection broker. The host is the gRPC client: it
+// opens one HTTP/2 connection to the broker, and opens it again when it drops, so that it needs
+// no inbound port. It authenticates the broker by its TLS certificate, and the broker the host
+// by the host's credential in each call's metadata ("authorization: Bearer <credential>").
+//
+// On `Control`, open as long as the host is connected, the host says who it is and which VMs it
+// has, and the broker asks it for connections. For each connection the host calls `Relay`, and
+// the broker passes the messages of the user's signaling WebSocket both ways, unchanged.
+
+syntax = "proto3";
+
+package qdw.broker.v1;
+
+service Broker {
+  // The host's control stream. Its first message is a Hello.
+  rpc Control(stream HostMessage) returns (stream BrokerMessage);
+  // One relayed connection. The host's first message names it (RelayMessage.connection); then
+  // each message carries one WebSocket message, either way. The broker ends the call when the
+  // user's WebSocket closes; the host ends it when it ends the session, cleanly (status OK) or
+  // not (an error status), and the broker closes the user's WebSocket the same way.
+  rpc Relay(stream RelayMessage) returns (stream RelayMessage);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Control stream.
+
+message HostMessage {
+  oneof message {
+    Hello hello = 1;
+    Inventory inventory = 2;
+    Page page = 3;
+    ConnectFailed connect_failed = 4;
+  }
+}
+
+message BrokerMessage {
+  oneof message {
+    Connect connect = 1;
+  }
+}
+
+// The host's first message.
+message Hello {
+  // The host's identifier, unique among the broker's hosts; the broker checks it against the
+  // credential the call carries.
+  string host_id = 1;
+  // The qemu-dbus-webrtc version, as `qemu-dbus-webrtc --version` prints it.
+  string version = 2;
+}
+
+// All the VMs the host sees, after the Hello and again whenever they change: each one replaces
+// the previous one.
+message Inventory {
+  repeated Vm vms = 1;
+}
+
+message Vm {
+  // Lower-case, hyphenated (RFC 9562).
+  string uuid = 1;
+  // The names it goes by in its VM manager (a libvirt domain name, ...), which an address may
+  // use instead of the UUID.
+  repeated string names = 2;
+  bool running = 3;
+  // Off, the host starts it when a user opens it.
+  bool startable = 4;
+}
+
+// The console page the host serves, after the Hello and again if it changes (a new version): the
+// broker serves it to the users of the host's VMs.
+message Page {
+  repeated File files = 1;
+}
+
+message File {
+  // Relative to the VM's page, without a leading "/": "index.html".
+  string path = 1;
+  // Its media type, "text/html; charset=utf-8".
+  string content_type = 2;
+  bytes content = 3;
+}
+
+// The broker asks the host to call `Relay` for a user who opens a VM. The broker has checked the
+// user's sign-in and their access to the VM.
+message Connect {
+  // Random, single-use: the host's Relay call names it. The broker drops it if no call claims it
+  // within a few seconds.
+  string connection = 1;
+  string vm_uuid = 2;
+  User user = 3;
+  // View-only: the host serves it as a shadow client.
+  bool shadow = 4;
+}
+
+message User {
+  // Stable and unique: the identity provider's issuer and subject, "<iss>|<sub>".
+  string id = 1;
+  // For people: the host's logs, and later the guest.
+  string name = 2;
+}
+
+// The host could not call `Relay` for a Connect: the broker tells the user.
+message ConnectFailed {
+  string connection = 1;
+  Reason reason = 2;
+  // For the logs.
+  string detail = 3;
+
+  enum Reason {
+    REASON_UNSPECIFIED = 0;
+    // The host has no such VM (any more).
+    NO_SUCH_VM = 1;
+    // The VM is off and the host cannot start it, or starting it failed.
+    VM_OFF = 2;
+    // The host cannot serve another connection now.
+    BUSY = 3;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Relay stream.
+
+message RelayMessage {
+  oneof message {
+    // The host's first message: the Connect it answers.
+    string connection = 1;
+    // One WebSocket message, binary as all of the signaling's.
+    bytes data = 2;
+  }
+}

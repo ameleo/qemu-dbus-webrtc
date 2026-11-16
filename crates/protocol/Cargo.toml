@@ -8,9 +8,22 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# The gRPC service between a host and its connection broker (proto/broker.proto).
+broker = ["dep:tonic", "dep:tonic-prost", "dep:tonic-prost-build"]
+
 [dependencies]
 prost.workspace = true
+tonic = { workspace = true, features = ["codegen"], optional = true }
+tonic-prost = { workspace = true, optional = true }
 
 [build-dependencies]
 prost-build.workspace = true
 protox.workspace = true
+tonic-prost-build = { workspace = true, optional = true }
+
+[dev-dependencies]
+# The broker service's test: a real client and server over a local connection.
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = { workspace = true, features = ["codegen", "channel", "router", "server"] }

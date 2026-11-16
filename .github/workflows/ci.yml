@@ -26,8 +26,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         if: hashFiles('Cargo.toml') != ''
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Tests
         if: hashFiles('Cargo.toml') != ''
-        # Every crate's tests, even after one fails.
-        run: cargo test --workspace --no-fail-fast
+        # Every crate's tests, even after one fails; the features too (the broker service).
+        run: cargo test --workspace --all-features --no-fail-fast
