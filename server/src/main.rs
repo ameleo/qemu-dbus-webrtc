@@ -9,6 +9,7 @@
 mod access;
 mod acme;
 mod agent;
+mod attestation;
 mod audio;
 mod broker;
 mod cameras;
