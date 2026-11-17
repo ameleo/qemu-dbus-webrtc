@@ -13,6 +13,10 @@ publish.workspace = true
 tss-esapi = "7.6"
 reqwest.workspace = true
 ciborium.workspace = true
+tokio-rustls.workspace = true
+rustls-native-certs.workspace = true
+hyper-util.workspace = true
+tower.workspace = true
 qdw-audio.workspace = true
 qdw-protocol = { workspace = true, features = ["broker"] }
 qdw-qemu.workspace = true

@@ -37,6 +37,12 @@ ring = "0.17"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
 # CBOR, for the WebAuthn attestation object of ACME device-attest-01.
 ciborium = "0.2"
+# The host's TLS to its broker: its certificate, its key in the TPM (tokio-rustls), the system's
+# roots (rustls-native-certs), hyper's I/O for tonic's connector.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-native-certs = "0.8"
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = { version = "0.5", features = ["util"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rpassword = "7"
 rustix = "1"

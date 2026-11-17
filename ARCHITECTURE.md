@@ -36,8 +36,10 @@ libvirt, plain QEMU) starts and stops VMs.
   relayed client's candidates are ordinary remote candidates to it. The client uses a relay
   only when no direct pair works (`?relay` in the page's address forces it).
 - **Connection broker:** with `[broker]`, the host keeps a gRPC connection to the broker
-  (`qdw_protocol::broker`, `proto/broker.proto`), which it opens, in TLS, with its credential in
-  each call's metadata, and opens again when it drops (1 s, doubled up to 30 s). On the `Control`
+  (`qdw_protocol::broker`, `proto/broker.proto`), which it opens in mutual TLS, with the
+  certificate the broker's ACME server issued it (`attestation`: its key in the TPM, proven by
+  device-attest-01; renewed two thirds of the way through its validity, then connected again
+  with it), and opens again when it drops (1 s, doubled up to 30 s). On the `Control`
   stream it sends its Hello, its inventory (every VM its providers see, with its UUID, sent again
   when it changes, checked every 5 s) and its page; the broker sends `Connect` requests. For each,
   the host calls `Relay`, which carries the user's signalling messages as its WebSocket would

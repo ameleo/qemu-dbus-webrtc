@@ -3,7 +3,8 @@
 // Between a qemu-dbus-webrtc host and a connection broker. The host is the gRPC client: it
 // opens one HTTP/2 connection to the broker, and opens it again when it drops, so that it needs
 // no inbound port. It authenticates the broker by its TLS certificate, and the broker the host
-// by the host's credential in each call's metadata ("authorization: Bearer <credential>").
+// by the host's TLS client certificate, which the broker's ACME server issued it
+// (draft-ietf-acme-device-attest: its key in the host's TPM).
 //
 // On `Control`, open as long as the host is connected, the host says who it is and which VMs it
 // has, and the broker asks it for connections. For each connection the host calls `Relay`, and
@@ -45,7 +46,7 @@ message BrokerMessage {
 // The host's first message.
 message Hello {
   // The host's identifier, unique among the broker's hosts; the broker checks it against the
-  // credential the call carries.
+  // host's certificate.
   string host_id = 1;
   // The qemu-dbus-webrtc version, as `qemu-dbus-webrtc --version` prints it.
   string version = 2;

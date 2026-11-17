@@ -11,6 +11,7 @@
 //! with the authority's (`host.pem`).
 
 pub mod acme;
+pub mod identity;
 pub mod tpm;
 
 use std::path::{Path, PathBuf};
@@ -26,6 +27,7 @@ use acme::Client;
 use tpm::{Blobs, Tpm};
 
 /// How the host gets its certificate.
+#[derive(Clone)]
 pub struct Settings {
     /// The broker's ACME directory.
     pub directory: String,

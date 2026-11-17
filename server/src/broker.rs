@@ -22,8 +22,7 @@ use qdw_protocol::broker::v1::{
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::service::interceptor::InterceptedService;
-use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
+use tonic::transport::{Channel, Endpoint};
 use tracing::{Instrument, debug, info, info_span, warn};
 
 use crate::vms::Vms;
@@ -51,13 +50,12 @@ pub struct Settings {
     pub url: String,
     /// The host's identifier, unique among the broker's hosts.
     pub host_id: String,
-    /// The host's credential, which the broker checks.
-    pub credential: String,
     /// The roots that authenticate the broker, instead of the system's.
     pub ca_bundle: Option<PathBuf>,
+    /// How the host gets its certificate, with which it authenticates to the broker.
+    pub attestation: crate::attestation::Settings,
 }
 
-/// Never the credential in a log.
 impl std::fmt::Debug for Settings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Settings")
@@ -68,31 +66,29 @@ impl std::fmt::Debug for Settings {
     }
 }
 
-/// Puts the host's credential on each call.
-#[derive(Clone)]
-struct Credential(tonic::metadata::MetadataValue<tonic::metadata::Ascii>);
-
-impl tonic::service::Interceptor for Credential {
-    fn call(
-        &mut self,
-        mut request: tonic::Request<()>,
-    ) -> Result<tonic::Request<()>, tonic::Status> {
-        request
-            .metadata_mut()
-            .insert("authorization", self.0.clone());
-        Ok(request)
-    }
-}
-
-type Client = BrokerClient<InterceptedService<Channel, Credential>>;
+type Client = BrokerClient<Channel>;
 
 /// Stay connected to the broker until the server stops.
 pub async fn keep(settings: Settings, vms: Arc<Vms>) {
     let mut stopping = vms.stopping();
+    let identity = match crate::attestation::identity::Identity::new(&settings.attestation) {
+        Ok(identity) => identity,
+        Err(e) => {
+            warn!(error = %format!("{e:#}"), "no identity for the broker: not connecting");
+            return;
+        }
+    };
     let mut wait = RETRY_FIRST;
     loop {
+        // The certificate renewed when due, before connecting with it.
+        if identity.renew_at() <= std::time::SystemTime::now() {
+            info!("renewing the host's certificate");
+            if let Err(e) = crate::attestation::enroll(&settings.attestation).await {
+                warn!(error = %format!("{e:#}"), "renewing the host's certificate");
+            }
+        }
         let connected = tokio::select! {
-            connected = connected(&settings, &vms) => connected,
+            connected = connected(&settings, &identity, &vms) => connected,
             _ = stopping.wait_for(|stopping| *stopping) => return,
         };
         match connected {
@@ -118,8 +114,20 @@ pub async fn keep(settings: Settings, vms: Arc<Vms>) {
 
 /// Connect to the broker and serve it until the connection drops: `Ok` when it dropped after
 /// the host was connected, an error when it could not connect.
-async fn connected(settings: &Settings, vms: &Arc<Vms>) -> Result<()> {
-    let client = client(settings).await?;
+async fn connected(
+    settings: &Settings,
+    identity: &crate::attestation::identity::Identity,
+    vms: &Arc<Vms>,
+) -> Result<()> {
+    let client = client(settings, identity).await?;
+    // When the certificate is to be renewed: the connection ends then, and the host connects
+    // again with the new one.
+    let renew = identity
+        .renew_at()
+        .duration_since(std::time::SystemTime::now())
+        .unwrap_or_default();
+    let renew = tokio::time::sleep(renew.max(Duration::from_secs(60)));
+    tokio::pin!(renew);
     let (to_broker, outgoing) = mpsc::channel(QUEUE);
     let hello = host_message::Message::Hello(Hello {
         host_id: settings.host_id.clone(),
@@ -159,6 +167,10 @@ async fn connected(settings: &Settings, vms: &Arc<Vms>) -> Result<()> {
     check.tick().await;
     loop {
         tokio::select! {
+            () = &mut renew => {
+                info!("the host's certificate is due for renewal: connecting again after it");
+                return Ok(());
+            }
             message = from_broker.message() => match message {
                 Ok(Some(BrokerMessage { message: Some(broker_message::Message::Connect(connect)) })) => {
                     let span = info_span!("relayed", vm = connect.vm_uuid, connection = connect.connection);
@@ -188,36 +200,76 @@ async fn connected(settings: &Settings, vms: &Arc<Vms>) -> Result<()> {
     }
 }
 
-/// A gRPC client of the broker, connected: the broker authenticated by its certificate, the
-/// host by its credential on each call.
-async fn client(settings: &Settings) -> Result<Client> {
-    let mut tls = ClientTlsConfig::new();
-    tls = match &settings.ca_bundle {
+/// A gRPC client of the broker, connected in TLS: the broker authenticated by its certificate,
+/// the host by its own (TLS client authentication), its key in the TPM. HTTP/2 (ALPN).
+async fn client(
+    settings: &Settings,
+    identity: &crate::attestation::identity::Identity,
+) -> Result<Client> {
+    let mut roots = rustls::RootCertStore::empty();
+    match &settings.ca_bundle {
         Some(path) => {
+            use rustls::pki_types::pem::PemObject;
             let pem = tokio::fs::read(path)
                 .await
                 .with_context(|| format!("reading {}", path.display()))?;
-            tls.ca_certificate(Certificate::from_pem(pem))
+            for certificate in rustls::pki_types::CertificateDer::pem_slice_iter(&pem) {
+                roots.add(certificate?)?;
+            }
         }
-        None => tls.with_native_roots(),
-    };
-    let channel = Endpoint::from_shared(settings.url.clone())
+        None => {
+            for certificate in rustls_native_certs::load_native_certs().certs {
+                let _ = roots.add(certificate);
+            }
+        }
+    }
+    let certified = identity.certified_key()?;
+    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()?
+    .with_root_certificates(roots)
+    .with_client_cert_resolver(Arc::new(crate::attestation::identity::Resolver(certified)));
+    config.alpn_protocols = vec![b"h2".to_vec()];
+    let tls = tokio_rustls::TlsConnector::from(Arc::new(config));
+    let connector = tower::service_fn(move |uri: tonic::codegen::http::Uri| {
+        let tls = tls.clone();
+        async move {
+            let invalid =
+                |what: &str| std::io::Error::new(std::io::ErrorKind::InvalidInput, what.to_owned());
+            let host = uri
+                .host()
+                .ok_or_else(|| invalid("the broker's URL has no host"))?
+                .to_owned();
+            let port = uri.port_u16().unwrap_or(443);
+            let tcp = tokio::net::TcpStream::connect((host.trim_matches(['[', ']']), port)).await?;
+            tcp.set_nodelay(true)?;
+            let name =
+                rustls::pki_types::ServerName::try_from(host.trim_matches(['[', ']']).to_owned())
+                    .map_err(|_| invalid("the broker's host is no name"))?;
+            let stream = tls.connect(name, tcp).await?;
+            Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(stream))
+        }
+    });
+    // tonic refuses an https:// address it does not do the TLS of itself: the connector does
+    // it, given the address as http://; the requests keep the https:// origin.
+    let plain = settings
+        .url
+        .strip_prefix("https://")
+        .map(|rest| format!("http://{rest}"))
+        .context("the broker's URL is https://")?;
+    let origin: tonic::codegen::http::Uri = settings.url.parse().context("the broker's URL")?;
+    let channel = Endpoint::from_shared(plain)
         .context("the broker's URL")?
-        .tls_config(tls)?
+        .origin(origin)
         .connect_timeout(CONNECT_TIME)
         .http2_keep_alive_interval(KEEPALIVE)
         .keep_alive_timeout(KEEPALIVE)
         .keep_alive_while_idle(true)
-        .connect()
+        .connect_with_connector(connector)
         .await
         .context("connecting")?;
-    let credential = format!("Bearer {}", settings.credential)
-        .parse()
-        .map_err(|_| anyhow!("the credential is not printable ASCII"))?;
-    Ok(BrokerClient::with_interceptor(
-        channel,
-        Credential(credential),
-    ))
+    Ok(BrokerClient::new(channel))
 }
 
 /// The host's VMs, as the broker hears of them.
@@ -345,8 +397,8 @@ impl Relayed {
 pub fn settings(
     url: String,
     host_id: String,
-    credential: String,
     ca_bundle: Option<PathBuf>,
+    attestation: crate::attestation::Settings,
 ) -> Result<Settings> {
     if !url.starts_with("https://") {
         anyhow::bail!("the broker's URL is https://host:port: the host talks to it in TLS only");
@@ -354,14 +406,11 @@ pub fn settings(
     if host_id.trim().is_empty() {
         anyhow::bail!("no host_id");
     }
-    if credential.is_empty() || !credential.chars().all(|c| c.is_ascii_graphic()) {
-        anyhow::bail!("the credential is printable ASCII, without spaces");
-    }
     Ok(Settings {
         url,
         host_id,
-        credential,
         ca_bundle,
+        attestation,
     })
 }
 
@@ -394,11 +443,38 @@ mod tests {
         answer: mpsc::Sender<(Vec<ServerMessage>, Option<u32>)>,
     }
 
-    fn checked(metadata: &tonic::metadata::MetadataMap) -> Result<(), Status> {
-        match metadata.get("authorization").map(|v| v.to_str()) {
-            Some(Ok("Bearer s3cret")) => Ok(()),
-            _ => Err(Status::unauthenticated("no credential")),
+    /// The host authenticated with a certificate (the TLS layer verified it against the test
+    /// authority).
+    fn checked<T>(request: &Request<T>) -> Result<(), Status> {
+        match request.peer_certs() {
+            Some(certificates) if !certificates.is_empty() => Ok(()),
+            _ => Err(Status::unauthenticated("no host certificate")),
         }
+    }
+
+    /// A test authority and a host's certificate from it, written where the host keeps its own
+    /// (a host without a TPM: its key in a file). The authority's certificate, PEM.
+    fn host_certificate(state: &std::path::Path) -> String {
+        use rcgen::{
+            BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
+            KeyPair,
+        };
+        let ca_key = KeyPair::generate().unwrap();
+        let mut ca = CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca.distinguished_name
+            .push(DnType::CommonName, "Test hosts CA");
+        ca.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+        let ca_cert = ca.self_signed(&ca_key).unwrap();
+        let issuer = Issuer::new(ca, ca_key);
+        let key = KeyPair::generate().unwrap();
+        let mut host = CertificateParams::new(Vec::<String>::new()).unwrap();
+        host.distinguished_name.push(DnType::CommonName, "host-1");
+        host.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        let cert = host.signed_by(&key, &issuer).unwrap();
+        std::fs::create_dir_all(state).unwrap();
+        std::fs::write(state.join("host.pem"), cert.pem() + &ca_cert.pem()).unwrap();
+        std::fs::write(state.join("host-key.pk8"), key.serialize_der()).unwrap();
+        ca_cert.pem()
     }
 
     #[tonic::async_trait]
@@ -410,7 +486,7 @@ mod tests {
             &self,
             request: Request<Streaming<HostMessage>>,
         ) -> Result<Response<Self::ControlStream>, Status> {
-            checked(request.metadata())?;
+            checked(&request)?;
             let mut host = request.into_inner();
             let mut seen = Seen::default();
             for _ in 0..3 {
@@ -443,7 +519,7 @@ mod tests {
             &self,
             request: Request<Streaming<RelayMessage>>,
         ) -> Result<Response<Self::RelayStream>, Status> {
-            checked(request.metadata())?;
+            checked(&request)?;
             let mut host = request.into_inner();
             let Some(relay_message::Message::Connection(c)) =
                 host.message().await?.and_then(|m| m.message)
@@ -483,7 +559,7 @@ mod tests {
         }
     }
 
-    /// The host connects to a broker in TLS with its credential, says hello with its page, and
+    /// The host connects to a broker in TLS with its certificate, says hello with its page, and
     /// serves the connection it is asked for as its own clients: here a client that decodes
     /// nothing, refused with the reason, and a normal close.
     #[tokio::test]
@@ -500,9 +576,15 @@ mod tests {
         let (seen_tx, mut seen) = mpsc::channel(1);
         let (answer_tx, mut answer) = mpsc::channel(1);
         let identity = Identity::from_pem(key.cert.pem(), key.signing_key.serialize_pem());
+        let state = dir.join("state");
+        let hosts_ca = host_certificate(&state);
         tokio::spawn(
             Server::builder()
-                .tls_config(ServerTlsConfig::new().identity(identity))
+                .tls_config(
+                    ServerTlsConfig::new()
+                        .identity(identity)
+                        .client_ca_root(tonic::transport::Certificate::from_pem(hosts_ca)),
+                )
                 .unwrap()
                 .add_service(BrokerServer::new(TestBroker {
                     seen: seen_tx,
@@ -513,11 +595,19 @@ mod tests {
 
         let config = crate::config::parse(Vec::new()).unwrap();
         let vms = Vms::new(crate::providers::Providers::default(), config.vm);
+        let attestation = crate::attestation::Settings {
+            directory: format!("https://localhost:{port}/acme/directory"),
+            host_id: "host-1".into(),
+            roots: None,
+            state,
+            tpm: None,
+            enrollment: None,
+        };
         let settings = settings(
             format!("https://localhost:{port}"),
             "host-1".into(),
-            "s3cret".into(),
             Some(ca),
+            attestation,
         )
         .unwrap();
         tokio::spawn(keep(settings, vms.clone()));
@@ -543,16 +633,19 @@ mod tests {
 
     #[test]
     fn settings_refused() {
-        let ok = |url: &str, id: &str, credential: &str| {
-            settings(url.into(), id.into(), credential.into(), None).is_ok()
+        let attestation = crate::attestation::Settings {
+            directory: "https://broker:8443/acme/directory".into(),
+            host_id: "h".into(),
+            roots: None,
+            state: "/nonexistent".into(),
+            tpm: None,
+            enrollment: None,
         };
-        assert!(ok("https://broker:8443", "h", "abc"));
-        assert!(!ok("http://broker:8443", "h", "abc"));
-        assert!(!ok("https://broker:8443", " ", "abc"));
-        assert!(!ok("https://broker:8443", "h", ""));
-        assert!(!ok("https://broker:8443", "h", "a b"));
-        // The credential never shows in a log.
-        let s = settings("https://b".into(), "h".into(), "s3cret".into(), None).unwrap();
-        assert!(!format!("{s:?}").contains("s3cret"));
+        let ok = |url: &str, id: &str| {
+            settings(url.into(), id.into(), None, attestation.clone()).is_ok()
+        };
+        assert!(ok("https://broker:8443", "h"));
+        assert!(!ok("http://broker:8443", "h"));
+        assert!(!ok("https://broker:8443", " "));
     }
 }

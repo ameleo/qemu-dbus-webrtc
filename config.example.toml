@@ -72,12 +72,11 @@ key = "/etc/qemu-dbus-webrtc/tls/key.pem"
 # [broker]
 # url = "https://broker.example.com:8443"
 # host_id = "host-1"
-# credential_file = "/etc/qemu-dbus-webrtc/broker-credential"
 # ca_bundle = "/etc/qemu-dbus-webrtc/broker-ca.pem"
-# # The host's certificate to the broker, from the broker's ACME server: its key in the TPM,
-# # proven by device-attest-01. `qemu-dbus-webrtc enroll --config <this file> <enrollment kid>`
-# # the first time, with the enrollment token the broker's administrator made; without the kid
-# # afterwards, to renew it.
+# # The host authenticates to the broker with its certificate (TLS client authentication), from
+# # the broker's ACME server: its key in the TPM, proven by device-attest-01. The first time,
+# # `qemu-dbus-webrtc enroll --config <this file> <enrollment kid>`, with the enrollment token
+# # the broker's administrator made; the host renews it by itself afterwards.
 # acme_directory = "https://broker.example.com:8443/acme/directory"
 # # The TPM, its TCTI; "none" for a host the broker enrolled without a TPM.
 # tpm = "device:/dev/tpmrm0"

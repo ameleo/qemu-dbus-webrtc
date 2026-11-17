@@ -74,14 +74,11 @@ struct File {
 struct BrokerFile {
     url: String,
     host_id: String,
-    /// The file holding the host's credential, which the broker checks: kept out of this file,
-    /// readable by the service alone (a systemd credential, for one).
-    credential_file: PathBuf,
     /// The roots that authenticate the broker, instead of the system's.
     ca_bundle: Option<PathBuf>,
-    /// The broker's ACME directory, for the host's certificate to it
-    /// (`qemu-dbus-webrtc enroll`).
-    acme_directory: Option<String>,
+    /// The broker's ACME directory, for the host's certificate to it, with which it
+    /// authenticates (`qemu-dbus-webrtc enroll`).
+    acme_directory: String,
     /// The TPM that holds the host's key, its TCTI: "device:/dev/tpmrm0" by default; "none"
     /// for a host the broker enrolled without a TPM.
     tpm: Option<String>,
@@ -534,55 +531,40 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
         Some(other) => bail!("[auth] method {other}: password or none"),
     };
 
-    let attestation = match &file.broker {
-        Some(b) => match &b.acme_directory {
-            Some(directory) => {
-                if !directory.starts_with("https://") {
-                    bail!("[broker] acme_directory: {directory}: not https://");
-                }
-                let roots = match &b.ca_bundle {
-                    Some(path) => Some(
-                        std::fs::read(path)
-                            .with_context(|| format!("[broker] ca_bundle {}", path.display()))?,
-                    ),
-                    None => None,
-                };
-                let tpm = match b.tpm.as_deref() {
-                    None => Some(DEFAULT_TPM.to_owned()),
-                    Some("none") => None,
-                    Some(tcti) => Some(tcti.to_owned()),
-                };
-                Some(crate::attestation::Settings {
-                    directory: directory.clone(),
-                    host_id: b.host_id.clone(),
-                    roots,
-                    state: b
-                        .state_dir
-                        .clone()
-                        .unwrap_or_else(|| PathBuf::from(DEFAULT_STATE_DIR)),
-                    tpm,
-                    enrollment: None,
-                })
-            }
-            None => None,
-        },
-        None => None,
-    };
-    let broker = match file.broker {
-        None => None,
+    let (broker, attestation) = match file.broker {
+        None => (None, None),
         Some(b) => {
-            let credential = std::fs::read_to_string(&b.credential_file).with_context(|| {
-                format!("[broker] credential_file {}", b.credential_file.display())
-            })?;
-            Some(
-                crate::broker::settings(
-                    b.url,
-                    b.host_id,
-                    credential.trim().to_owned(),
-                    b.ca_bundle,
-                )
-                .context("in [broker]")?,
-            )
+            let directory = &b.acme_directory;
+            if !directory.starts_with("https://") {
+                bail!("[broker] acme_directory: {directory}: not https://");
+            }
+            let roots = match &b.ca_bundle {
+                Some(path) => Some(
+                    std::fs::read(path)
+                        .with_context(|| format!("[broker] ca_bundle {}", path.display()))?,
+                ),
+                None => None,
+            };
+            let tpm = match b.tpm.as_deref() {
+                None => Some(DEFAULT_TPM.to_owned()),
+                Some("none") => None,
+                Some(tcti) => Some(tcti.to_owned()),
+            };
+            let attestation = crate::attestation::Settings {
+                directory: directory.clone(),
+                host_id: b.host_id.clone(),
+                roots,
+                state: b
+                    .state_dir
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from(DEFAULT_STATE_DIR)),
+                tpm,
+                enrollment: None,
+            };
+            let broker =
+                crate::broker::settings(b.url, b.host_id, b.ca_bundle, attestation.clone())
+                    .context("in [broker]")?;
+            (Some(broker), Some(attestation))
         }
     };
     Ok(Config {
