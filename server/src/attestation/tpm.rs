@@ -252,14 +252,23 @@ impl Tpm {
         let hmac = self
             .with_ek_policy(ek, |ctx| ctx.load(ek, private, public))
             .context("loading the broker's key")?;
-        let certified = self.context.execute_with_nullauth_session(|ctx| {
-            ctx.certify(
-                ObjectHandle::from(ak),
-                hmac,
-                Data::try_from(nonce.to_vec())?,
-                SignatureScheme::Null,
-            )
-        });
+        // Two authorizations: the certified object's and the signing key's (TPM 2.0 Part 3,
+        // TPM2_Certify), empty passwords both.
+        let certified = self.context.execute_with_sessions(
+            (
+                Some(tss_esapi::interface_types::session_handles::AuthSession::Password),
+                Some(tss_esapi::interface_types::session_handles::AuthSession::Password),
+                None,
+            ),
+            |ctx| {
+                ctx.certify(
+                    ObjectHandle::from(ak),
+                    hmac,
+                    Data::try_from(nonce.to_vec())?,
+                    SignatureScheme::Null,
+                )
+            },
+        );
         self.flush(hmac);
         let (attest, signature) =
             certified.context("certifying the attestation key (TPM2_Certify)")?;

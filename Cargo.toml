@@ -33,6 +33,10 @@ prost-build = "0.14"
 protox = "0.10"
 pkg-config = "0.3"
 ring = "0.17"
+# The host's ACME client to its broker: HTTP/2 with rustls and ring.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
+# CBOR, for the WebAuthn attestation object of ACME device-attest-01.
+ciborium = "0.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rpassword = "7"
 rustix = "1"

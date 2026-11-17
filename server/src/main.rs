@@ -58,6 +58,9 @@ async fn main() -> Result<()> {
     if tools::run(&args)? {
         return Ok(());
     }
+    if args.first().map(String::as_str) == Some("enroll") {
+        return enroll(&args[1..]).await;
+    }
     let mut config = config::parse_args()?;
     info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -167,4 +170,32 @@ async fn serve_pages(
         }));
     }
     Ok(tokio::spawn(web::serve(listen, rustls, vms, auth)))
+}
+
+/// `qemu-dbus-webrtc enroll --config <file> [<enrollment kid>]`: the host's certificate from its
+/// broker's ACME server ([broker] acme_directory). The first time, with the enrollment token
+/// the broker's administrator made (`ameleo-broker --enroll-host`): its key identifier here,
+/// its key asked on the terminal, kept out of the command line. Later, without it, the account
+/// already bound renews the certificate.
+async fn enroll(args: &[String]) -> Result<()> {
+    const USAGE: &str = "usage: qemu-dbus-webrtc enroll --config <file.toml> [<enrollment kid>]";
+    let (path, kid) = match args {
+        [option, path] if option == "--config" => (path, None),
+        [option, path, kid] if option == "--config" => (path, Some(kid.clone())),
+        _ => anyhow::bail!(USAGE),
+    };
+    let config = config::parse(vec!["--config".into(), path.clone()])?;
+    let Some(mut settings) = config.attestation else {
+        anyhow::bail!("[broker] acme_directory is not set: no certificate to get from the broker");
+    };
+    if let Some(kid) = kid {
+        let key = rpassword::prompt_password("enrollment key: ")?;
+        let key = base64::Engine::decode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            key.trim().trim_end_matches('='),
+        )
+        .map_err(|_| anyhow::anyhow!("the enrollment key is base64url"))?;
+        settings.enrollment = Some((kid, key));
+    }
+    attestation::enroll(&settings).await
 }

@@ -74,6 +74,14 @@ key = "/etc/qemu-dbus-webrtc/tls/key.pem"
 # host_id = "host-1"
 # credential_file = "/etc/qemu-dbus-webrtc/broker-credential"
 # ca_bundle = "/etc/qemu-dbus-webrtc/broker-ca.pem"
+# # The host's certificate to the broker, from the broker's ACME server: its key in the TPM,
+# # proven by device-attest-01. `qemu-dbus-webrtc enroll --config <this file> <enrollment kid>`
+# # the first time, with the enrollment token the broker's administrator made; without the kid
+# # afterwards, to renew it.
+# acme_directory = "https://broker.example.com:8443/acme/directory"
+# # The TPM, its TCTI; "none" for a host the broker enrolled without a TPM.
+# tpm = "device:/dev/tpmrm0"
+# state_dir = "/var/lib/qemu-dbus-webrtc/broker"
 
 # [acme]
 # directory = "https://ca.example.com/acme/acme/directory"

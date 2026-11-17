@@ -79,6 +79,14 @@ struct BrokerFile {
     credential_file: PathBuf,
     /// The roots that authenticate the broker, instead of the system's.
     ca_bundle: Option<PathBuf>,
+    /// The broker's ACME directory, for the host's certificate to it
+    /// (`qemu-dbus-webrtc enroll`).
+    acme_directory: Option<String>,
+    /// The TPM that holds the host's key, its TCTI: "device:/dev/tpmrm0" by default; "none"
+    /// for a host the broker enrolled without a TPM.
+    tpm: Option<String>,
+    /// Where the host keeps its ACME account, keys and certificate.
+    state_dir: Option<PathBuf>,
 }
 
 /// A TURN server the clients may relay their media through (see `turn`): its URIs, and either
@@ -295,10 +303,17 @@ pub struct Config {
     pub acme: Option<crate::acme::Acme>,
     /// The connection broker the host reaches, if it has one.
     pub broker: Option<crate::broker::Settings>,
+    /// How the host gets its certificate from the broker's ACME server, if it does.
+    pub attestation: Option<crate::attestation::Settings>,
 }
 
 /// The settings from the configuration file, if `--config` names one, then from the other
 /// options.
+/// The host's TPM by default: the kernel's resource manager.
+const DEFAULT_TPM: &str = "device:/dev/tpmrm0";
+/// Where the host keeps its certificate to the broker by default.
+const DEFAULT_STATE_DIR: &str = "/var/lib/qemu-dbus-webrtc/broker";
+
 pub fn parse_args() -> Result<Config> {
     parse(std::env::args().skip(1).collect())
 }
@@ -519,6 +534,40 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
         Some(other) => bail!("[auth] method {other}: password or none"),
     };
 
+    let attestation = match &file.broker {
+        Some(b) => match &b.acme_directory {
+            Some(directory) => {
+                if !directory.starts_with("https://") {
+                    bail!("[broker] acme_directory: {directory}: not https://");
+                }
+                let roots = match &b.ca_bundle {
+                    Some(path) => Some(
+                        std::fs::read(path)
+                            .with_context(|| format!("[broker] ca_bundle {}", path.display()))?,
+                    ),
+                    None => None,
+                };
+                let tpm = match b.tpm.as_deref() {
+                    None => Some(DEFAULT_TPM.to_owned()),
+                    Some("none") => None,
+                    Some(tcti) => Some(tcti.to_owned()),
+                };
+                Some(crate::attestation::Settings {
+                    directory: directory.clone(),
+                    host_id: b.host_id.clone(),
+                    roots,
+                    state: b
+                        .state_dir
+                        .clone()
+                        .unwrap_or_else(|| PathBuf::from(DEFAULT_STATE_DIR)),
+                    tpm,
+                    enrollment: None,
+                })
+            }
+            None => None,
+        },
+        None => None,
+    };
     let broker = match file.broker {
         None => None,
         Some(b) => {
@@ -557,6 +606,7 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
         providers,
         acme,
         broker,
+        attestation,
     })
 }
 

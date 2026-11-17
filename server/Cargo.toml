@@ -11,6 +11,8 @@ publish.workspace = true
 [dependencies]
 # The host's TPM, for its certificate to the broker: the TCG's stack (tpm2-tss), its Enhanced System API.
 tss-esapi = "7.6"
+reqwest.workspace = true
+ciborium.workspace = true
 qdw-audio.workspace = true
 qdw-protocol = { workspace = true, features = ["broker"] }
 qdw-qemu.workspace = true
