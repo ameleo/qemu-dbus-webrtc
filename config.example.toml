@@ -69,6 +69,10 @@ key = "/etc/qemu-dbus-webrtc/tls/key.pem"
 # host among the broker's; `credential_file` holds the credential the broker gave this host
 # (readable by the service alone); `ca_bundle`, the roots of the broker's certificate when not
 # the system's.
+# A connection broker, the deployment's one entry point: the host then serves its VMs through
+# it only, and opens no port. Either a broker or direct access, not both: with [broker], the
+# host refuses [auth], [[account]], [acme], [[turn]] and [listen]'s address, certificate and
+# key (its public_address, udp_ports and stun stay, for the media).
 # [broker]
 # url = "https://broker.example.com:8443"
 # host_id = "host-1"

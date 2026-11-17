@@ -35,7 +35,10 @@ libvirt, plain QEMU) starts and stops VMs.
   `use-auth-secret`: valid for a day). The server runs no relay and needs no TURN client: a
   relayed client's candidates are ordinary remote candidates to it. The client uses a relay
   only when no direct pair works (`?relay` in the page's address forces it).
-- **Connection broker:** with `[broker]`, the host keeps a gRPC connection to the broker
+- **Connection broker:** with `[broker]`, the host serves its VMs through the broker only,
+  and opens no port: the configuration refuses, beside it, whatever would open its own pages
+  (`[auth]`, `[[account]]`, `[acme]`, `[listen]`'s address and certificate) or add a relay of
+  its own (`[[turn]]`). The host keeps a gRPC connection to the broker
   (`qdw_protocol::broker`, `proto/broker.proto`), which it opens in mutual TLS, with the
   certificate the broker's ACME server issued it (`attestation`: its key in the TPM, proven by
   device-attest-01; renewed two thirds of the way through its validity, then connected again

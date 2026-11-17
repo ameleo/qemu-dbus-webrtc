@@ -271,8 +271,9 @@ impl Config {
 
     /// Whether the host serves its own pages: with a broker, only when it has both accounts and
     /// a certificate; without one, always (and `auth` and `tls` say what is missing).
+    /// Whether the host serves its own pages: never with a broker, which serves them.
     pub fn serves_pages(&self) -> bool {
-        self.broker.is_none() || (self.auth.is_some() && self.tls.is_some())
+        self.broker.is_none()
     }
 
     /// The certificate to serve with.
@@ -428,6 +429,37 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
     let max = max_bitrate.unwrap_or(MAX_BITRATE).max(min);
     let start = bitrate.start.unwrap_or(START_BITRATE).clamp(min, max);
     let bitrates = transport::Bitrates { min, start, max };
+
+    // A host with a broker serves its VMs through it only: the broker is the deployment's one
+    // entry point (its bastion). Nothing that opens the host's own pages, nor a relay of the
+    // host's own beside the broker's.
+    if file.broker.is_some() {
+        let mut direct = Vec::new();
+        if listen.address.is_some() {
+            direct.push("[listen] address (--listen)");
+        }
+        if listen.certificate.is_some() || listen.key.is_some() {
+            direct.push("[listen] certificate and key (--tls)");
+        }
+        if file.acme.is_some() {
+            direct.push("[acme]");
+        }
+        if file.auth.method.is_some() || file.auth.user.is_some() || file.auth.password.is_some() {
+            direct.push("[auth]");
+        }
+        if !file.account.is_empty() {
+            direct.push("[[account]]");
+        }
+        if !file.turn.is_empty() {
+            direct.push("[[turn]]");
+        }
+        if !direct.is_empty() {
+            bail!(
+                "with [broker], the host serves its VMs through the broker only: remove {}",
+                direct.join(", ")
+            );
+        }
+    }
 
     // With ACME, the certificate is the one it gets, where [listen] says or by default.
     if file.acme.is_some() {
@@ -819,5 +851,77 @@ mod tests {
             (c.vm.bitrates.min, c.vm.bitrates.start, c.vm.bitrates.max),
             (4000, 10_000, 30_000)
         );
+    }
+
+    /// With [broker], the host serves through the broker only: whatever would open its own
+    /// pages, or add a relay of its own, is refused; the media's own settings stay.
+    #[test]
+    fn a_broker_or_direct_access_not_both() {
+        let dir = std::env::temp_dir().join(format!("qdw-config-broker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let broker = "[broker]\nurl = \"https://broker:7443\"\nhost_id = \"host-1\"\n\
+                      acme_directory = \"https://broker:7443/acme/directory\"\n\
+                      tpm = \"none\"\n";
+        let parsed = |text: &str, more: &str| {
+            std::fs::write(&path, text).unwrap();
+            parse(args(&format!("--config {} {more}", path.display())))
+        };
+        let only = parsed(
+            &format!(
+                "[listen]\npublic_address = \"203.0.113.1\"\nudp_ports = \"40000-40099\"\n{broker}"
+            ),
+            "",
+        )
+        .unwrap();
+        assert!(only.broker.is_some() && !only.serves_pages());
+        for (text, more, named) in [
+            (
+                format!("[listen]\naddress = \"0.0.0.0:8090\"\n{broker}"),
+                "",
+                "[listen] address",
+            ),
+            (
+                broker.to_owned(),
+                "--listen 0.0.0.0:8090",
+                "[listen] address",
+            ),
+            (
+                broker.to_owned(),
+                "--tls c.pem k.pem",
+                "certificate and key",
+            ),
+            (format!("[auth]\nmethod = \"none\"\n{broker}"), "", "[auth]"),
+            (
+                format!("[[account]]\nuser = \"a\"\npassword = \"x\"\nvms = [\"*\"]\n{broker}"),
+                "",
+                "[[account]]",
+            ),
+            (
+                format!("[acme]\ndirectory = \"https://ca/d\"\ndomains = [\"h\"]\n{broker}"),
+                "",
+                "[acme]",
+            ),
+            (
+                format!("[[turn]]\nurls = [\"turn:r:3478\"]\nsecret = \"s\"\n{broker}"),
+                "",
+                "[[turn]]",
+            ),
+        ] {
+            let error = format!(
+                "{:#}",
+                parsed(&text, more)
+                    .err()
+                    .unwrap_or_else(|| panic!("{text} {more}"))
+            );
+            assert!(
+                error.contains("through the broker only") && error.contains(named),
+                "{error}"
+            );
+        }
+        // Without a broker, the host serves its own pages, as before.
+        let direct = parsed("[listen]\naddress = \"0.0.0.0:8090\"\n", "").unwrap();
+        assert!(direct.serves_pages());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -80,12 +80,12 @@ async fn main() -> Result<()> {
     // Fail now, saying why, rather than at the first frame.
     gpus::check(&found, &vm.settings)?;
 
-    // With a broker, the host serves its own pages only if it has accounts and a certificate
-    // for them: otherwise it opens no port at all, the broker relaying its users.
+    // With a broker, the host serves its VMs through it only, and opens no port at all: the
+    // broker relays its users (the configuration refuses anything else beside [broker]).
     let pages = if config.serves_pages() {
         Some((config.tls()?, config.auth()?))
     } else {
-        info!("no accounts or no certificate: the host serves its VMs through the broker only");
+        info!("a broker: the host serves its VMs through it only");
         None
     };
     let vms = vms::Vms::new(config.providers, config.vm);
