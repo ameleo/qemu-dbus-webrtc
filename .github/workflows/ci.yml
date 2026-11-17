@@ -20,7 +20,7 @@ jobs:
         # bindgen generates the bindings to them, with libclang.
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libva-dev libvpx-dev libopus-dev libclang-dev
+          sudo apt-get install -y --no-install-recommends libva-dev libvpx-dev libopus-dev libclang-dev libtss2-dev
       - name: Format
         if: hashFiles('Cargo.toml') != ''
         run: cargo fmt --all -- --check

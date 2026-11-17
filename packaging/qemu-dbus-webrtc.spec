@@ -22,6 +22,8 @@ BuildRequires:  libva-devel
 BuildRequires:  libvpx-devel
 BuildRequires:  opus-devel
 BuildRequires:  pkgconfig
+# The host's TPM, for its certificate to a broker (tss-esapi); the library is required by rpm.
+BuildRequires:  tpm2-tss-devel
 BuildRequires:  systemd-rpm-macros
 
 # The VA driver of the GPU encodes the video: Intel's (iHD, from RPM Fusion) or Mesa's.
