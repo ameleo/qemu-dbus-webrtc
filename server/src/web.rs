@@ -910,6 +910,8 @@ async fn run(
                         ice_servers: shared.network.stun.iter().map(|s| format!("stun:{s}")).collect(),
                         turn_servers: shared.network.turn.iter()
                             .map(|t| t.for_session(std::time::SystemTime::now())).collect(),
+                        // A broker in front decides it, in the offer it relays.
+                        relay_only: false,
                     })).await?
                 }
                 Some(Signal::Message(Channel::Input | Channel::Clipboard | Channel::Drive | Channel::Printer | Channel::Camera, _)) if !user => {}

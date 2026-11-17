@@ -100,6 +100,10 @@ message SessionDescription {
   // In the server's offer: the TURN servers the client may relay its media through when it
   // cannot reach the server directly, with the credentials to use.
   repeated TurnServer turn_servers = 4;
+  // In the server's offer: the media must go through one of the TURN servers, never directly
+  // (WebRTC's iceTransportPolicy "relay"). A connection broker that is the deployment's only
+  // exposed machine sets it in the offer it relays.
+  bool relay_only = 5;
 }
 
 // A TURN server, as WebRTC's RTCIceServer: the URIs it is reached at (RFC 7065:

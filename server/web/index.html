@@ -743,7 +743,7 @@ window.addEventListener("pagehide", () => {
 
 // ServerMessage: offer = 1, ice = 2, error = 3, ended = 4; SessionDescription: sdp = 1,
 // vm_name = 2, ice_servers = 3, turn_servers = 4 (TurnServer: urls = 1, username = 2,
-// credential = 3); Ended: reason = 1 (1 another client took the session over, 2
+// credential = 3), relay_only = 5; Ended: reason = 1 (1 another client took the session over, 2
 // the server stops). The server ends a session by closing the WebSocket cleanly.
 const onMessage = async (event) => {
   const message = pb.parse(new Uint8Array(event.data));
@@ -763,7 +763,12 @@ const onMessage = async (event) => {
       const urls = (turn.get(1) || []).map((url) => pb.text.decode(url));
       if (urls.length) iceServers.push({ urls, username: str(turn, 2), credential: str(turn, 3) });
     }
-    if (iceServers.length) peer.setConfiguration({ ...peer.getConfiguration(), iceServers });
+    // relay_only = 5: the media must go through a relay (a broker that is the only exposed
+    // machine says so), as ?relay asks.
+    const iceTransportPolicy = uint(offer, 5) ? "relay" : peer.getConfiguration().iceTransportPolicy;
+    if (iceServers.length || iceTransportPolicy === "relay") {
+      peer.setConfiguration({ ...peer.getConfiguration(), iceServers, iceTransportPolicy });
+    }
     await peer.setRemoteDescription({ type: "offer", sdp: str(offer, 1) });
     if (peer !== pc) return;
     // Sound both ways: the microphone can then go on the sound's track without renegotiating.
