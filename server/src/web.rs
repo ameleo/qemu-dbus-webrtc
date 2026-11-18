@@ -41,7 +41,7 @@ use crate::printers::{Printers, PrintersFollow, ViewerPrinters};
 use crate::transport::{Bitrates, Channel, Session, Signal, SoundViewers, Start, VideoViewers};
 use crate::vms::{Client, Vms};
 
-pub const PAGE: &str = include_str!("../web/index.html");
+pub use qdw_web::PAGE;
 
 /// A request from a viewer to the display loop.
 #[derive(Debug)]

@@ -2372,6 +2372,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "qdw-web"
+version = "0.2.0"
+
+[[package]]
 name = "qemu-dbus-webrtc"
 version = "0.2.0"
 dependencies = [
@@ -2389,6 +2393,7 @@ dependencies = [
  "qdw-protocol",
  "qdw-qemu",
  "qdw-video",
+ "qdw-web",
  "rcgen",
  "reqwest",
  "ring",

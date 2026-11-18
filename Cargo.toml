@@ -16,6 +16,7 @@ qdw-hw-encoder = { path = "crates/hw-encoder" }
 qdw-protocol = { path = "crates/protocol" }
 qdw-qemu = { path = "crates/qemu" }
 qdw-video = { path = "crates/video" }
+qdw-web = { path = "crates/web" }
 argon2 = { version = "0.5", features = ["std"] }
 anyhow = "1"
 # The D-Bus contract of the guest agent, shared with it.

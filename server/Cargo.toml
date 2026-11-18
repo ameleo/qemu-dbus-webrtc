@@ -19,6 +19,7 @@ hyper-util.workspace = true
 tower.workspace = true
 qdw-audio.workspace = true
 qdw-protocol = { workspace = true, features = ["broker"] }
+qdw-web.workspace = true
 qdw-qemu.workspace = true
 qdw-video.workspace = true
 rustix = { workspace = true, features = ["fs"] }
