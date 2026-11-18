@@ -5,8 +5,8 @@
 //! reaches it, never the other way round, so that it needs no inbound port.
 //!
 //! The host keeps one gRPC connection to the broker, opened again when it drops. On its control
-//! stream it says who it is, lists its VMs whenever they change, and sends its console page;
-//! the broker asks it for connections there. For each, the host opens a relay stream, which
+//! stream it says who it is and lists its VMs whenever they change; the broker asks it for
+//! connections there. It sends no console page (`Page` is deprecated): the broker serves its own. For each, the host opens a relay stream, which
 //! carries the user's signalling as a WebSocket would (`web::Socket::Relayed`), and serves it as
 //! it serves its own clients, the broker having checked the user and their access to the VM.
 
@@ -17,8 +17,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use qdw_protocol::broker::v1::broker_client::BrokerClient;
 use qdw_protocol::broker::v1::{
-    BrokerMessage, Close, Connect, ConnectFailed, File, Hello, HostMessage, Inventory, Page,
-    RelayMessage, Vm, broker_message, connect_failed, host_message, relay_message,
+    BrokerMessage, Close, Connect, ConnectFailed, Hello, HostMessage, Inventory, RelayMessage, Vm,
+    broker_message, connect_failed, host_message, relay_message,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -134,18 +134,7 @@ async fn connected(
         version: env!("CARGO_PKG_VERSION").into(),
     });
     let mut listed = inventory(vms).await;
-    let page = host_message::Message::Page(Page {
-        files: vec![File {
-            path: "index.html".into(),
-            content_type: "text/html; charset=utf-8".into(),
-            content: web::PAGE.as_bytes().to_vec(),
-        }],
-    });
-    for message in [
-        hello,
-        host_message::Message::Inventory(listed.clone()),
-        page,
-    ] {
+    for message in [hello, host_message::Message::Inventory(listed.clone())] {
         to_broker
             .send(HostMessage {
                 message: Some(message),
@@ -433,10 +422,9 @@ mod tests {
     #[derive(Default)]
     struct Seen {
         hello: Option<Hello>,
-        page: bool,
     }
 
-    /// A broker that takes the host's Hello, inventory and page, asks for one connection, and
+    /// A broker that takes the host's Hello and inventory, asks for one connection, and
     /// plays its user: a hello that decodes nothing, then the host's answer.
     struct TestBroker {
         seen: mpsc::Sender<Seen>,
@@ -489,13 +477,11 @@ mod tests {
             checked(&request)?;
             let mut host = request.into_inner();
             let mut seen = Seen::default();
-            for _ in 0..3 {
-                match host.message().await?.and_then(|m| m.message) {
-                    Some(host_message::Message::Hello(hello)) => seen.hello = Some(hello),
-                    Some(host_message::Message::Page(page)) => {
-                        seen.page = page.files.iter().any(|f| f.path == "index.html");
-                    }
-                    _ => {}
+            for _ in 0..2 {
+                if let Some(host_message::Message::Hello(hello)) =
+                    host.message().await?.and_then(|m| m.message)
+                {
+                    seen.hello = Some(hello);
                 }
             }
             self.seen.send(seen).await.unwrap();
@@ -614,7 +600,6 @@ mod tests {
 
         let seen = seen.recv().await.unwrap();
         assert_eq!(seen.hello.unwrap().host_id, "host-1");
-        assert!(seen.page);
         let (messages, close) = answer.recv().await.unwrap();
         let Some(v1::server_message::Message::Error(error)) =
             messages.first().and_then(|m| m.message.clone())

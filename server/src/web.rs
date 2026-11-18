@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::StatusCode;
-use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{Instrument, debug, info, warn};
@@ -40,8 +40,6 @@ use crate::pointer::{self, Pointer};
 use crate::printers::{Printers, PrintersFollow, ViewerPrinters};
 use crate::transport::{Bitrates, Channel, Session, Signal, SoundViewers, Start, VideoViewers};
 use crate::vms::{Client, Vms};
-
-pub use qdw_web::PAGE;
 
 /// A request from a viewer to the display loop.
 #[derive(Debug)]
@@ -207,7 +205,9 @@ pub async fn serve(
                     Redirect::permanent(&format!("{}/", uri.path()))
                 }),
             )
-            .route("/vm/{uuid}/", get(page))
+            .route("/vm/{uuid}/", get(|| page("index.html")))
+            .route("/vm/{uuid}/app.js", get(|| page("app.js")))
+            .route("/vm/{uuid}/app.css", get(|| page("app.css")))
             .route("/vm/{uuid}/signal", get(upgrade))
             .with_state(state)
             .into_make_service_with_connect_info::<SocketAddr>();
@@ -231,47 +231,24 @@ pub async fn load_tls(tls: &Tls) -> Result<axum_server::tls_rustls::RustlsConfig
         })
 }
 
-/// A VM's page, by its UUID or its name. The same page whatever the VM, whether it exists or
+/// A file of a VM's page, by its UUID or its name. The same page whatever the VM, whether it exists or
 /// not: which VMs the host runs is said only to a client that logged in (on the signalling).
 /// With the headers that keep it from being framed by another site (its keys go to the guest),
 /// and that let it run its own script and style only, and talk to this server only.
-async fn page() -> impl IntoResponse {
+async fn page(path: &'static str) -> impl IntoResponse {
     use axum::http::header;
+    let file = qdw_web::file(path).expect("a file of the page");
     (
         [
-            (header::CONTENT_SECURITY_POLICY, page_policy()),
+            (header::CONTENT_TYPE, file.content_type),
+            (header::CONTENT_SECURITY_POLICY, qdw_web::POLICY),
             (header::X_FRAME_OPTIONS, "DENY"),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
             (header::REFERRER_POLICY, "no-referrer"),
             (header::CACHE_CONTROL, "no-store"),
         ],
-        Html(PAGE),
+        file.content,
     )
-}
-
-/// The page's Content Security Policy: its inline script and style only, by their SHA-256
-/// (CSP 3), the guest pointer's images as data URLs, connections to this server only (the
-/// signalling), and no framing.
-fn page_policy() -> &'static str {
-    static POLICY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    POLICY.get_or_init(|| {
-        let digest = |open: &str, close: &str| {
-            let start = PAGE.find(open).map(|i| i + open.len()).unwrap_or(0);
-            let end = PAGE[start..].find(close).map_or(start, |i| start + i);
-            let hash = ring::digest::digest(&ring::digest::SHA256, &PAGE.as_bytes()[start..end]);
-            use base64::Engine;
-            format!(
-                "'sha256-{}'",
-                base64::engine::general_purpose::STANDARD.encode(hash.as_ref())
-            )
-        };
-        format!(
-            "default-src 'none'; script-src {script}; style-src {style}; img-src data:; \
-             connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
-            script = digest("<script>", "</script>"),
-            style = digest("<style>", "</style>"),
-        )
-    })
 }
 
 /// Whether a WebSocket upgrade comes from this server's own page, or from no page: a browser
@@ -1103,15 +1080,6 @@ mod tests {
         assert!(!same_origin(&headers(Some("http://vdi.example.com:8090"))));
         assert!(!same_origin(&headers(Some("https://vdi.example.com:8091"))));
         assert!(!same_origin(&headers(Some("null"))));
-    }
-
-    #[test]
-    fn the_page_runs_its_own_script_and_style_only() {
-        let policy = page_policy();
-        assert!(policy.contains("script-src 'sha256-"), "{policy}");
-        assert!(policy.contains("style-src 'sha256-"), "{policy}");
-        assert!(policy.contains("frame-ancestors 'none'"));
-        assert!(!policy.contains("unsafe"));
     }
 
     #[test]

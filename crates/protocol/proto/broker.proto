@@ -70,7 +70,7 @@ message Vm {
 }
 
 // The console page the host serves, after the Hello and again if it changes (a new version).
-// Deprecated: a broker must not serve it. On the broker's origin, a page from one compromised host
+// Deprecated: hosts no longer send it, and a broker must not serve it. On the broker's origin, a page from one compromised host
 // would run its script for every user of the broker, with access to the other hosts' VMs. The
 // broker serves the page of the qdw-web crate it is built with instead. To be removed.
 message Page {
