@@ -86,6 +86,13 @@ fn encode(full_chroma: bool, width: u32, height: u32, lowest: f64) {
 fn check(mut encoder: Either, full_chroma: bool, width: u32, height: u32, lowest: f64) {
     const FRAMES: u32 = 12;
     const KEYFRAME: u32 = 7;
+    /// The frame from which the bitrate is doubled.
+    const NEW_BITRATE: u32 = 4;
+    /// How much sharpness that frame may lose: Intel's VP9 driver restarts its rate control
+    /// when told a new bitrate, and spends little on the first frame after it. Measured on an
+    /// Intel Arc A380 at 4352x256: 39.05 dB in luma (44.6 on the frame before, 47.1 after),
+    /// 42.4 on some runs; the driver's output is not the same from run to run.
+    const RESTART_LOSS: f64 = 3.0;
     let (mut frames, mut sources) = (Vec::new(), Vec::new());
     for index in 0..FRAMES {
         let pixels = picture(width, height, index);
@@ -97,7 +104,7 @@ fn check(mut encoder: Either, full_chroma: bool, width: u32, height: u32, lowest
             stride: width as usize * 4,
             bottom_up: false,
         };
-        if index == 4 {
+        if index == NEW_BITRATE {
             encoder.set_bitrate(4_000_000);
         }
         let packet = encoder.encode(&frame, index == KEYFRAME);
@@ -115,7 +122,29 @@ fn check(mut encoder: Either, full_chroma: bool, width: u32, height: u32, lowest
             eprintln!("no ffmpeg: the stream is not decoded");
             return;
         };
-        check_quality(&sources, &pictures, (width, height), full_chroma, lowest);
+        let size = (width, height);
+        let restart = NEW_BITRATE as usize;
+        check_quality(
+            &sources[..restart],
+            &pictures[..restart],
+            size,
+            full_chroma,
+            lowest,
+        );
+        check_quality(
+            &sources[restart..=restart],
+            &pictures[restart..=restart],
+            size,
+            full_chroma,
+            lowest - RESTART_LOSS,
+        );
+        check_quality(
+            &sources[restart + 1..],
+            &pictures[restart + 1..],
+            size,
+            full_chroma,
+            lowest,
+        );
     }
 }
 
