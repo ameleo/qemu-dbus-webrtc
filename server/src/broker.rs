@@ -556,9 +556,8 @@ mod tests {
     }
 
     /// The host connects to a broker in TLS with its certificate, says hello, lists its VMs and
-    /// sends nothing else (no page), and
-    /// serves the connection it is asked for as its own clients: here a client that decodes
-    /// nothing, refused with the reason, and a normal close.
+    /// sends nothing else (no page), and serves the connection it is asked for as its own
+    /// clients: here a client that decodes nothing, refused with the reason, and a normal close.
     #[tokio::test]
     async fn host_serves_the_broker() {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
