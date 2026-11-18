@@ -25,7 +25,7 @@ axum = { version = "0.8", features = ["ws"] }
 # TLS with ring: no C toolchain beyond what ring itself needs.
 axum-server = { version = "0.9", default-features = false, features = ["tls-rustls-no-provider"] }
 if-addrs = "0.15"
-base64 = "0.22"
+base64 = "0.23"
 bindgen = "0.72"
 futures-util = "0.3"
 instant-acme = { version = "0.8", default-features = false, features = ["ring", "hyper-rustls", "rcgen"] }
