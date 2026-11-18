@@ -13,7 +13,7 @@ use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
 use qdw_qemu::display::Attach;
 use tracing::{debug, info, warn};
-use zbus::zvariant::OwnedObjectPath;
+use zbus::OwnedObjectPath;
 
 use crate::providers::{Candidate, Provider};
 
@@ -227,7 +227,7 @@ impl Provider for Libvirt {
 /// on some of libvirt's domain properties ("incorrect type").
 async fn domain(system: &zbus::Connection, path: OwnedObjectPath) -> Result<DomainProxy<'static>> {
     Ok(DomainProxy::builder(system)
-        .path(path)?
+        .path(path)
         .cache_properties(zbus::proxy::CacheProperties::No)
         .build()
         .await?)

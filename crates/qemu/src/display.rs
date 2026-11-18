@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
-use zbus::zvariant::OwnedFd;
+use zbus::OwnedFd;
 
 use crate::qmp::Qmp;
 
@@ -81,15 +81,13 @@ pub async fn attach(how: &Attach) -> Result<zbus::Connection> {
                 Qmp::connect(&qmp)?.add_dbus_display_client(theirs.into())
             })
             .await??;
-            ours.set_nonblocking(true)?;
-            let stream = tokio::net::UnixStream::from_std(ours)?;
             // QEMU is the authenticating side of the connection.
-            Ok(zbus::connection::Builder::unix_stream(stream)
+            Ok(zbus::connection::Builder::unix_stream(ours)
                 .p2p()
                 .build()
                 .await?)
         }
-        Attach::Bus { address } => Ok(zbus::connection::Builder::address(address.as_str())?
+        Attach::Bus { address } => Ok(zbus::connection::Builder::address(address.as_str())
             .build()
             .await
             .with_context(|| format!("connecting to D-Bus at {address}"))?),
@@ -418,13 +416,11 @@ pub async fn listen(
     events: mpsc::UnboundedSender<DisplayEvent>,
 ) -> Result<zbus::Connection> {
     let console = ConsoleProxy::builder(vm)
-        .path(format!("/org/qemu/Display1/Console_{id}"))?
+        .path(format!("/org/qemu/Display1/Console_{id}"))
         .build()
         .await?;
     let (ours, theirs) = StdUnixStream::pair()?;
-    ours.set_nonblocking(true)?;
-    let stream = tokio::net::UnixStream::from_std(ours)?;
-    let connection = zbus::connection::Builder::unix_stream(stream)
+    let connection = zbus::connection::Builder::unix_stream(ours)
         .p2p()
         .serve_at(
             LISTENER_PATH,
@@ -432,21 +428,21 @@ pub async fn listen(
                 console: id,
                 events: events.clone(),
             },
-        )?
+        )
         .serve_at(
             LISTENER_PATH,
             ScanoutDmabuf2 {
                 console: id,
                 events: events.clone(),
             },
-        )?
+        )
         .serve_at(
             LISTENER_PATH,
             Map {
                 console: id,
                 events,
             },
-        )?
+        )
         .build();
     // QEMU authenticates the listener connection before it answers RegisterListener: run both
     // at once.

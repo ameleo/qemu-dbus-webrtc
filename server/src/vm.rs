@@ -210,7 +210,7 @@ async fn start_in(
     let mut graphic = Vec::new();
     for id in ids {
         let console = display::ConsoleProxy::builder(&vm_connection)
-            .path(format!("/org/qemu/Display1/Console_{id}"))?
+            .path(format!("/org/qemu/Display1/Console_{id}"))
             .build()
             .await?;
         let kind = console.kind().await?;
@@ -326,8 +326,8 @@ async fn start_in(
     let (finished_tx, finished_rx) = tokio::sync::watch::channel(false);
     // Whether the VM still answers: its listeners do not say when QEMU goes.
     let peer = zbus::fdo::PeerProxy::builder(&vm_connection)
-        .destination("org.qemu")?
-        .path("/org/qemu/Display1/VM")?
+        .destination("org.qemu")
+        .path("/org/qemu/Display1/VM")
         .build()
         .await?;
     let gone = Aborted(tokio::spawn(gone(peer).instrument(span.clone())));

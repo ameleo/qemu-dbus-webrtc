@@ -14,7 +14,7 @@ use std::os::unix::net::UnixStream as StdUnixStream;
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
-use zbus::zvariant::OwnedFd;
+use zbus::OwnedFd;
 
 pub use ameleo_display_protocol::{
     AgentProxy, CameraProxy, ClipboardProxy, DriveProxy, FileClipboardProxy, HOST_PATH, MouseProxy,
@@ -84,14 +84,12 @@ async fn wait_port(port: &mut zbus::fdo::PropertiesChangedStream, open: bool) {
 /// the VM has no agent device.
 pub async fn connect(
     vm: &zbus::Connection,
-    host: impl FnOnce(
-        zbus::connection::Builder<'static>,
-    ) -> zbus::Result<zbus::connection::Builder<'static>>,
+    host: impl FnOnce(zbus::connection::Builder<'static>) -> zbus::connection::Builder<'static>,
 ) -> Result<Agent> {
     let chardev = find_chardev(vm).await?;
     let mut port = zbus::fdo::PropertiesProxy::builder(vm)
-        .destination("org.qemu")?
-        .path(chardev.inner().path().to_owned())?
+        .destination("org.qemu")
+        .path(chardev.inner().path().to_owned())
         .build()
         .await?
         .receive_properties_changed()
@@ -100,14 +98,12 @@ pub async fn connect(
         wait_port(&mut port, true).await;
     }
     let (ours, theirs) = StdUnixStream::pair()?;
-    ours.set_nonblocking(true)?;
-    let stream = tokio::net::UnixStream::from_std(ours)?;
     let connection = host(
-        zbus::connection::Builder::unix_stream(stream)
+        zbus::connection::Builder::unix_stream(ours)
             .p2p()
-            .auth_mechanism(zbus::AuthMechanism::Anonymous)
+            .auth_mechanism(zbus::connection::AuthMechanism::Anonymous)
             .method_timeout(CALL_TIME),
-    )?
+    )
     .build();
     // The handshake goes through QEMU once it holds the other end: both at once. An agent that
     // opened its port but never answers (stuck, or of another version) is given up after
@@ -126,8 +122,8 @@ pub async fn connect(
 /// look it up by its name.
 async fn find_chardev(vm: &zbus::Connection) -> Result<ChardevProxy<'static>> {
     let manager = zbus::fdo::ObjectManagerProxy::builder(vm)
-        .destination("org.qemu")?
-        .path("/org/qemu/Display1")?
+        .destination("org.qemu")
+        .path("/org/qemu/Display1")
         .build()
         .await?;
     for (path, interfaces) in manager.get_managed_objects().await? {
@@ -139,7 +135,7 @@ async fn find_chardev(vm: &zbus::Connection) -> Result<ChardevProxy<'static>> {
         }
         // Not cached: whether the port is open is asked when needed, never remembered.
         let chardev = ChardevProxy::builder(vm)
-            .path(path)?
+            .path(path)
             .cache_properties(zbus::proxy::CacheProperties::No)
             .build()
             .await?;

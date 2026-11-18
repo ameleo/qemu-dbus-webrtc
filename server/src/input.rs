@@ -297,22 +297,19 @@ mod tests {
     /// their changes.
     #[tokio::test]
     async fn the_mode_follows_the_guest() {
-        let (ours, theirs) = tokio::net::UnixStream::pair().unwrap();
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
         let guid = zbus::Guid::generate();
         let (qemu, connection) = tokio::join!(
             zbus::connection::Builder::unix_stream(theirs)
                 .server(guid)
-                .unwrap()
                 .p2p()
                 .serve_at(PATH, FakeMouse { absolute: true })
-                .unwrap()
                 .build(),
             zbus::connection::Builder::unix_stream(ours).p2p().build(),
         );
         let (qemu, connection) = (qemu.unwrap(), connection.unwrap());
         let mouse = qemu::MouseProxy::builder(&connection)
             .path(PATH)
-            .unwrap()
             .build()
             .await
             .unwrap();

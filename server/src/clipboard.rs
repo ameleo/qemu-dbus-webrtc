@@ -197,14 +197,14 @@ impl Clipboard {
     pub fn serve(
         self: &Arc<Self>,
         builder: zbus::connection::Builder<'static>,
-    ) -> zbus::Result<zbus::connection::Builder<'static>> {
+    ) -> zbus::connection::Builder<'static> {
         builder
             .serve_at(
                 agent::HOST_PATH,
                 HostClipboard {
                     clipboard: self.clone(),
                 },
-            )?
+            )
             .serve_at(
                 agent::HOST_PATH,
                 HostFileClipboard {

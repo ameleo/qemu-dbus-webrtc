@@ -31,7 +31,7 @@ pub async fn run(
     cameras: Arc<Cameras>,
 ) {
     loop {
-        let host = |builder| printers.serve(drives.serve(clipboard.serve(builder)?)?);
+        let host = |builder| printers.serve(drives.serve(clipboard.serve(builder)));
         match agent::connect(&vm, host).await {
             Ok(mut agent) => {
                 let connection = agent.connection.clone();

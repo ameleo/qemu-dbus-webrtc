@@ -15,7 +15,7 @@ use std::os::unix::net::UnixStream as StdUnixStream;
 
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
-use zbus::zvariant::OwnedFd;
+use zbus::OwnedFd;
 
 #[zbus::proxy(
     interface = "org.qemu.Display1.Audio",
@@ -129,11 +129,9 @@ pub async fn listen(
 ) -> Result<zbus::Connection> {
     let audio = AudioProxy::new(vm).await?;
     let (ours, theirs) = StdUnixStream::pair()?;
-    ours.set_nonblocking(true)?;
-    let stream = tokio::net::UnixStream::from_std(ours)?;
-    let connection = zbus::connection::Builder::unix_stream(stream)
+    let connection = zbus::connection::Builder::unix_stream(ours)
         .p2p()
-        .serve_at(LISTENER_PATH, Listener { events })?
+        .serve_at(LISTENER_PATH, Listener { events })
         .build();
     // QEMU authenticates the listener connection before it answers: both at once.
     let theirs: std::os::fd::OwnedFd = theirs.into();
@@ -219,11 +217,9 @@ pub async fn record(
 ) -> Result<zbus::Connection> {
     let audio = AudioProxy::new(vm).await?;
     let (ours, theirs) = StdUnixStream::pair()?;
-    ours.set_nonblocking(true)?;
-    let stream = tokio::net::UnixStream::from_std(ours)?;
-    let connection = zbus::connection::Builder::unix_stream(stream)
+    let connection = zbus::connection::Builder::unix_stream(ours)
         .p2p()
-        .serve_at(IN_LISTENER_PATH, InListener { recorder })?
+        .serve_at(IN_LISTENER_PATH, InListener { recorder })
         .build();
     // QEMU authenticates the listener connection before it answers: both at once.
     let theirs: std::os::fd::OwnedFd = theirs.into();

@@ -70,12 +70,12 @@ impl Input {
         let path = format!("/org/qemu/Display1/Console_{console}");
         Ok(Self {
             keyboard: KeyboardProxy::builder(vm)
-                .path(path.clone())?
+                .path(path.clone())
                 // The lock keys change in the guest: always ask.
                 .cache_properties(zbus::proxy::CacheProperties::No)
                 .build()
                 .await?,
-            mouse: MouseProxy::builder(vm).path(path)?.build().await?,
+            mouse: MouseProxy::builder(vm).path(path).build().await?,
         })
     }
 
