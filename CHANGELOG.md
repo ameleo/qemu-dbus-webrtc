@@ -3,6 +3,46 @@
 What each release brings. The packages are on the
 [releases page](https://github.com/ameleo/qemu-dbus-webrtc/releases).
 
+## 0.3.0 — 2026-11-18
+
+Serving through a connection broker, with the host's certificate in its TPM; relaying through
+TURN; the console page in a crate of its own; screens shown as soon as decoded.
+
+### Added
+
+- **Serving through a connection broker.** With `[broker]`, the host connects out to the
+  broker over gRPC and keeps the connection, opened again when it drops: it needs no inbound
+  port. It announces its VMs, and serves the connections the broker asks for, the broker having
+  signed the user in and checked their access. A host serves through its broker or directly,
+  not both: with `[broker]`, its own pages, accounts and certificate are refused.
+- **The host's certificate, its key in the TPM.** `qemu-dbus-webrtc enroll` gets the host's
+  certificate from the broker's ACME server (RFC 8555), with an enrollment token: the key is
+  made in the host's TPM and proven by `device-attest-01` (draft-ietf-acme-device-attest), and
+  the host authenticates to the broker with it (mutual TLS). It renews it by itself. A host
+  without a TPM keeps its key in a file, when the broker enrolled it so. The package needs
+  tpm2-tss.
+- **TURN relays.** `[[turn]]` names TURN servers (coturn, or a service), with a shared secret
+  (time-limited credentials) or fixed credentials: the page relays its media through them when
+  no direct path works (only TCP or TLS out). An offer may require the relay (`relay_only`), as
+  a broker that is the only exposed machine does; `?relay` on the page asks for it too.
+- **The QEMU patches the hosts run with**, in `packaging/qemu`.
+
+### Changed
+
+- **Screens shown as soon as decoded.** The server asks for no playout delay on the screens
+  (RTP's playout-delay extension): Chrome held each frame some 70 ms in its jitter buffer, now
+  about none. The sound keeps its buffer. The connection details show the browser's share:
+  receiving, buffering and decoding a frame.
+- **The quality dot** follows the latency and the packets lost only: a desktop that stops
+  moving no longer turns it red.
+- **The guest's screens get 96 dpi**, whatever the client's monitor: Windows stays at 100 %
+  scale, without the viogpu driver's workaround.
+- **The console page is a crate of its own, `qdw-web`**, in files with no inline script or
+  style (`index.html`, `app.js`, `app.css`), and a fixed Content Security Policy: a broker
+  serves the page it is built with, never one a host would send.
+- **zbus 6**, and ameleo-display-protocol 0.2.0: an agent on zbus 5 and the protocol's 0.1
+  speaks the same D-Bus interfaces.
+
 ## 0.2.0 — 2026-11-16
 
 A web page for daily use, accounts per VM, clients outside the host's network, and guests on a

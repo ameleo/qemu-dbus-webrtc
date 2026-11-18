@@ -4,7 +4,7 @@
 # the CI's container has the network. The tarball's top directory is %{name}-%{version}.
 
 Name:           qemu-dbus-webrtc
-Version:        0.2.0
+Version:        0.3.0
 Release:        1%{?dist}
 Summary:        WebRTC console for QEMU virtual machines
 License:        MPL-2.0
@@ -80,6 +80,14 @@ install -d -m 0700 %{buildroot}%{_sysconfdir}/qemu-dbus-webrtc/tls
 %dir %attr(0700,root,root) %{_sysconfdir}/qemu-dbus-webrtc/tls
 
 %changelog
+* Wed Nov 18 2026 Mickaël Bourneuf <mickael.bourneuf@ameleo.fr> - 0.3.0-1
+- Serving through a connection broker, the host connecting out
+- The host's certificate from the broker's ACME server, its key in the TPM
+- TURN relays, and offers that require one
+- Screens shown as soon as decoded; quality dot without the freezes; 96 dpi screens
+- The console page in the qdw-web crate, with a fixed policy
+- zbus 6
+
 * Mon Nov 16 2026 Mickaël Bourneuf <mickael.bourneuf@ameleo.fr> - 0.2.0-1
 - Web page redone: toolbar, connection details, reconnection, English and French
 - All monitors in Chrome and Edge, file drop, every key to the guest in full screen
