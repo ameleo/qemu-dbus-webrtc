@@ -54,44 +54,120 @@ pub fn file(path: &str) -> Option<&'static File> {
 mod tests {
     use super::*;
 
+    /// The HTML's elements: each tag's name and attributes, lowercase names, values unquoted.
+    fn tags(html: &str) -> Vec<(String, Vec<(String, String)>)> {
+        let mut tags = Vec::new();
+        let mut rest = html;
+        while let Some(start) = rest.find('<') {
+            rest = &rest[start + 1..];
+            if let Some(comment) = rest.strip_prefix("!--") {
+                rest = comment.split_once("-->").map_or("", |(_, after)| after);
+                continue;
+            }
+            if !rest.starts_with(|c: char| c.is_ascii_alphabetic()) {
+                continue;
+            }
+            let end = rest
+                .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
+                .unwrap_or(rest.len());
+            let name = rest[..end].to_ascii_lowercase();
+            rest = &rest[end..];
+            let mut attributes = Vec::new();
+            loop {
+                rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '/');
+                if rest.is_empty() || rest.starts_with('>') {
+                    break;
+                }
+                let end = rest
+                    .find(|c: char| c.is_whitespace() || c == '=' || c == '>' || c == '/')
+                    .unwrap_or(rest.len());
+                let attribute = rest[..end].to_ascii_lowercase();
+                rest = rest[end..].trim_start();
+                let mut value = String::new();
+                if let Some(after) = rest.strip_prefix('=') {
+                    let after = after.trim_start();
+                    let (text, left) = match after.chars().next() {
+                        Some(quote @ ('"' | '\'')) => {
+                            after[1..].split_once(quote).unwrap_or((&after[1..], ""))
+                        }
+                        _ => after.split_at(
+                            after
+                                .find(|c: char| c.is_whitespace() || c == '>')
+                                .unwrap_or(after.len()),
+                        ),
+                    };
+                    value = text.to_owned();
+                    rest = left;
+                }
+                attributes.push((attribute, value));
+            }
+            tags.push((name, attributes));
+        }
+        tags
+    }
+
     /// Inline script or style would need the policy to name them: none is allowed, nor event
-    /// handler or style attributes.
+    /// handler or style attributes, wherever they are written.
     #[test]
     fn no_inline_script_or_style() {
         let html = file("").unwrap().content;
-        assert_eq!(html.matches("<script").count(), 1);
-        assert!(html.contains("<script src=\"app.js\"></script>"));
-        assert!(!html.contains("<style"));
-        assert!(!html.contains(" style="));
-        let attribute = event_handler(html);
-        assert!(attribute.is_none(), "{attribute:?}");
+        let elements = tags(html);
+        assert!(elements.iter().all(|(name, _)| name != "style"));
+        for (name, attributes) in &elements {
+            for (attribute, _) in attributes {
+                assert!(
+                    attribute != "style" && !attribute.starts_with("on"),
+                    "<{name} {attribute}=…>"
+                );
+            }
+        }
+        // Each script is a file: its element is empty.
+        let mut rest = html;
+        while let Some(start) = rest.find("<script") {
+            let element = &rest[start..];
+            let open = element.find('>').unwrap() + 1;
+            assert!(element[open..].starts_with("</script>"), "an inline script");
+            assert!(element[..open].contains(" src="), "a script without src");
+            rest = &element[open..];
+        }
+        // The parser sees through any whitespace.
+        let sample = tags("<div\n  onclick=\"x()\"\tstyle='a'>");
+        assert_eq!(sample[0].1[0].0, "onclick");
+        assert_eq!(sample[0].1[1], ("style".into(), "a".into()));
     }
 
-    /// The first ` on…=` attribute of the HTML, if any.
-    fn event_handler(html: &str) -> Option<&str> {
-        html.match_indices(" on")
-            .map(|(i, _)| &html[i + 1..])
-            .find_map(|rest| {
-                let name: String = rest.chars().take_while(char::is_ascii_lowercase).collect();
-                (name.len() > 2 && rest[name.len()..].starts_with('='))
-                    .then_some(&rest[..name.len()])
-            })
-    }
-
+    /// Every file the HTML refers to is one of the page's.
     #[test]
     fn every_file_the_html_names() {
         let html = file("index.html").unwrap().content;
-        for name in ["app.js", "app.css"] {
-            assert!(html.contains(&format!("\"{name}\"")), "{name}");
-            assert!(file(name).is_some(), "{name}");
+        let mut named = Vec::new();
+        for (_, attributes) in tags(html) {
+            for (attribute, value) in attributes {
+                if attribute == "src" || attribute == "href" {
+                    assert!(file(&value).is_some(), "{value}");
+                    named.push(value);
+                }
+            }
         }
+        named.sort();
+        assert_eq!(named, ["app.css", "app.js"]);
         assert!(file("../index.html").is_none());
     }
 
+    /// Scripts and styles from the page's own origin only: no hash, nonce or 'unsafe-…' source.
     #[test]
     fn the_policy_allows_nothing_inline() {
-        assert!(!POLICY.contains("unsafe"));
-        assert!(!POLICY.contains("sha256-"));
-        assert!(POLICY.contains("frame-ancestors 'none'"));
+        let directive = |name: &str| -> Vec<&str> {
+            POLICY
+                .split(';')
+                .map(|d| d.split_whitespace().collect::<Vec<_>>())
+                .find(|d| d.first() == Some(&name))
+                .unwrap_or_else(|| panic!("{name}"))[1..]
+                .to_vec()
+        };
+        assert_eq!(directive("default-src"), ["'none'"]);
+        assert_eq!(directive("script-src"), ["'self'"]);
+        assert_eq!(directive("style-src"), ["'self'"]);
+        assert_eq!(directive("frame-ancestors"), ["'none'"]);
     }
 }

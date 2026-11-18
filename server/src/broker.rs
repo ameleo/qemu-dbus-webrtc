@@ -422,6 +422,10 @@ mod tests {
     #[derive(Default)]
     struct Seen {
         hello: Option<Hello>,
+        /// Whether the second message was the inventory.
+        inventory: bool,
+        /// A third message soon after: the host sends nothing more until its VMs change.
+        more: bool,
     }
 
     /// A broker that takes the host's Hello and inventory, asks for one connection, and
@@ -477,13 +481,18 @@ mod tests {
             checked(&request)?;
             let mut host = request.into_inner();
             let mut seen = Seen::default();
-            for _ in 0..2 {
-                if let Some(host_message::Message::Hello(hello)) =
-                    host.message().await?.and_then(|m| m.message)
-                {
-                    seen.hello = Some(hello);
-                }
+            if let Some(host_message::Message::Hello(hello)) =
+                host.message().await?.and_then(|m| m.message)
+            {
+                seen.hello = Some(hello);
             }
+            seen.inventory = matches!(
+                host.message().await?.and_then(|m| m.message),
+                Some(host_message::Message::Inventory(_))
+            );
+            seen.more = tokio::time::timeout(Duration::from_millis(300), host.message())
+                .await
+                .is_ok();
             self.seen.send(seen).await.unwrap();
             let connect = BrokerMessage {
                 message: Some(broker_message::Message::Connect(Connect {
@@ -600,6 +609,9 @@ mod tests {
 
         let seen = seen.recv().await.unwrap();
         assert_eq!(seen.hello.unwrap().host_id, "host-1");
+        assert!(seen.inventory);
+        // No page: the broker serves its own.
+        assert!(!seen.more);
         let (messages, close) = answer.recv().await.unwrap();
         let Some(v1::server_message::Message::Error(error)) =
             messages.first().and_then(|m| m.message.clone())
