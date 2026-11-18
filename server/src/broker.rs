@@ -6,9 +6,10 @@
 //!
 //! The host keeps one gRPC connection to the broker, opened again when it drops. On its control
 //! stream it says who it is and lists its VMs whenever they change; the broker asks it for
-//! connections there. It sends no console page (`Page` is deprecated): the broker serves its own. For each, the host opens a relay stream, which
-//! carries the user's signalling as a WebSocket would (`web::Socket::Relayed`), and serves it as
-//! it serves its own clients, the broker having checked the user and their access to the VM.
+//! connections there. It sends no console page (`Page` is deprecated): the broker serves its
+//! own. For each connection, the host opens a relay stream, which carries the user's signalling
+//! as a WebSocket would (`web::Socket::Relayed`), and serves it as it serves its own clients, the
+//! broker having checked the user and their access to the VM.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -554,7 +555,8 @@ mod tests {
         }
     }
 
-    /// The host connects to a broker in TLS with its certificate, says hello with its page, and
+    /// The host connects to a broker in TLS with its certificate, says hello, lists its VMs and
+    /// sends nothing else (no page), and
     /// serves the connection it is asked for as its own clients: here a client that decodes
     /// nothing, refused with the reason, and a normal close.
     #[tokio::test]
