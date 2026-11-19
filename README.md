@@ -7,8 +7,8 @@ clipboard, file transfer, drive, printer and camera redirection.
 
 | Windows 11 | Fedora 44, KDE Plasma |
 |---|---|
-| [![A Windows 11 VM in Chrome, from boot to desktop (video)](https://i.ytimg.com/vi/7mvYHuT8HmE/mqdefault.jpg)](https://youtu.be/7mvYHuT8HmE) | [![A Fedora 44 VM with KDE Plasma in Chrome (video)](https://i.ytimg.com/vi/ol17aShZBco/mqdefault.jpg)](https://youtu.be/ol17aShZBco) |
-| *From boot to desktop, in Chrome (1 min, YouTube).* | *A Linux desktop in Chrome, recorded at 60 fps (YouTube).* |
+| [![A Windows 11 VM in Chrome (video)](https://i.ytimg.com/vi/KdQXhpSnNgw/mqdefault.jpg)](https://youtu.be/KdQXhpSnNgw) | [![A Fedora 44 VM with KDE Plasma in Chrome (video)](https://i.ytimg.com/vi/ol17aShZBco/mqdefault.jpg)](https://youtu.be/ol17aShZBco) |
+| *A Windows desktop in Chrome, recorded at 60 fps (YouTube).* | *A Linux desktop in Chrome, recorded at 60 fps (YouTube).* |
 
 **Status: early development.** Tested with Windows 11 and Fedora guests on an Intel Arc A380.
 Clients authenticate with an account of the server, which names the VMs it may open; tokens
