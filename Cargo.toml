@@ -51,7 +51,7 @@ subtle = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # WebRTC without a media framework; its crypto in pure Rust, as the rest of the server.
-str0m = { version = "0.25", default-features = false }
+str0m = { version = "0.26", default-features = false }
 str0m-rust-crypto = "0.7"
 tokio = "1"
 # gRPC between a host and its connection broker: generated code only here; the transport, on
