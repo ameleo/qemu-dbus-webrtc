@@ -67,12 +67,12 @@ libvirt, plain QEMU) starts and stops VMs.
   keyframes and bitrate changes apply on the next frame and the streams signal their color
   description. Up to 60 fps per screen: the encoders measure the guest's frame rate and spread
   the bitrate over it.
-- **Transport:** str0m (`session/peer.rs`), a Rust WebRTC implementation without a media framework, with
-  Google Congestion Control (GCC) driving the encoder bitrate. Each session has a task that owns
-  the str0m state and its UDP sockets (one host candidate per host address, loopback excluded).
+- **Transport:** str0m (`session/peer.rs`), a Rust WebRTC implementation without a media framework,
+  with Google Congestion Control (GCC) driving the encoder bitrate. Each session has a task that
+  owns the str0m state and its UDP sockets (one host candidate per host address, loopback excluded).
   str0m packetizes the frames, paces them at its GCC estimate (with probing), handles
-  retransmissions (NACK, RTX) and the SCTP data channels. The session decodes the microphone's
-  Opus with libopus and relays the client cameras' H.264.
+  retransmissions (NACK, RTX) and the SCTP data channels. The session decodes the microphone's Opus
+  with libopus and relays the client cameras' H.264.
 - **Per-viewer sessions:** each viewer has its own session, fed with the encoded frames of the
   screens it watches, shared without copying: one encoder per screen, whatever the number of
   viewers. A viewer that loses a frame requests a keyframe (PLI), which is forwarded to the
