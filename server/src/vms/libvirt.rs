@@ -15,7 +15,7 @@ use qdw_qemu::display::Attach;
 use tracing::{debug, info, warn};
 use zbus::OwnedObjectPath;
 
-use crate::providers::{Candidate, Provider};
+use crate::vms::providers::{Candidate, Provider};
 
 #[zbus::proxy(
     interface = "org.libvirt.Connect",

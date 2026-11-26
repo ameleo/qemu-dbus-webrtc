@@ -67,7 +67,7 @@ libvirt, plain QEMU) starts and stops VMs.
   keyframes and bitrate changes apply on the next frame and the streams signal their color
   description. Up to 60 fps per screen: the encoders measure the guest's frame rate and spread
   the bitrate over it.
-- **Transport:** str0m (`peer.rs`), a Rust WebRTC implementation without a media framework, with
+- **Transport:** str0m (`session/peer.rs`), a Rust WebRTC implementation without a media framework, with
   Google Congestion Control (GCC) driving the encoder bitrate. Each session has a task that owns
   the str0m state and its UDP sockets (one host candidate per host address, loopback excluded).
   str0m packetizes the frames, paces them at its GCC estimate (with probing), handles
@@ -104,7 +104,8 @@ libvirt, plain QEMU) starts and stops VMs.
 | `crates/video` | `qdw-video` | per-screen encoding on a dedicated thread, frame dropping, recording |
 | `crates/hw-encoder` | `qdw-hw-encoder` | VA-API encoding, with the codec headers written from their specifications |
 | `crates/audio` | `qdw-audio` | Opus encoding of the guest audio, microphone decoding |
-| `server` | `qemu-dbus-webrtc` | the server: VM providers (`providers.rs`, `libvirt.rs`, `vms.rs`), the per-VM display loop (`vm.rs`), viewer sessions (`peer.rs`), signaling, the browser page |
+| `crates/web` | `qdw-web` | the browser page, which the server and a broker serve |
+| `server` | `qemu-dbus-webrtc` | the server, in modules: `vms` (the VM managers, attaching to a VM, its display loop), `session` (the HTTPS server and signaling, each viewer's peer connection, input, screens' layout, sound), `guest` (what goes through the guest agent: clipboard, drives, printers, cameras), `network` (STUN, TURN), `host` (accounts, the server's certificate, the connection broker and the host's attested certificate to it) |
 
 The native client lives in a separate repository and implements the same protocol.
 

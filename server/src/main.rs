@@ -6,34 +6,18 @@
 //! Proxmox VE, or by hand), attaches to one when a client asks for it, encodes its screens with
 //! the host GPU, and serves them over WebRTC.
 
-mod access;
-mod acme;
-mod agent;
-mod attestation;
-mod audio;
-mod broker;
-mod cameras;
-mod clipboard;
 mod config;
-mod copied;
-mod drives;
-mod input;
-mod layout;
-mod libvirt;
-mod peer;
-mod pointer;
-mod printers;
-mod providers;
-mod stun;
+mod guest;
+mod host;
+mod network;
+mod session;
 mod tools;
-mod transport;
-mod turn;
-mod vm;
 mod vms;
-mod web;
 
 use anyhow::{Context, Result};
 use tracing::{info, warn};
+
+use crate::host::{acme, attestation, broker};
 
 use qdw_video::encode::Codec;
 use qdw_video::gpus;
@@ -136,7 +120,7 @@ async fn main() -> Result<()> {
 /// none in place can serve) and `auth`.
 async fn serve_pages(
     listen: std::net::SocketAddr,
-    tls: web::Tls,
+    tls: session::Tls,
     auth: config::Auth,
     acme: Option<acme::Acme>,
     vms: std::sync::Arc<vms::Vms>,
@@ -153,7 +137,7 @@ async fn serve_pages(
     {
         acme.renew().await.context("no certificate")?;
     }
-    let rustls = web::load_tls(&tls).await?;
+    let rustls = session::load_tls(&tls).await?;
     if let Some(acme) = acme {
         let (rustls, tls) = (rustls.clone(), tls.clone());
         tokio::spawn(acme::keep(acme, move || {
@@ -169,7 +153,7 @@ async fn serve_pages(
             });
         }));
     }
-    Ok(tokio::spawn(web::serve(listen, rustls, vms, auth)))
+    Ok(tokio::spawn(session::serve(listen, rustls, vms, auth)))
 }
 
 /// `qemu-dbus-webrtc enroll --config <file> [<enrollment kid>]`: the host's certificate from its

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! What the sessions of the viewers ([`crate::peer`]) share with the rest of the server: the
-//! signals a session gives, its data channels, and the viewers the encoders feed.
+//! What the sessions of the viewers ([`crate::session::peer`]) share with the rest of the server:
+//! the signals a session gives, its data channels, and the viewers the encoders feed.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,7 +13,7 @@ use qdw_protocol::{
 };
 use qdw_video::encode::{Codec, EncodedFrame};
 
-use crate::audio::Mic;
+use crate::session::audio::Mic;
 
 /// The guest screens a session carries, at most: one video track each.
 pub const MAX_SCREENS: usize = 4;
@@ -108,7 +108,7 @@ pub struct Network {
     pub stun: Option<String>,
     /// The TURN servers the clients may relay their media through, when they cannot reach the
     /// host directly.
-    pub turn: Vec<crate::turn::Server>,
+    pub turn: Vec<crate::network::turn::Server>,
 }
 
 /// Where a stream's encoded frames `F` go for one viewer, called on the encoder's thread.
@@ -177,4 +177,4 @@ pub struct Start {
     pub stun: Option<std::net::SocketAddr>,
 }
 
-pub use crate::peer::Peer as Session;
+pub use crate::session::peer::Peer as Session;

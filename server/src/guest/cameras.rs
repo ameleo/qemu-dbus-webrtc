@@ -23,7 +23,7 @@ use qdw_qemu::agent::{CameraProxy, camera, camera_control};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::transport::Session;
+use crate::session::transport::Session;
 
 /// Access units waiting for the guest, at most: about a second at 30 frames a second. Past
 /// that the guest takes them more slowly than they come, and they are dropped.

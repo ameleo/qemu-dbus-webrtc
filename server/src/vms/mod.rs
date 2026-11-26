@@ -4,6 +4,12 @@
 //! detaches a while after the last one left, so that a VM nobody watches costs nothing, to the
 //! server or to QEMU, and a client that reconnects finds its VM still attached.
 
+pub mod copied;
+pub mod libvirt;
+pub mod providers;
+pub mod proxmox;
+pub mod vm;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -13,9 +19,9 @@ use anyhow::{Result, bail};
 use tracing::{info, warn};
 
 use crate::config::VmConfig;
-use crate::providers::{Found, Providers};
-use crate::vm::{self, Vm};
-use crate::web;
+use crate::session;
+use crate::vms::providers::{Found, Providers};
+use vm::Vm;
 
 /// How long a VM stays attached after its last client was cut off (no clean close): it may
 /// well come back.
@@ -47,7 +53,7 @@ pub struct Client {
 
 impl Client {
     /// What the VM's clients share.
-    pub fn shared(&self) -> &web::Shared {
+    pub fn shared(&self) -> &session::Shared {
         &self.attached.vm.shared
     }
 
@@ -141,7 +147,7 @@ impl Vms {
     }
 
     /// Every VM the providers see (see `Providers::inventory`).
-    pub async fn inventory(&self) -> Vec<crate::providers::Listed> {
+    pub async fn inventory(&self) -> Vec<crate::vms::providers::Listed> {
         self.providers.inventory().await
     }
 
