@@ -140,49 +140,81 @@ impl Depths {
 /// The one client that uses the session; the others are shadow clients, which only watch.
 #[derive(Default)]
 pub struct User {
-    /// Its id, and how to end its session when another takes it over.
-    current: std::sync::Mutex<Option<(u64, oneshot::Sender<()>)>>,
-    next: std::sync::atomic::AtomicU64,
+    state: std::sync::Mutex<UserState>,
     /// Counts the users that left (not those taken over): the shadow clients, who watch the
     /// user, go with it.
     left: watch::Sender<u64>,
+}
+
+#[derive(Default)]
+struct UserState {
+    /// The user's id, and how to end its session when another takes it over.
+    current: Option<(u64, oneshot::Sender<()>)>,
+    /// The next user's id.
+    next: u64,
     /// Who the guest's session is open to: the identity of the last user, until the server
     /// locks the session. Another person who takes the session finds it locked.
-    open_to: std::sync::Mutex<Option<String>>,
+    open_to: Option<String>,
+    /// The locks under way because the session changed hands: until they are over, whoever
+    /// takes the session locks it too, even the person it is now open to.
+    locking: usize,
 }
 
 impl User {
     /// A new user, `identity`, takes the session over: the last one's session ends. Returns the
     /// new user's id, what tells it its own session was taken over, and whether the guest's
-    /// session must be locked first: it is still open to someone else.
+    /// session must be locked first: it is open to someone else, or a lock for that is under
+    /// way. After such a lock, `handed_over`.
     fn take_over(&self, identity: &str) -> (u64, oneshot::Receiver<()>, bool) {
-        let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut state = self.state.lock().unwrap();
+        let id = state.next;
+        state.next += 1;
         let (end, ended) = oneshot::channel();
-        if let Some((_, last)) = self.current.lock().unwrap().replace((id, end)) {
+        if let Some((_, last)) = state.current.replace((id, end)) {
             info!("a new client takes the session over");
             let _ = last.send(());
         }
-        let last = self.open_to.lock().unwrap().replace(identity.to_owned());
-        let lock = last.is_some_and(|last| last != identity);
+        let lock = state.locking > 0
+            || state
+                .open_to
+                .as_deref()
+                .is_some_and(|last| last != identity);
+        state.open_to = Some(identity.to_owned());
+        if lock {
+            state.locking += 1;
+        }
         (id, ended, lock)
+    }
+
+    /// The lock that `take_over` asked for is over, done or failed.
+    fn handed_over(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.locking = state.locking.saturating_sub(1);
     }
 
     /// Whether nobody took the session since the user `id`: it left, and no user came after.
     pub fn absent_since(&self, id: u64) -> bool {
-        self.current.lock().unwrap().is_none()
-            && self.next.load(std::sync::atomic::Ordering::Relaxed) == id + 1
+        Self::absent(&self.state.lock().unwrap(), id)
     }
 
-    /// The server locked the guest's session: it is open to nobody.
-    pub fn locked(&self) {
-        *self.open_to.lock().unwrap() = None;
+    fn absent(state: &UserState, id: u64) -> bool {
+        state.current.is_none() && state.next == id + 1
+    }
+
+    /// The server locked the guest's session after the user `id` left: it is open to nobody,
+    /// unless a user came meanwhile, to whom it is open now.
+    pub fn locked(&self, id: u64) {
+        let mut state = self.state.lock().unwrap();
+        if Self::absent(&state, id) {
+            state.open_to = None;
+        }
     }
 
     /// The user `id` left; nobody uses the session until the next one comes.
     fn leave(&self, id: u64) {
-        let mut current = self.current.lock().unwrap();
-        if current.as_ref().is_some_and(|(user, _)| *user == id) {
-            *current = None;
+        let mut state = self.state.lock().unwrap();
+        if state.current.as_ref().is_some_and(|(user, _)| *user == id) {
+            state.current = None;
             self.left.send_modify(|left| *left += 1);
         }
     }
@@ -488,6 +520,7 @@ pub async fn open(
         shadow,
         identity,
     };
+    let mut server_stopping = stopping.clone();
     let (ended, user) = viewer(socket, &client, viewer_of, stopping)
         .instrument(span.clone())
         .await;
@@ -517,18 +550,26 @@ pub async fn open(
         return Ok(());
     };
     if delay.is_zero() {
-        shared.locker.lock().instrument(span).await;
-        shared.user.locked();
+        if shared.locker.lock().instrument(span).await {
+            shared.user.locked(user);
+        }
         return Ok(());
     }
-    // Later, unless the user comes back before. The VM stays attached until then.
+    // Later, unless the user comes back before; at once if the server stops meanwhile. The VM
+    // stays attached until then.
     tokio::spawn(
         async move {
-            tokio::time::sleep(delay).await;
-            if shared.user.absent_since(user) && !*shared.vm_stopped.borrow() {
-                info!(?delay, "the user did not come back");
-                shared.locker.lock().await;
-                shared.user.locked();
+            tokio::select! {
+                () = tokio::time::sleep(delay) => info!(?delay, "the user did not come back"),
+                _ = server_stopping.wait_for(|stopping| *stopping) => {
+                    info!("the server stops before the user came back");
+                }
+            }
+            if shared.user.absent_since(user)
+                && !*shared.vm_stopped.borrow()
+                && shared.locker.lock().await
+            {
+                shared.user.locked(user);
             }
             drop(client);
         }
@@ -743,12 +784,15 @@ async fn viewer(
         }
     };
     let user = (!shadow).then(|| shared.user.take_over(&identity));
-    // The guest's session is still open to another person: locked before this user sees it.
-    if user.as_ref().is_some_and(|(_, _, lock)| *lock)
-        && shared.locker.policy.mode != crate::lock::Mode::Never
-    {
-        info!("the session changes hands: the guest's session is locked first");
-        shared.locker.lock().await;
+    // The guest's session is still open to another person: locked before this user sees it,
+    // and the session refused if it cannot be.
+    let mut unlocked = false;
+    if user.as_ref().is_some_and(|(_, _, lock)| *lock) {
+        if shared.locker.policy.mode != crate::lock::Mode::Never {
+            info!("the session changes hands: the guest's session is locked first");
+            unlocked = !shared.locker.lock().await;
+        }
+        shared.user.handed_over();
     }
     let user = user.map(|(id, taken_over, _)| (id, taken_over));
     info!(shadow, "viewer session");
@@ -774,39 +818,45 @@ async fn viewer(
     let mut vm_stopped = shared.vm_stopped.clone();
     // A shadow client watches the user: it goes when the user does.
     let mut user_left = user_id.is_none().then(|| shared.user.left());
-    let ended = tokio::select! {
-        ended = run(
-            &mut socket,
-            &session,
-            &mut signals,
-            &mut state,
-            Follow {
-                pointer: shared.pointer.clone(),
-                pointer_mode: shared.pointer_mode.clone(),
-                encode_latency: shared.encode_latency.clone(),
-                clip,
-                drives: drives_follow,
-                printers: printers_follow,
-                cameras: cameras_follow,
-                taken_over,
-                server_stopping,
-            },
-            &shared,
-        ) => ended,
-        true = async { vm_stopped.wait_for(|stopped| *stopped).await.is_ok() } => {
-            info!("the VM stopped: the session ends");
-            Ok(Departure::VmStopped)
-        }
-        () = async {
-            match &mut user_left {
-                Some(left) => {
-                    let _ = left.changed().await;
-                }
-                None => std::future::pending().await,
+    let ended = if unlocked {
+        Err(anyhow::anyhow!(
+            "the guest's session, open to another user, could not be locked"
+        ))
+    } else {
+        tokio::select! {
+            ended = run(
+                &mut socket,
+                &session,
+                &mut signals,
+                &mut state,
+                Follow {
+                    pointer: shared.pointer.clone(),
+                    pointer_mode: shared.pointer_mode.clone(),
+                    encode_latency: shared.encode_latency.clone(),
+                    clip,
+                    drives: drives_follow,
+                    printers: printers_follow,
+                    cameras: cameras_follow,
+                    taken_over,
+                    server_stopping,
+                },
+                &shared,
+            ) => ended,
+            true = async { vm_stopped.wait_for(|stopped| *stopped).await.is_ok() } => {
+                info!("the VM stopped: the session ends");
+                Ok(Departure::VmStopped)
             }
-        } => {
-            info!("the user left: the shadow session ends");
-            Ok(Departure::Left)
+            () = async {
+                match &mut user_left {
+                    Some(left) => {
+                        let _ = left.changed().await;
+                    }
+                    None => std::future::pending().await,
+                }
+            } => {
+                info!("the user left: the shadow session ends");
+                Ok(Departure::Left)
+            }
         }
     };
     // Whatever ended the session, the WebSocket closes with a close frame, whose status tells
@@ -841,10 +891,15 @@ async fn viewer(
     let _ = shared
         .requests
         .send(Request::TenBits(shared.depths.leave(depth_id)));
-    // A server that stops ends the session from either side: what ended it, it stops.
-    let ended = match ended {
-        Ok(_) if *stopping.borrow() => Ok(Departure::ServerStopping),
-        ended => ended,
+    // A server that stops ends the session from either side: whatever ended it, the server
+    // stops, even when telling the client failed.
+    let ended = if *stopping.borrow() {
+        if let Err(e) = &ended {
+            debug!(error = %format!("{e:#}"), "the session ended as the server stops");
+        }
+        Ok(Departure::ServerStopping)
+    } else {
+        ended
     };
     (ended, user_id)
 }
@@ -1174,6 +1229,62 @@ mod tests {
         assert!(!same_origin(&headers(Some("http://vdi.example.com:8090"))));
         assert!(!same_origin(&headers(Some("https://vdi.example.com:8091"))));
         assert!(!same_origin(&headers(Some("null"))));
+    }
+
+    /// Another person finds the session locked; the same one does not.
+    #[test]
+    fn a_change_of_hands_locks() {
+        let user = User::default();
+        let (a, _, lock) = user.take_over("alice");
+        assert!(!lock, "nobody had it");
+        user.leave(a);
+        let (_, _, lock) = user.take_over("alice");
+        assert!(!lock, "the same person");
+        let (_, _, lock) = user.take_over("bob");
+        assert!(lock, "another person");
+        user.handed_over();
+    }
+
+    /// While a lock for a change of hands is under way, whoever comes locks too, the person
+    /// the session is now open to included.
+    #[test]
+    fn a_lock_under_way_holds_everyone() {
+        let user = User::default();
+        user.take_over("alice");
+        let (_, _, lock) = user.take_over("bob");
+        assert!(lock);
+        let (_, _, lock) = user.take_over("bob");
+        assert!(lock, "bob again, the first lock not over");
+        user.handed_over();
+        user.handed_over();
+        let (_, _, lock) = user.take_over("bob");
+        assert!(!lock, "both locks over");
+    }
+
+    /// A lock after a departure does not forget a user who came back meanwhile.
+    #[test]
+    fn a_late_lock_keeps_who_came_back() {
+        let user = User::default();
+        let (a, _, _) = user.take_over("alice");
+        user.leave(a);
+        assert!(user.absent_since(a));
+        // Alice comes back while the lock of her departure is under way.
+        let (again, _, lock) = user.take_over("alice");
+        assert!(!lock);
+        assert!(!user.absent_since(a));
+        user.locked(a);
+        // Still open to her: Bob, next, finds it locked.
+        user.leave(again);
+        let (_, _, lock) = user.take_over("bob");
+        assert!(lock);
+        user.handed_over();
+        // A lock after the last user left, nobody since: open to nobody.
+        let user = User::default();
+        let (a, _, _) = user.take_over("alice");
+        user.leave(a);
+        user.locked(a);
+        let (_, _, lock) = user.take_over("bob");
+        assert!(!lock);
     }
 
     #[test]

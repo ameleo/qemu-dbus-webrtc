@@ -146,7 +146,10 @@ seconds (60 by default) after a lost connection if no user has come back meanwhi
 locks at once whenever the user's session ends; `never` does not lock. The VM stays attached
 until then. A takeover locks nothing, unless the new user is another person (another account, or
 another broker identity) and the session is still open to the last one: it is locked before the
-new user sees it. The guest agent locks the session (`Agent1.Reset`, which also lets go of what
+new user sees it, and the session is refused when it cannot be. While such a lock is under way,
+whoever takes the session locks it too. A lock that fails leaves the session open to the last
+user, for the next person to lock it. A delayed lock still pending when the server stops is done
+at once. The guest agent locks the session (`Agent1.Reset`, which also lets go of what
 the client brought: clipboard, drives, printers, cameras), only when a user is logged on and the
 session is not locked already. Without an agent, or when it does not answer within five seconds,
 the server types Win+L on the guest's keyboard, which locks Windows and the common Linux

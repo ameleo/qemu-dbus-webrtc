@@ -110,14 +110,15 @@ pub struct Locker {
 
 impl Locker {
     /// Lock the guest's session now: through its agent, or by typing Win+L without one or when
-    /// it fails to answer.
-    pub async fn lock(&self) {
+    /// it fails to answer. Whether it is locked, as far as the server knows: the agent locked
+    /// it, or QEMU took the keys.
+    pub async fn lock(&self) -> bool {
         let agent = self.agent.borrow().clone();
         if let Some(agent) = agent {
             match tokio::time::timeout(LOCK_TIME, reset(&agent)).await {
                 Ok(Ok(())) => {
                     info!("guest session locked by its agent");
-                    return;
+                    return true;
                 }
                 Ok(Err(e)) => {
                     warn!(error = %format!("{e:#}"), "the guest agent did not lock: Win+L instead")
@@ -125,29 +126,38 @@ impl Locker {
                 Err(_) => warn!("the guest agent did not answer: Win+L instead"),
             }
         }
-        match tokio::time::timeout(LOCK_TIME, self.win_l()).await {
-            Ok(Ok(())) => info!("Win+L typed to lock the guest session"),
-            Ok(Err(e)) => warn!(error = %format!("{e:#}"), "guest session not locked"),
-            Err(_) => warn!("guest session not locked: QEMU did not take the keys"),
-        }
+        self.win_l().await
     }
 
-    async fn win_l(&self) -> Result<()> {
-        // Released whatever happens to the presses, so that no key stays down in the guest.
-        let pressed = async {
+    /// Type Win+L: whether QEMU took the presses. The keys are released whatever became of
+    /// the presses, so that none stays down in the guest, each release bounded in time.
+    async fn win_l(&self) -> bool {
+        let pressed = tokio::time::timeout(LOCK_TIME, async {
             self.keyboard.press(LEFT_META).await?;
             self.keyboard.press(KEY_L).await
-        }
+        })
         .await;
-        let released = async {
-            let l = self.keyboard.release(KEY_L).await;
-            let meta = self.keyboard.release(LEFT_META).await;
-            l.and(meta)
+        for key in [KEY_L, LEFT_META] {
+            match tokio::time::timeout(LOCK_TIME, self.keyboard.release(key)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => warn!(key, error = %e, "key not released"),
+                Err(_) => warn!(key, "key not released: QEMU did not take it"),
+            }
         }
-        .await;
-        pressed?;
-        released?;
-        Ok(())
+        match pressed {
+            Ok(Ok(())) => {
+                info!("Win+L typed to lock the guest session");
+                true
+            }
+            Ok(Err(e)) => {
+                warn!(error = %e, "guest session not locked");
+                false
+            }
+            Err(_) => {
+                warn!("guest session not locked: QEMU did not take the keys");
+                false
+            }
+        }
     }
 }
 
