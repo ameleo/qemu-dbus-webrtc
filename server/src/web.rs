@@ -179,17 +179,26 @@ impl User {
                 .open_to
                 .as_deref()
                 .is_some_and(|last| last != identity);
-        state.open_to = Some(identity.to_owned());
+        // Open to the new user at once, or once the lock is done: until then, it is still open
+        // to the last one.
         if lock {
             state.locking += 1;
+        } else {
+            state.open_to = Some(identity.to_owned());
         }
         (id, ended, lock)
     }
 
-    /// The lock that `take_over` asked for is over, done or failed.
-    fn handed_over(&self) {
+    /// The lock that `take_over` asked for the user `id`, `identity`, is over: `locked`, the
+    /// session is that user's from now on, unless another took it meanwhile (who locks it in
+    /// turn); not locked, it is still open to the last user.
+    fn handed_over(&self, id: u64, identity: &str, locked: bool) {
         let mut state = self.state.lock().unwrap();
         state.locking = state.locking.saturating_sub(1);
+        if locked {
+            let current = state.current.as_ref().is_some_and(|(user, _)| *user == id);
+            state.open_to = current.then(|| identity.to_owned());
+        }
     }
 
     /// Whether nobody took the session since the user `id`: it left, and no user came after.
@@ -787,12 +796,15 @@ async fn viewer(
     // The guest's session is still open to another person: locked before this user sees it,
     // and the session refused if it cannot be.
     let mut unlocked = false;
-    if user.as_ref().is_some_and(|(_, _, lock)| *lock) {
-        if shared.locker.policy.mode != crate::lock::Mode::Never {
+    if let Some((id, _, true)) = &user {
+        let locked = if shared.locker.policy.mode != crate::lock::Mode::Never {
             info!("the session changes hands: the guest's session is locked first");
-            unlocked = !shared.locker.lock().await;
-        }
-        shared.user.handed_over();
+            shared.locker.lock().await
+        } else {
+            true
+        };
+        unlocked = !locked;
+        shared.user.handed_over(*id, &identity, locked);
     }
     let user = user.map(|(id, taken_over, _)| (id, taken_over));
     info!(shadow, "viewer session");
@@ -1240,9 +1252,27 @@ mod tests {
         user.leave(a);
         let (_, _, lock) = user.take_over("alice");
         assert!(!lock, "the same person");
-        let (_, _, lock) = user.take_over("bob");
+        let (bob, _, lock) = user.take_over("bob");
         assert!(lock, "another person");
-        user.handed_over();
+        user.handed_over(bob, "bob", true);
+        let (_, _, lock) = user.take_over("bob");
+        assert!(!lock, "bob's now");
+    }
+
+    /// A lock that fails leaves the session open to the last user: the new one, back, locks
+    /// again; the last one, back, does not.
+    #[test]
+    fn a_failed_lock_keeps_the_last_user() {
+        let user = User::default();
+        user.take_over("alice");
+        let (bob, _, lock) = user.take_over("bob");
+        assert!(lock);
+        user.handed_over(bob, "bob", false);
+        let (bob, _, lock) = user.take_over("bob");
+        assert!(lock, "still alice's");
+        user.handed_over(bob, "bob", false);
+        let (_, _, lock) = user.take_over("alice");
+        assert!(!lock, "alice's own");
     }
 
     /// While a lock for a change of hands is under way, whoever comes locks too, the person
@@ -1251,12 +1281,12 @@ mod tests {
     fn a_lock_under_way_holds_everyone() {
         let user = User::default();
         user.take_over("alice");
-        let (_, _, lock) = user.take_over("bob");
+        let (first, _, lock) = user.take_over("bob");
         assert!(lock);
-        let (_, _, lock) = user.take_over("bob");
+        let (second, _, lock) = user.take_over("bob");
         assert!(lock, "bob again, the first lock not over");
-        user.handed_over();
-        user.handed_over();
+        user.handed_over(first, "bob", true);
+        user.handed_over(second, "bob", true);
         let (_, _, lock) = user.take_over("bob");
         assert!(!lock, "both locks over");
     }
@@ -1275,9 +1305,9 @@ mod tests {
         user.locked(a);
         // Still open to her: Bob, next, finds it locked.
         user.leave(again);
-        let (_, _, lock) = user.take_over("bob");
+        let (bob, _, lock) = user.take_over("bob");
         assert!(lock);
-        user.handed_over();
+        user.handed_over(bob, "bob", true);
         // A lock after the last user left, nobody since: open to nobody.
         let user = User::default();
         let (a, _, _) = user.take_over("alice");
