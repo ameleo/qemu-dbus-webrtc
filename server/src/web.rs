@@ -189,15 +189,15 @@ impl User {
         (id, ended, lock)
     }
 
-    /// The lock that `take_over` asked for the user `id`, `identity`, is over: `locked`, the
-    /// session is that user's from now on, unless another took it meanwhile (who locks it in
-    /// turn); not locked, it is still open to the last user.
+    /// The lock that `take_over` asked for the user `id`, `identity`, is over. Locked, and that
+    /// user still current, the session is that user's from now on; otherwise it stays open to
+    /// whom it was, another user who took it meanwhile recording itself in turn.
     fn handed_over(&self, id: u64, identity: &str, locked: bool) {
         let mut state = self.state.lock().unwrap();
         state.locking = state.locking.saturating_sub(1);
-        if locked {
-            let current = state.current.as_ref().is_some_and(|(user, _)| *user == id);
-            state.open_to = current.then(|| identity.to_owned());
+        let current = state.current.as_ref().is_some_and(|(user, _)| *user == id);
+        if locked && current {
+            state.open_to = Some(identity.to_owned());
         }
     }
 
@@ -1315,6 +1315,20 @@ mod tests {
         user.locked(a);
         let (_, _, lock) = user.take_over("bob");
         assert!(!lock);
+    }
+
+    /// Of two overlapping handoffs, the older one ending last does not forget the newer one's
+    /// user.
+    #[test]
+    fn an_older_handoff_keeps_the_newer_user() {
+        let user = User::default();
+        user.take_over("alice");
+        let (first, _, _) = user.take_over("bob");
+        let (second, _, _) = user.take_over("bob");
+        user.handed_over(second, "bob", true);
+        user.handed_over(first, "bob", true);
+        let (_, _, lock) = user.take_over("charlie");
+        assert!(lock, "still bob's");
     }
 
     #[test]
