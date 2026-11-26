@@ -321,7 +321,7 @@ const pb = {
 const str = (fields, n) => pb.text.decode(fields.get(n)?.[0] || new Uint8Array());
 const uint = (fields, n) => fields.get(n)?.[0] || 0;
 
-// ClientMessage: hello = 1, answer = 2, ice = 3.
+// ClientMessage: hello = 1, answer = 2, ice = 3, leave = 4.
 // Hello: codecs = 1, shadow = 2, user = 3, password = 4. With ?shadow in the address, the page
 // only watches.
 const shadow = new URLSearchParams(location.search).has("shadow");
@@ -333,6 +333,9 @@ const hello = (codecs, account) => pb.message((o) => pb.bytes(o, 1, pb.message((
 })));
 const answer = (sdp) => pb.message((o) => pb.bytes(o, 2, pb.message((d) => pb.string(d, 1, sdp))));
 const ice = (candidate, mline) => pb.message((o) => pb.bytes(o, 3, pb.message((c) => { pb.string(c, 1, candidate); pb.uint(c, 2, mline); })));
+// The user leaves on purpose: the server locks the guest's session at once, rather than wait
+// for a client that lost its connection to come back.
+const leaving = () => pb.message((o) => pb.bytes(o, 4, []));
 
 // The VM's signalling, next to its page (/vm/<uuid>/signal), and the peer connection, both new
 // for each connection: first with no account, then, if the server asks for one, with what the
@@ -496,8 +499,9 @@ const session = {
     this.phase = "ended";
     card.show({ icon, title, text, actions: [[again, () => { this.attempt = 0; this.connect(); }]] });
   },
-  // The user leaves: a clean close, which the server takes as the client leaving.
+  // The user leaves: said to the server, then a clean close.
   leave() {
+    send(leaving());
     this.end({ icon: "ended", title: T.endedTitle, text: T.leftText });
   },
   // Close the connection, and forget what came on it.
@@ -535,10 +539,12 @@ const session = {
 };
 video.addEventListener("playing", () => session.live());
 
-// Leaving the page (closed, reloaded, or another address) ends the session with a clean close,
-// as the native client does: the server takes it as the client leaving, not as a network failure.
+// Leaving the page (closed, reloaded, or another address) ends the session as the native client
+// does: the user leaves, then a clean close; the server takes it as the user leaving, not as a
+// network failure.
 window.addEventListener("pagehide", () => {
   for (const v of views.slice(1)) v.win.close();
+  send(leaving());
   session.phase = "ended";
   session.teardown();
 });

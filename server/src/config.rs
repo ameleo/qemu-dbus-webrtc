@@ -66,6 +66,17 @@ struct File {
     account: Vec<AccountFile>,
     turn: Vec<TurnFile>,
     broker: Option<BrokerFile>,
+    session: SessionFile,
+}
+
+/// What happens to the guest's session when its user leaves (see `lock`).
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct SessionFile {
+    /// When to lock it: "leave" (the default), "immediate" or "never".
+    lock: Option<String>,
+    /// How long after a lost connection, in seconds, in "leave" mode.
+    lock_delay: Option<u64>,
 }
 
 /// The connection broker the host reaches (see `broker`).
@@ -248,6 +259,8 @@ pub struct VmConfig {
     pub record: Option<String>,
     /// How clients reach the host from outside.
     pub network: transport::Network,
+    /// When the guest's session is locked, its user gone.
+    pub lock: crate::lock::Policy,
 }
 
 /// Who may open a VM's console.
@@ -599,6 +612,22 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
             (Some(broker), Some(attestation))
         }
     };
+    let lock = crate::lock::Policy {
+        mode: match file.session.lock.as_deref() {
+            Some(mode) => crate::lock::Mode::parse(mode).context("[session] lock")?,
+            None => crate::lock::Mode::default(),
+        },
+        delay: match file.session.lock_delay {
+            Some(delay) if delay > crate::lock::MAX_DELAY => {
+                bail!(
+                    "[session] lock_delay: {delay} s, {} s at most",
+                    crate::lock::MAX_DELAY
+                )
+            }
+            Some(delay) => std::time::Duration::from_secs(delay),
+            None => std::time::Duration::from_secs(crate::lock::DEFAULT_DELAY),
+        },
+    };
     Ok(Config {
         auth,
         vm: VmConfig {
@@ -614,6 +643,7 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
             bitrates,
             record: video.record,
             network,
+            lock,
         },
         listen,
         tls,

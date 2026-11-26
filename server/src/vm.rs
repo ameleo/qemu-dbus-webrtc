@@ -276,9 +276,12 @@ async fn start_in(
     // The guest's screens at the size and place of the user's monitors.
     let layout = layout::Layout::start(graphic.into_iter().map(|(_, _, c)| c).collect());
     let agent_mouse = input::AgentMouse::default();
+    // The connection to the guest agent, while there is one: what locks the guest's session.
+    let (agent_link, agent_linked) = tokio::sync::watch::channel(None);
     let agent_task = Aborted(tokio::spawn(
         agent::run(
             vm_connection.clone(),
+            agent_link,
             agent_mouse.clone(),
             clipboard.clone(),
             drives.clone(),
@@ -298,6 +301,11 @@ async fn start_in(
     ));
     // Turns true when the display loop ends: the VM stopped, unless the server detached.
     let (stopped_tx, stopped_rx) = tokio::sync::watch::channel(false);
+    let locker = crate::lock::Locker {
+        policy: args.lock,
+        agent: agent_linked,
+        keyboard: input.keyboard.clone(),
+    };
     let shared = web::Shared {
         name: name.clone(),
         vm_stopped: stopped_rx,
@@ -318,6 +326,7 @@ async fn start_in(
         cameras: cameras.clone(),
         layout: layout.clone(),
         user: Default::default(),
+        locker,
         bitrates: args.bitrates,
         network: args.network.clone(),
         depths: Default::default(),

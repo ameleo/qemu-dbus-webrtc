@@ -20,6 +20,7 @@ mod drives;
 mod input;
 mod layout;
 mod libvirt;
+mod lock;
 mod peer;
 mod pointer;
 mod printers;

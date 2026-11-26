@@ -27,8 +27,17 @@ message ClientMessage {
     Hello hello = 1;
     SessionDescription answer = 2;
     IceCandidate ice = 3;
+    Leave leave = 4;
   }
 }
+
+// The user leaves on purpose: the client's disconnect button, its window closed. The client
+// sends it just before it closes the WebSocket, and does not connect again by itself. A session
+// that ends without it is a lost connection, which the client may restore. The server locks
+// the guest's session when the user leaves, at once after a Leave, and after a delay when the
+// connection is lost and the client does not come back (the server's configuration says which).
+// A shadow client's Leave changes nothing.
+message Leave {}
 
 message ServerMessage {
   oneof message {

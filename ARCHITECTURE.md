@@ -137,6 +137,21 @@ window. A new client takes over the session, and the previous one is ended with 
 clients (`shadow` in their hello) are view-only, unlimited in number, and are disconnected when
 the user leaves (not on a takeover); handing them keyboard and mouse control is planned.
 
+When the user leaves, the server locks the guest's session, as RDP does, so that whoever opens
+the console next finds the guest's logon screen. A client that leaves on purpose (its disconnect
+button, its window closed) says so (`Leave`) before it closes the signalling; a session that ends
+without it is a lost connection, which the client may restore. `[session] lock` says when:
+`leave` (the default) locks at once after a `Leave` or when the server stops, and `lock_delay`
+seconds (60 by default) after a lost connection if no user has come back meanwhile; `immediate`
+locks at once whenever the user's session ends; `never` does not lock. The VM stays attached
+until then. A takeover locks nothing, unless the new user is another person (another account, or
+another broker identity) and the session is still open to the last one: it is locked before the
+new user sees it. The guest agent locks the session (`Agent1.Reset`, which also lets go of what
+the client brought: clipboard, drives, printers, cameras), only when a user is logged on and the
+session is not locked already. Without an agent, or when it does not answer within five seconds,
+the server types Win+L on the guest's keyboard, which locks Windows and the common Linux
+desktops, unless a policy turned the shortcut off.
+
 The guest resolution follows the user's window: once the size has been stable for 300 ms, the
 server requests it from the guest (`SetUIInfo`, rounded to even values between 200 and 8192
 pixels). A request sent while the guest boots is lost, as its display driver restores the mode

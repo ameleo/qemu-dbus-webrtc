@@ -36,6 +36,7 @@ use crate::config::Auth;
 use crate::drives::{Drives, DrivesFollow, ViewerDrives};
 use crate::input::{AgentMouse, ViewerInput};
 use crate::layout::{Layout, Size};
+use crate::lock::Departure;
 use crate::pointer::{self, Pointer};
 use crate::printers::{Printers, PrintersFollow, ViewerPrinters};
 use crate::transport::{Bitrates, Channel, Session, Signal, SoundViewers, Start, VideoViewers};
@@ -87,6 +88,8 @@ pub struct Shared {
     pub layout: Arc<Layout>,
     /// The user of the session.
     pub user: Arc<User>,
+    /// What locks the guest's session when its user leaves.
+    pub locker: crate::lock::Locker,
     /// The bounds of the bandwidth estimation.
     pub bitrates: Bitrates,
     /// How clients reach the host from outside.
@@ -143,19 +146,36 @@ pub struct User {
     /// Counts the users that left (not those taken over): the shadow clients, who watch the
     /// user, go with it.
     left: watch::Sender<u64>,
+    /// Who the guest's session is open to: the identity of the last user, until the server
+    /// locks the session. Another person who takes the session finds it locked.
+    open_to: std::sync::Mutex<Option<String>>,
 }
 
 impl User {
-    /// A new user takes the session over: the last one's session ends. Returns the new user's
-    /// id, and what tells it its own session was taken over.
-    fn take_over(&self) -> (u64, oneshot::Receiver<()>) {
+    /// A new user, `identity`, takes the session over: the last one's session ends. Returns the
+    /// new user's id, what tells it its own session was taken over, and whether the guest's
+    /// session must be locked first: it is still open to someone else.
+    fn take_over(&self, identity: &str) -> (u64, oneshot::Receiver<()>, bool) {
         let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (end, ended) = oneshot::channel();
         if let Some((_, last)) = self.current.lock().unwrap().replace((id, end)) {
             info!("a new client takes the session over");
             let _ = last.send(());
         }
-        (id, ended)
+        let last = self.open_to.lock().unwrap().replace(identity.to_owned());
+        let lock = last.is_some_and(|last| last != identity);
+        (id, ended, lock)
+    }
+
+    /// Whether nobody took the session since the user `id`: it left, and no user came after.
+    pub fn absent_since(&self, id: u64) -> bool {
+        self.current.lock().unwrap().is_none()
+            && self.next.load(std::sync::atomic::Ordering::Relaxed) == id + 1
+    }
+
+    /// The server locked the guest's session: it is open to nobody.
+    pub fn locked(&self) {
+        *self.open_to.lock().unwrap() = None;
     }
 
     /// The user `id` left; nobody uses the session until the next one comes.
@@ -333,7 +353,10 @@ pub enum Admission<'a> {
     /// The broker that relays the connection, which checked the user's sign-in and their
     /// access to the VM it names.
     Broker {
+        /// The user's name, for the logs.
         user: String,
+        /// The user's stable identifier, "<issuer>|<subject>".
+        id: String,
         /// View-only, as the broker says; the client may ask it too.
         shadow: bool,
     },
@@ -356,12 +379,19 @@ pub async fn open(
         Ok(Ok(Some(_))) | Err(_) => anyhow::bail!("no hello"),
     };
     let mut shadow = hello.shadow;
+    // Who the user is, to tell one person from another when the session changes hands: the
+    // broker's identifier, the account's user; nobody in particular without accounts.
+    let identity = match &admission {
+        Admission::Broker { id, .. } => id.clone(),
+        Admission::Local { .. } => hello.user.clone(),
+    };
     // The VMs the client may open: all without accounts, those of its account otherwise; the one
     // the broker names, for a connection it relays.
     let grant = match admission {
         Admission::Broker {
             user,
             shadow: view_only,
+            ..
         } => {
             shadow |= view_only;
             info!(id, user, shadow, "relayed by the broker");
@@ -453,18 +483,65 @@ pub async fn open(
     };
     let span = client.span().clone();
     let codecs = hello.codecs;
-    let ended = viewer(socket, &client, codecs, shadow, stopping)
+    let viewer_of = Viewer {
+        codecs,
+        shadow,
+        identity,
+    };
+    let (ended, user) = viewer(socket, &client, viewer_of, stopping)
         .instrument(span.clone())
         .await;
-    let _entered = span.enter();
-    match &ended {
-        Ok(()) => {
-            info!("viewer left");
-            client.leaves();
+    let departure = {
+        let _entered = span.enter();
+        match &ended {
+            Ok(departure) => {
+                info!(?departure, "viewer left");
+                *departure
+            }
+            Err(e) => {
+                warn!(error = %format!("{e:#}"), "viewer session ended");
+                Departure::Lost
+            }
         }
-        Err(e) => warn!(error = %format!("{e:#}"), "viewer session ended"),
+    };
+    // A client that may come back keeps the VM attached a while.
+    if departure != Departure::Lost {
+        client.leaves();
     }
+    // The user gone, the guest's session is locked, as the configuration says.
+    let Some(user) = user else {
+        return Ok(());
+    };
+    let shared = client.shared().clone();
+    let Some(delay) = shared.locker.policy.after(departure) else {
+        return Ok(());
+    };
+    if delay.is_zero() {
+        shared.locker.lock().instrument(span).await;
+        shared.user.locked();
+        return Ok(());
+    }
+    // Later, unless the user comes back before. The VM stays attached until then.
+    tokio::spawn(
+        async move {
+            tokio::time::sleep(delay).await;
+            if shared.user.absent_since(user) && !*shared.vm_stopped.borrow() {
+                info!(?delay, "the user did not come back");
+                shared.locker.lock().await;
+                shared.user.locked();
+            }
+            drop(client);
+        }
+        .instrument(span),
+    );
     Ok(())
+}
+
+/// Who a viewer is: the codecs it decodes, whether it only watches, and who its user is.
+struct Viewer {
+    codecs: Vec<String>,
+    shadow: bool,
+    identity: String,
 }
 
 /// The addresses of the host's public name or address, for a session's candidates: none when
@@ -605,10 +682,13 @@ async fn receive(socket: &mut Socket) -> Result<Option<client_message::Message>>
 async fn viewer(
     mut socket: Socket,
     client: &Client,
-    codecs: Vec<String>,
-    shadow: bool,
+    Viewer {
+        codecs,
+        shadow,
+        identity,
+    }: Viewer,
     server_stopping: watch::Receiver<bool>,
-) -> Result<()> {
+) -> (Result<Departure>, Option<u64>) {
     let stopping = server_stopping.clone();
     let shared = client.shared().clone();
 
@@ -659,10 +739,18 @@ async fn viewer(
                 .requests
                 .send(Request::TenBits(shared.depths.leave(depth_id)));
             close(&mut socket, axum::extract::ws::close_code::ERROR).await;
-            return Err(e);
+            return (Err(e), None);
         }
     };
-    let user = (!shadow).then(|| shared.user.take_over());
+    let user = (!shadow).then(|| shared.user.take_over(&identity));
+    // The guest's session is still open to another person: locked before this user sees it.
+    if user.as_ref().is_some_and(|(_, _, lock)| *lock)
+        && shared.locker.policy.mode != crate::lock::Mode::Never
+    {
+        info!("the session changes hands: the guest's session is locked first");
+        shared.locker.lock().await;
+    }
+    let user = user.map(|(id, taken_over, _)| (id, taken_over));
     info!(shadow, "viewer session");
     let (clipboard, clip) = shared.clipboard.viewer();
     let (drives, drives_follow) = shared.drives.viewer();
@@ -707,7 +795,7 @@ async fn viewer(
         ) => ended,
         true = async { vm_stopped.wait_for(|stopped| *stopped).await.is_ok() } => {
             info!("the VM stopped: the session ends");
-            Ok(())
+            Ok(Departure::VmStopped)
         }
         () = async {
             match &mut user_left {
@@ -718,14 +806,14 @@ async fn viewer(
             }
         } => {
             info!("the user left: the shadow session ends");
-            Ok(())
+            Ok(Departure::Left)
         }
     };
     // Whatever ended the session, the WebSocket closes with a close frame, whose status tells
     // the client how: a normal end, the server going away (it may come back), or a failure.
     let code = match &ended {
-        Ok(()) if *stopping.borrow() => axum::extract::ws::close_code::AWAY,
-        Ok(()) => axum::extract::ws::close_code::NORMAL,
+        Ok(_) if *stopping.borrow() => axum::extract::ws::close_code::AWAY,
+        Ok(_) => axum::extract::ws::close_code::NORMAL,
         Err(_) => axum::extract::ws::close_code::ERROR,
     };
     close(&mut socket, code).await;
@@ -753,7 +841,12 @@ async fn viewer(
     let _ = shared
         .requests
         .send(Request::TenBits(shared.depths.leave(depth_id)));
-    ended
+    // A server that stops ends the session from either side: what ended it, it stops.
+    let ended = match ended {
+        Ok(_) if *stopping.borrow() => Ok(Departure::ServerStopping),
+        ended => ended,
+    };
+    (ended, user_id)
 }
 
 /// How long the guest has to release what a session that ends held: keys, the clipboard,
@@ -815,7 +908,7 @@ async fn run(
     state: &mut ViewerState,
     mut follow: Follow,
     shared: &Shared,
-) -> Result<()> {
+) -> Result<Departure> {
     let keyframe = || {
         for screen in &shared.screens {
             let _ = shared.requests.send(Request::Keyframe {
@@ -872,11 +965,11 @@ async fn run(
             () = &mut taken_over => {
                 info!("another client took the session over");
                 send(socket, server_message::Message::Ended(Ended { reason: ended::Reason::TakenOver.into() })).await?;
-                return Ok(());
+                return Ok(Departure::TakenOver);
             }
             true = async { server_stopping.wait_for(|stopping| *stopping).await.is_ok() } => {
                 send(socket, server_message::Message::Ended(Ended { reason: ended::Reason::ServerStopping.into() })).await?;
-                return Ok(());
+                return Ok(Departure::ServerStopping);
             }
             signal = signals.recv() => match signal {
                 Some(Signal::Offer(sdp)) => {
@@ -982,7 +1075,7 @@ async fn run(
                         session.send(Channel::Control, message.encode_to_vec());
                     }
                 }
-                Some(Signal::Closed) | None => return Ok(()),
+                Some(Signal::Closed) | None => return Ok(Departure::Lost),
             },
             Ok(()) = follow.pointer.changed() => {
                 if let Some(sent) = &mut sent {
@@ -1042,7 +1135,8 @@ async fn run(
                 }
                 Some(client_message::Message::Ice(_)) => {}
                 Some(client_message::Message::Hello(_)) => anyhow::bail!("a second hello"),
-                None => return Ok(()),
+                Some(client_message::Message::Leave(_)) => return Ok(Departure::Left),
+                None => return Ok(Departure::Lost),
             },
         }
     }
