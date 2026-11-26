@@ -138,6 +138,44 @@ window. A new client takes over the session, and the previous one is ended with 
 clients (`shadow` in their hello) are view-only, unlimited in number, and are disconnected when
 the user leaves (not on a takeover); handing them keyboard and mouse control is planned.
 
+When the user leaves, the server locks the guest's session, as RDP does, so that whoever opens
+the console next finds the guest's logon screen. A client that leaves on purpose (its disconnect
+button, its window closed) says so (`Leave`) before it closes the signalling; a session that ends
+without it is a lost connection, which the client may restore. `[session] lock` says when:
+`leave` (the default) locks at once after a `Leave` or when the server stops, and `lock_delay`
+seconds (60 by default) after a lost connection if no user has come back meanwhile; `immediate`
+locks at once whenever the user's session ends; `never` does not lock. The VM stays attached
+until then, unless the user comes back first: a lock after a departure is not done once a user
+has taken the session again. A delayed lock still pending when the server stops is done at once.
+
+A takeover locks nothing, unless the new user is another person (another account, or another broker
+identity) and the session may still be open to someone else: the last user's session ends, then the
+guest's session is locked before anything of the guest reaches the new user, who is refused when it
+cannot be (the last user, its session ended, may come back). The server remembers who the session is
+open to: the last user, until a lock; nobody, after a lock the agent confirmed; it does not know
+after it attached to the VM (a restart, a crash, a lock that failed before it detached) nor after a
+lock it could not confirm (Win+L), and then whoever comes locks it first. A client without an
+identity (no accounts) is nobody in particular, and always finds the session locked. Account users
+and broker identities are kept apart (`account:<user>`, `broker:<iss>|<sub>`). Changes of hands and
+locks run one at a time: whether to lock, the lock, and who the session is open to then are one
+step, which no other one interleaves with. Unit tests run every short sequence of arrivals,
+departures, reattachments, locks confirmed, unconfirmed or failed, and unlocks by the user, and
+check that nobody finds the session open to another person. When the server stops, it waits for the
+users' sessions to end and their locks to be done before it detaches from the VMs.
+
+The guest agent locks the session (`Agent1.Reset`, which also lets go of what the client brought:
+clipboard, drives, printers, cameras), only when a user is logged on and the session is not locked
+already. The server gives the guest up to a second to show it, less when the agent says the session
+is locked (`SessionLocked`): only that confirms the lock, since an agent that wrongly takes the
+session for locked answers without locking it; the Windows agent does not update it yet, and its
+locks stay unconfirmed, the next user locking again (at no cost when the session is locked). Just
+after the server attached to the VM, a lock waits up to a second for the agent to connect. Without
+an agent, or when it does not answer, the server releases the modifier keys and types Win+L on the
+guest's keyboard, which locks Windows and the common Linux desktops, unless a policy turned the
+shortcut off or an application takes the keys; nothing confirms it, so the server waits a second
+before anyone sees the guest, and locks again for whoever comes next. Without an agent, the first
+user after the server attaches to a VM gets Win+L too: on a text console, that types an "l".
+
 The guest resolution follows the user's window: once the size has been stable for 300 ms, the
 server requests it from the guest (`SetUIInfo`, rounded to even values between 200 and 8192
 pixels). A request sent while the guest boots is lost, as its display driver restores the mode

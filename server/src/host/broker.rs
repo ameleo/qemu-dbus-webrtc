@@ -313,9 +313,16 @@ async fn relay(
             return;
         }
     };
-    let user = connect
+    let (user, id) = connect
         .user
-        .map(|u| if u.name.is_empty() { u.id } else { u.name })
+        .map(|u| {
+            let name = if u.name.is_empty() {
+                u.id.clone()
+            } else {
+                u.name
+            };
+            (name, u.id)
+        })
         .unwrap_or_default();
     let socket = session::Socket::Relayed(Relayed {
         to_broker: Some(to_broker),
@@ -323,6 +330,7 @@ async fn relay(
     });
     let admission = session::Admission::Broker {
         user,
+        id,
         shadow: connect.shadow,
     };
     if let Err(e) = session::open(socket, &vms, admission, &connect.vm_uuid, vms.stopping()).await {

@@ -22,6 +22,17 @@ user = "alice"
 password = "$argon2id$v=19$m=19456,t=2,p=1$..."
 vms = ["win11-alice", "b8ff54ee-77f5-43dd-aa19-de8eaed5eb75"]
 
+[session]
+# Lock the guest's session when its user leaves, so that the next person to open the console
+# finds the guest's logon screen: through the guest agent, or by typing Win+L without one.
+# "leave" (default): at once when the user disconnects or closes the page, and lock_delay
+# seconds after a lost connection the client has not restored; "immediate": at once, a lost
+# connection too; "never". Shadow clients lock nothing; a user who takes the session over from
+# another account finds it locked.
+lock = "leave"
+# Seconds, 0 to 3600. Default: 60.
+lock_delay = 60
+
 [listen]
 # Address of the client page and signaling endpoint. Default: 127.0.0.1:8090 (local only).
 address = "0.0.0.0:8090"
