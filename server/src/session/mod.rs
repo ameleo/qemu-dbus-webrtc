@@ -7,6 +7,7 @@ pub mod audio;
 pub mod http;
 pub mod input;
 pub mod layout;
+pub mod lock;
 pub mod peer;
 pub mod pointer;
 pub mod shared;

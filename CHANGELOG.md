@@ -3,6 +3,22 @@
 What each release brings. The packages are on the
 [releases page](https://github.com/ameleo/qemu-dbus-webrtc/releases).
 
+## Unreleased
+
+### Added
+
+- **The guest's session locked when its user leaves**, as with RDP: at once on a disconnect or
+  a closed page, a minute after a lost connection the client has not restored, through the guest
+  agent (`Agent1.Reset`) or by typing Win+L without one. A user who takes the session over from
+  another account finds it locked. `[session] lock` (`leave`, `immediate`, `never`) and
+  `lock_delay` set it. Clients say they leave with the new `Leave` message; the page sends it.
+
+### Changed
+
+- A VM whose user's connection was lost (the peer connection closed without a `Leave`) stays
+  attached a minute for the client to come back, as after a lost signalling connection, rather
+  than five seconds.
+
 ## 0.3.0 — 2026-11-18
 
 Serving through a connection broker, with the host's certificate in its TPM; relaying through

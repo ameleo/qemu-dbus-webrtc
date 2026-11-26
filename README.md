@@ -62,7 +62,9 @@ Without guest software:
   policy names. Other browsers display the first screen.
 - **Session handling:** the guest resolution follows the client window. One client controls
   the session at a time; a new client takes it over. Shadow clients (`?shadow` in the URL) are
-  view-only.
+  view-only. The guest's session is locked when its user leaves, at once on a disconnect, a
+  minute after a lost connection the client has not restored (`[session]`), through the guest
+  agent or by typing Win+L.
 - **Browsers:** Chrome and Firefox, with packet loss recovery (NACK/RTX). Clients are told when
   they cannot decode the stream (Firefox does not support VP9 4:4:4).
 - **Input:** keyboard by scancode, so the guest applies its own layout; lock key state

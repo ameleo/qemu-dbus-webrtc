@@ -25,6 +25,10 @@ use qdw_video::gpus;
 /// How long the sessions have to end when the server stops, and the VMs to be detached then
 /// (an encoder takes up to two seconds to finish).
 const STOP_TIME: std::time::Duration = std::time::Duration::from_secs(1);
+/// How long the users' sessions have to end and the guests' sessions to be locked, then: a
+/// session ends within a few seconds; a lock takes up to eight through the agent, and a little
+/// more by Win+L, unless QEMU stops taking keys.
+const LOCK_TIME: std::time::Duration = std::time::Duration::from_secs(30);
 const DETACH_TIME: std::time::Duration = std::time::Duration::from_secs(4);
 
 #[tokio::main]
@@ -105,6 +109,13 @@ async fn main() -> Result<()> {
     info!("stopping: the sessions end");
     vms.stop();
     tokio::time::sleep(STOP_TIME).await;
+    // The guests' sessions locked, their users gone.
+    if tokio::time::timeout(LOCK_TIME, vms.locks_done())
+        .await
+        .is_err()
+    {
+        warn!("the guests' sessions were not all locked in time");
+    }
     // Then the VMs, their encoders finished: nothing is left playing.
     if tokio::time::timeout(DETACH_TIME, vms.detach_all())
         .await
