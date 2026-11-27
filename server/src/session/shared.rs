@@ -70,6 +70,8 @@ pub struct Shared {
     pub user: Arc<User>,
     /// The connection to the guest agent, while there is one.
     pub agent: watch::Receiver<Option<zbus::Connection>>,
+    /// The consents of the guest's user, before someone else watches or takes control.
+    pub consents: Arc<crate::guest::consent::Consents>,
     /// What asks the VM's power actions, if anything can.
     pub power: Option<Arc<crate::vms::power::Control>>,
     /// The bounds of the bandwidth estimation.
@@ -125,9 +127,6 @@ pub struct User {
     /// Its id, and how to end its session when another takes it over.
     current: std::sync::Mutex<Option<(u64, oneshot::Sender<()>)>>,
     next: std::sync::atomic::AtomicU64,
-    /// Counts the users that left (not those taken over): the shadow clients, who watch the
-    /// user, go with it.
-    left: watch::Sender<u64>,
     /// Held by a user that arrives and by what tells the guest a user left, one at a time:
     /// whether a user came since is settled, and the guest told, before the next user arrives.
     turn: tokio::sync::Mutex<()>,
@@ -153,13 +152,7 @@ impl User {
         let mut current = self.current.lock().unwrap();
         if current.as_ref().is_some_and(|(user, _)| *user == id) {
             *current = None;
-            self.left.send_modify(|left| *left += 1);
         }
-    }
-
-    /// Changes when the user leaves: the shadow sessions end.
-    pub(crate) fn left(&self) -> watch::Receiver<u64> {
-        self.left.subscribe()
     }
 
     /// After the user `id` left, run `tell` (which tells the guest), unless another user came

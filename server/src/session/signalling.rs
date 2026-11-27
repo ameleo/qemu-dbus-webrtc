@@ -18,6 +18,17 @@ use crate::config::Auth;
 use crate::guest::agent;
 use crate::vms::Vms;
 
+/// What a client may do beyond using or watching the VM, and who it is, for the guest's user.
+#[derive(Default)]
+pub(crate) struct Rights {
+    /// Ask the VM's power actions.
+    pub(crate) power: bool,
+    /// Watch the VM's session, with its guest user's consent.
+    pub(crate) may_shadow: bool,
+    /// Its user's name, which the guest's user is shown when asked.
+    pub(crate) who: String,
+}
+
 /// The error that asks a client for an account: the page shows its login form on it.
 const ACCOUNT_REQUIRED: &str = "an account is required";
 
@@ -42,6 +53,8 @@ pub enum Admission<'a> {
         shadow: bool,
         /// The user may ask the VM's power actions, as the broker says.
         power: bool,
+        /// The user may watch the VM's session, with its guest user's consent.
+        may_shadow: bool,
     },
 }
 
@@ -63,21 +76,30 @@ pub async fn open(
     };
     let mut shadow = hello.shadow;
     // The VMs the client may open: all without accounts, those of its account otherwise; the one
-    // the broker names, for a connection it relays. And whether it may ask their power actions:
-    // as its account or the broker says; never without accounts.
-    let (grant, power) = match admission {
+    // the broker names, for a connection it relays. And what else it may do, as its account or
+    // the broker says (never without accounts): ask the VM's power actions, watch its session.
+    let (grant, rights) = match admission {
         Admission::Broker {
             user,
             shadow: view_only,
             power,
+            may_shadow,
         } => {
             shadow |= view_only;
-            info!(id, user, shadow, power, "relayed by the broker");
-            (crate::host::access::Grant::Only(vec![id.to_owned()]), power)
+            info!(id, user, shadow, power, may_shadow, "relayed by the broker");
+            let rights = Rights {
+                power,
+                may_shadow,
+                who: user,
+            };
+            (
+                crate::host::access::Grant::Only(vec![id.to_owned()]),
+                rights,
+            )
         }
         Admission::Local {
             auth: Auth::None, ..
-        } => (crate::host::access::Grant::All, false),
+        } => (crate::host::access::Grant::All, Rights::default()),
         Admission::Local {
             auth: Auth::Password(accounts),
             checks,
@@ -93,9 +115,14 @@ pub async fn open(
             let granted = {
                 let _turn = checks.acquire().await?;
                 tokio::task::spawn_blocking(move || {
-                    accounts
-                        .check(&user, &password)
-                        .map(|a| (a.grant.clone(), a.power))
+                    accounts.check(&user, &password).map(|a| {
+                        let rights = Rights {
+                            power: a.power,
+                            may_shadow: a.shadow,
+                            who: a.user.clone(),
+                        };
+                        (a.grant.clone(), rights)
+                    })
                 })
                 .await?
             };
@@ -105,10 +132,23 @@ pub async fn open(
                 refuse(&mut socket, "wrong user or password").await;
                 return Ok(());
             };
-            info!(id, user = hello.user, power = grant.1, "logged in");
+            info!(
+                id,
+                user = hello.user,
+                power = grant.1.power,
+                may_shadow = grant.1.may_shadow,
+                "logged in"
+            );
             grant
         }
     };
+    // Watching another's session takes the right to; the guest's user is asked later, once the
+    // VM is attached.
+    if shadow && !rights.may_shadow {
+        info!(id, "shadow client refused: no right to watch");
+        refuse(&mut socket, "watching this VM's session is not allowed").await;
+        return Ok(());
+    }
     // A client that does not decode the video is told so before the VM starts for it.
     let config = vms.config();
     let (codec, full_chroma) = (config.settings.codec, config.settings.full_chroma);
@@ -167,7 +207,7 @@ pub async fn open(
     // The user's session, then the guest told the user left: the server waits for both, should
     // it stop meanwhile.
     let departing = (!shadow).then(|| vms.departing());
-    let (ended, user) = viewer(socket, &client, codecs, shadow, power, stopping)
+    let (ended, user) = viewer(socket, &client, codecs, shadow, rights, stopping)
         .instrument(span.clone())
         .await;
     let departure = {
@@ -303,7 +343,7 @@ pub(crate) async fn close(socket: &mut Socket, code: u16) {
 
 /// Refuse the client, saying why (an Error), then close: the end is a normal one (1000), the
 /// refusal its reason.
-async fn refuse(socket: &mut Socket, message: &str) {
+pub(crate) async fn refuse(socket: &mut Socket, message: &str) {
     let message = message.to_owned();
     let _ = send(socket, server_message::Message::Error(Error { message })).await;
     close(socket, axum::extract::ws::close_code::NORMAL).await;

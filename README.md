@@ -61,8 +61,7 @@ Without guest software:
   screen after a click in it, or at once for the sites Chrome's `AutomaticFullscreenAllowedForUrls`
   policy names. Other browsers display the first screen.
 - **Session handling:** the guest resolution follows the client window. One client controls
-  the session at a time; a new client takes it over. Shadow clients (`?shadow` in the URL) are
-  view-only.
+  the session at a time; a new client takes it over.
 - **Reset:** a guest that no longer answers can be reset from the toolbar, confirmed first, by
   the users allowed to (an account's `power = true`, or the broker), through libvirt or QEMU's
   QMP socket.
@@ -101,6 +100,9 @@ With a guest agent implementing the
   uses it (browser and native client).
 - **Session lock:** the guest's session is locked when its user leaves, at once on a disconnect,
   a minute after a lost connection the client has not restored.
+- **Shadowing with consent:** someone allowed to (`shadow = true`, or the broker) watches the
+  session (`?shadow` in the URL), and may control it too, only once the user signed in to the
+  guest agreed on their own desktop; the agent shows who watches, with a way to stop.
 
 Agents, both under the GPL version 3:
 [ameleo-display-agent-linux](https://github.com/ameleo/ameleo-display-agent-linux) for Linux

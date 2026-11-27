@@ -20,7 +20,7 @@ qdw-web = { path = "crates/web" }
 argon2 = { version = "0.5", features = ["std"] }
 anyhow = "1"
 # The D-Bus contract of the guest agent, shared with it.
-ameleo-display-protocol = { git = "https://github.com/ameleo/ameleo-display-protocol", tag = "v0.2.0" }
+ameleo-display-protocol = { git = "https://github.com/ameleo/ameleo-display-protocol", branch = "consent" }
 axum = { version = "0.8", features = ["ws"] }
 # TLS with ring: no C toolchain beyond what ring itself needs.
 axum-server = { version = "0.9", default-features = false, features = ["tls-rustls-no-provider"] }

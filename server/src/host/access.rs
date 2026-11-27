@@ -47,6 +47,9 @@ pub struct Account {
     pub grant: Grant,
     /// It may reset the VMs it opens, from the console. Not unless said.
     pub power: bool,
+    /// It may watch the sessions of the VMs it opens, and ask to control them, with the consent
+    /// of the user signed in to the guest. Not unless said.
+    pub shadow: bool,
 }
 
 impl Account {
@@ -67,6 +70,7 @@ impl Account {
             hash,
             grant,
             power: false,
+            shadow: false,
         })
     }
 }

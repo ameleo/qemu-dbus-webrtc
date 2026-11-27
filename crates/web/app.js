@@ -32,6 +32,16 @@ const WORDS = {
     takenOverText: "The session was opened from another place.",
     errorTitle: "Cannot connect",
     watching: "View only",
+    waitingTitle: "Waiting for the user",
+    waitingText: "The user of this virtual machine is asked, on their screen, whether you may watch it.",
+    consentStoppedTitle: "Watching stopped",
+    consentStoppedText: "The user of the virtual machine stopped being watched.",
+    controlAsk: "Ask the user for control",
+    controlGiveBack: "Give control back",
+    controlAsking: "The user is asked whether you may control their session.",
+    controlGranted: "You have control: your keyboard and mouse act in the virtual machine.",
+    controlRefused: "The user did not give you control.",
+    controlEnded: "You no longer have control.",
     micOff: "Microphone: off. Click to let the guest use it.",
     micReady: "Microphone: allowed. It opens when an application of the guest records.",
     micOn: "Microphone: in use by the guest. Click to stop.",
@@ -118,6 +128,16 @@ const WORDS = {
     takenOverText: "La session a été ouverte depuis un autre poste.",
     errorTitle: "Connexion impossible",
     watching: "Observation",
+    waitingTitle: "En attente de l'utilisateur",
+    waitingText: "L'utilisateur de cette machine virtuelle doit accepter, sur son écran, que vous la regardiez.",
+    consentStoppedTitle: "Observation arrêtée",
+    consentStoppedText: "L'utilisateur de la machine virtuelle a arrêté l'observation.",
+    controlAsk: "Demander la main à l'utilisateur",
+    controlGiveBack: "Rendre la main",
+    controlAsking: "L'utilisateur doit accepter que vous preniez la main.",
+    controlGranted: "Vous avez la main : votre clavier et votre souris agissent dans la machine virtuelle.",
+    controlRefused: "L'utilisateur ne vous a pas donné la main.",
+    controlEnded: "Vous n'avez plus la main.",
     micOff: "Micro : coupé. Cliquez pour le confier à la machine.",
     micReady: "Micro : autorisé. Il s'ouvre quand une application de la machine enregistre.",
     micOn: "Micro : utilisé par la machine. Cliquez pour le couper.",
@@ -348,10 +368,14 @@ const uint = (fields, n) => fields.get(n)?.[0] || 0;
 // A repeated number field: packed (one byte array), or a value each.
 const uints = (fields, n) => (fields.get(n) || []).flatMap((v) => typeof v === "number" ? [v] : pb.varints(v));
 
-// ClientMessage: hello = 1, answer = 2, ice = 3, leave = 4, power = 5 (Power: action = 1).
+// ClientMessage: hello = 1, answer = 2, ice = 3, leave = 4, power = 5 (Power: action = 1),
+// control = 6 (ControlRequest: wanted = 1).
 // Hello: codecs = 1, shadow = 2, user = 3, password = 4. With ?shadow in the address, the page
 // only watches.
 const shadow = new URLSearchParams(location.search).has("shadow");
+// A shadow client's keyboard and pointer act only once the guest's user gave it control.
+const shadowControl = { granted: false, asking: false };
+const viewOnly = () => shadow && !shadowControl.granted;
 const relayOnly = new URLSearchParams(location.search).has("relay");
 const hello = (codecs, account) => pb.message((o) => pb.bytes(o, 1, pb.message((h) => {
   codecs.forEach((c) => pb.string(h, 1, c));
@@ -365,6 +389,8 @@ const ice = (candidate, mline) => pb.message((o) => pb.bytes(o, 3, pb.message((c
 const leaving = () => pb.message((o) => pb.bytes(o, 4, []));
 // A power action of the VM, one the offer lists: its reset.
 const powerAction = (action) => pb.message((o) => pb.bytes(o, 5, pb.message((p) => pb.uint(p, 1, action))));
+// A shadow client asks for control (ControlRequest: wanted = 1), or gives it back.
+const controlRequest = (wanted) => pb.message((o) => pb.bytes(o, 6, pb.message((c) => { if (wanted) pb.uint(c, 1, 1); })));
 
 // The VM's signalling, next to its page (/vm/<uuid>/signal), and the peer connection, both new
 // for each connection: first with no account, then, if the server asks for one, with what the
@@ -580,8 +606,9 @@ window.addEventListener("pagehide", () => {
 // ServerMessage: offer = 1, ice = 2, error = 3, ended = 4, power_done = 5; SessionDescription:
 // sdp = 1, vm_name = 2, ice_servers = 3, turn_servers = 4 (TurnServer: urls = 1, username = 2,
 // credential = 3), relay_only = 5, power_actions = 6; Ended: reason = 1 (1 another client took
-// the session over, 2 the server stops); PowerDone: action = 1, error = 2. The server ends a
-// session by closing the WebSocket cleanly.
+// the session over, 2 the server stops, 3 the guest's user stopped being watched); PowerDone:
+// action = 1, error = 2; waiting = 6 (the guest's user is asked); control = 7 (Control: granted =
+// 1). The server ends a session by closing the WebSocket cleanly.
 const onMessage = async (event) => {
   const message = pb.parse(new Uint8Array(event.data));
   const peer = pc;
@@ -590,6 +617,10 @@ const onMessage = async (event) => {
     setName(str(offer, 2));
     // power_actions = 6: what the user may ask of the VM (its reset); none without the right.
     power.offered(uints(offer, 6));
+    // A shadow session starts without control; the card that waited for the user's consent
+    // gives way to the usual one, until the video plays.
+    takeControl.set(false);
+    if (shadow) card.show({ title: T.connecting, text: T.connectingTo });
     // ice_servers = 3: the STUN server the server asks, for the browser to find its own
     // public address behind a NAT; turn_servers = 4: the relays it may send through when it
     // cannot reach the server directly (only TCP or TLS out). The candidates it finds go to the
@@ -636,12 +667,18 @@ const onMessage = async (event) => {
   } else if (message.has(5)) {
     const done = pb.parse(message.get(5)[0]);
     power.done(uint(done, 1), str(done, 2));
+  } else if (message.has(6)) {
+    card.show({ title: T.waitingTitle, text: T.waitingText });
+  } else if (message.has(7)) {
+    takeControl.answered(!!uint(pb.parse(message.get(7)[0]), 1));
   } else if (message.has(4)) {
     const reason = uint(pb.parse(message.get(4)[0]), 1);
     if (reason === 1) {
       session.end({ icon: "swap", title: T.takenOverTitle, text: T.takenOverText, again: T.takeBack });
     } else if (reason === 2) {
       session.lost(T.serverStopped);
+    } else if (reason === 3) {
+      session.end({ icon: "ended", title: T.consentStoppedTitle, text: T.consentStoppedText });
     } else {
       session.end({ icon: "ended", title: T.endedTitle, text: T.endedText });
     }
@@ -723,7 +760,7 @@ const input = {
   motion: [0, 0],         // relative moves not sent yet, in guest pixels, sent once per frame
   motionDue: false,       // a frame will send them
   send(events) {
-    if (this.channel?.readyState !== "open" || events.length === 0) return;
+    if (viewOnly() || this.channel?.readyState !== "open" || events.length === 0) return;
     this.channel.send(new Uint8Array(pb.message((o) => events.forEach((e) => pb.bytes(o, 1, e)))));
   },
   // The lock keys first, when the focus came back.
@@ -786,7 +823,7 @@ function listen(v) {
 
   const video = v.video;
   video.addEventListener("pointermove", (e) => {
-    if (shadow) return;
+    if (viewOnly()) return;
     if (pointer.relative) {
       // The relative pointer stays in this page, which holds it.
       if (v.screen !== 0 || !pointer.locked()) return;
@@ -816,7 +853,7 @@ function listen(v) {
   });
   video.addEventListener("pointerdown", (e) => {
     const button = BUTTONS[e.button];
-    if (shadow) return;
+    if (viewOnly()) return;
     if (pointer.relative) {
       e.preventDefault();
       if (v.screen !== 0) return;
@@ -992,8 +1029,9 @@ const pointer = {
     this.draw();
   },
   draw() {
-    // A shadow client only watches: it sees the guest pointer, and takes none.
-    hint.hidden = !this.relative || this.locked() || !input.channel || shadow || card.shown();
+    // A shadow client only watches, unless it was given control: it sees the guest pointer, and
+    // takes none.
+    hint.hidden = !this.relative || this.locked() || !input.channel || viewOnly() || card.shown();
     views.forEach((v) => this.drawOn(v));
   },
   // The guest pixel (x, y) on the window, the video being scaled to fit (object-fit: contain).
@@ -1922,6 +1960,40 @@ document.addEventListener("pointerdown", (e) => {
   if (!$("power-menu").hidden && !e.target.closest("#power-menu, #leave")) power.close();
 });
 $("watching").hidden = !shadow;
+
+// A shadow client asks the guest's user for control, and gives it back; the server says what came
+// of it (Control).
+const takeControl = {
+  set(granted) {
+    shadowControl.granted = granted;
+    $("control").classList.toggle("on", granted || shadowControl.asking);
+    tip("control", granted ? T.controlGiveBack : T.controlAsk);
+    pointer.draw();
+  },
+  answered(granted) {
+    const was = shadowControl.granted, asked = shadowControl.asking;
+    shadowControl.asking = false;
+    this.set(granted);
+    if (granted) toast.show(T.controlGranted, 4000);
+    else if (asked) toast.show(T.controlRefused, 4000);
+    else if (was) toast.show(T.controlEnded, 4000);
+  },
+};
+$("control").hidden = !shadow;
+tip("control", T.controlAsk);
+$("control").addEventListener("click", () => {
+  if (shadowControl.granted || shadowControl.asking) {
+    input.releaseAll();
+    shadowControl.asking = false;
+    send(controlRequest(false));
+    takeControl.set(false);
+  } else {
+    shadowControl.asking = true;
+    send(controlRequest(true));
+    takeControl.set(false);
+    toast.show(T.controlAsking, 4000);
+  }
+});
 
 const panel = {
   toggle(open = $("panel").hidden) {

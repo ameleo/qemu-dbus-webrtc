@@ -98,6 +98,9 @@ message Connect {
   // The user may ask the VM's power actions (qdw.v1.Power: reset it), as its manager allows.
   // Ignored for a shadow client.
   bool power = 5;
+  // The user may watch the VM's session as a shadow client (qdw.v1.Hello shadow), with the
+  // consent of the user signed in to the guest, and ask to control it too.
+  bool may_shadow = 6;
 }
 
 message User {

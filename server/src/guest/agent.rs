@@ -11,6 +11,7 @@ use tracing::{info, warn};
 
 use crate::guest::cameras::Cameras;
 use crate::guest::clipboard::Clipboard;
+use crate::guest::consent::Consents;
 use crate::guest::drives::Drives;
 use crate::guest::printers::Printers;
 use crate::session::input::AgentMouse;
@@ -20,21 +21,35 @@ const RETRY: Duration = Duration::from_secs(3);
 /// How long the agent has to answer `Reset`.
 const RESET_TIME: Duration = Duration::from_secs(5);
 
+/// What uses the guest agent's connection: told when it comes and goes.
+#[derive(Clone)]
+pub struct Users {
+    /// The connection itself, for whoever calls the agent now and then (`user_left`).
+    pub link: tokio::sync::watch::Sender<Option<zbus::Connection>>,
+    pub mouse: AgentMouse,
+    pub clipboard: Arc<Clipboard>,
+    pub drives: Arc<Drives>,
+    pub printers: Arc<Printers>,
+    pub cameras: Arc<Cameras>,
+    pub consents: Arc<Consents>,
+}
+
 /// Keep a connection to the guest agent: when the agent or the guest restarts, connect again
 /// once the guest opens the agent's port, and bring the drives, printers and cameras back.
 /// Runs until the VM is detached; without an agent device on the VM, there is no clipboard, no
 /// drives, no printers and no cameras.
-pub async fn run(
-    vm: zbus::Connection,
-    link: tokio::sync::watch::Sender<Option<zbus::Connection>>,
-    mouse: AgentMouse,
-    clipboard: Arc<Clipboard>,
-    drives: Arc<Drives>,
-    printers: Arc<Printers>,
-    cameras: Arc<Cameras>,
-) {
+pub async fn run(vm: zbus::Connection, users: Users) {
+    let Users {
+        link,
+        mouse,
+        clipboard,
+        drives,
+        printers,
+        cameras,
+        consents,
+    } = &users;
     loop {
-        let host = |builder| printers.serve(drives.serve(clipboard.serve(builder)));
+        let host = |builder| consents.serve(printers.serve(drives.serve(clipboard.serve(builder))));
         match agent::connect(&vm, host).await {
             Ok(mut agent) => {
                 let connection = agent.connection.clone();
@@ -42,14 +57,7 @@ pub async fn run(
                 // Detached however this ends, this task aborted included (the server detaches
                 // from the VM): what holds the connection lets it go, and QEMU takes the next.
                 link.send_replace(Some(connection.clone()));
-                let _attached = Attached {
-                    link: link.clone(),
-                    mouse: mouse.clone(),
-                    clipboard: clipboard.clone(),
-                    drives: drives.clone(),
-                    printers: printers.clone(),
-                    cameras: cameras.clone(),
-                };
+                let _attached = Attached(users.clone());
                 if let Err(e) = mouse.attach(&connection).await {
                     warn!(error = %format!("{e:#}"), "guest agent pointer: the QEMU tablet instead");
                 }
@@ -61,6 +69,9 @@ pub async fn run(
                 }
                 if let Err(e) = cameras.attach(&connection).await {
                     warn!(error = %format!("{e:#}"), "guest agent cameras");
+                }
+                if let Err(e) = consents.attach(&connection).await {
+                    info!(error = %format!("{e:#}"), "guest agent consent");
                 }
                 // Gone when its connection fails, or when the guest closes its port (the
                 // agent restarted): nothing fails on the connection then.
@@ -106,22 +117,17 @@ pub async fn user_left(agent: &tokio::sync::watch::Receiver<Option<zbus::Connect
 }
 
 /// What uses the agent's connection, detached from it when dropped.
-struct Attached {
-    link: tokio::sync::watch::Sender<Option<zbus::Connection>>,
-    mouse: AgentMouse,
-    clipboard: Arc<Clipboard>,
-    drives: Arc<Drives>,
-    printers: Arc<Printers>,
-    cameras: Arc<Cameras>,
-}
+struct Attached(Users);
 
 impl Drop for Attached {
     fn drop(&mut self) {
-        self.link.send_replace(None);
-        self.clipboard.detach();
-        self.drives.detach();
-        self.printers.detach();
-        self.cameras.detach();
-        self.mouse.detach();
+        let users = &self.0;
+        users.consents.detach();
+        users.link.send_replace(None);
+        users.clipboard.detach();
+        users.drives.detach();
+        users.printers.detach();
+        users.cameras.detach();
+        users.mouse.detach();
     }
 }

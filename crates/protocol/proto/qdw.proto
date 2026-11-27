@@ -29,7 +29,15 @@ message ClientMessage {
     IceCandidate ice = 3;
     Leave leave = 4;
     Power power = 5;
+    ControlRequest control = 6;
   }
+}
+
+// A shadow client asks to control the guest besides its user (wanted), or gives control back.
+// The server asks the user signed in to the guest, through its agent, and says what came of it
+// (ServerMessage control). Ignored from the user's own client.
+message ControlRequest {
+  bool wanted = 1;
 }
 
 // The user leaves on purpose: the client's disconnect button, its window closed. The client
@@ -62,7 +70,21 @@ message ServerMessage {
     Error error = 3;
     Ended ended = 4;
     PowerDone power_done = 5;
+    Waiting waiting = 6;
+    Control control = 7;
   }
+}
+
+// To a shadow client, before its offer: the user signed in to the guest is asked, on their own
+// desktop, whether it may watch the session; they have 30 seconds. An Error follows if they do
+// not agree (or nobody is signed in, or the session is locked), the offer if they do.
+message Waiting {}
+
+// To a shadow client: whether its keyboard and pointer now act in the guest, besides the user's.
+// Sent when the user agreed or not to its ControlRequest, and when control ends (given back, or
+// stopped by the user).
+message Control {
+  bool granted = 1;
 }
 
 // The answer to a Power: the VM's manager took the action (an empty error), or not; the server
@@ -87,6 +109,9 @@ message Ended {
     // The server stops (it is stopped or restarted): the client may connect again later. A
     // crash of the server says nothing: the connection is lost.
     SERVER_STOPPING = 2;
+    // To a shadow client: the user signed in to the guest stopped being watched, or their
+    // consent no longer holds (the session locked, or its user changed).
+    CONSENT_STOPPED = 3;
   }
   Reason reason = 1;
 }
@@ -105,12 +130,15 @@ message Hello {
   // level-id, profile-compatibility-indicator, interop-constraints): Main, Main 10, or Main
   // 4:4:4 (10).
   repeated string codecs = 1;
-  // Watch only: a shadow client sees and hears the guest, and nothing more. Without it, the
-  // client is the user of the session: its keyboard and pointer, clipboard, microphone, drives
-  // and printers go to the guest, and the guest takes the size of its window. There is one user
-  // at a time: a new one takes the session over, and the server ends the last one's
-  // (Ended TAKEN_OVER). Shadow clients watch the user: they stay when another user takes the
-  // session over, and their sessions end (a clean close) when the user leaves.
+  // Watch only: a shadow client sees and hears the guest, and nothing more, unless the user
+  // lets it control the guest too (ControlRequest). Without it, the client is the user of the
+  // session: its keyboard and pointer, clipboard, microphone, drives and printers go to the
+  // guest, and the guest takes the size of its window. There is one user at a time: a new one
+  // takes the session over, and the server ends the last one's (Ended TAKEN_OVER). A shadow
+  // client needs the right to (the server's account, or the broker, says so) and the consent of
+  // the user signed in to the guest, whom the server asks through the guest agent (Waiting):
+  // without an agent that asks, nobody watches. Its session ends when that user stops it, or
+  // when their consent no longer holds (Ended CONSENT_STOPPED).
   bool shadow = 2;
   // The server's user and password, when it asks for them (its default): checked before the
   // server starts the VM or attaches to it. None given is answered with the Error "an account

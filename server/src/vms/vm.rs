@@ -284,6 +284,7 @@ async fn start_in(
     let drives = drives::Drives::new();
     let printers = printers::Printers::new();
     let cameras = cameras::Cameras::new();
+    let consents = crate::guest::consent::Consents::new();
     // The guest's screens at the size and place of the user's monitors.
     let layout = layout::Layout::start(graphic.into_iter().map(|(_, _, c)| c).collect());
     let agent_mouse = input::AgentMouse::default();
@@ -292,12 +293,15 @@ async fn start_in(
     let agent_task = Aborted(tokio::spawn(
         agent::run(
             vm_connection.clone(),
-            agent_link,
-            agent_mouse.clone(),
-            clipboard.clone(),
-            drives.clone(),
-            printers.clone(),
-            cameras.clone(),
+            agent::Users {
+                link: agent_link,
+                mouse: agent_mouse.clone(),
+                clipboard: clipboard.clone(),
+                drives: drives.clone(),
+                printers: printers.clone(),
+                cameras: cameras.clone(),
+                consents: consents.clone(),
+            },
         )
         .instrument(span.clone()),
     ));
@@ -333,6 +337,7 @@ async fn start_in(
         layout: layout.clone(),
         user: Default::default(),
         agent,
+        consents,
         power: power.map(Arc::new),
         bitrates: args.bitrates,
         network: args.network.clone(),

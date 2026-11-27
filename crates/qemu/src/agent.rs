@@ -17,8 +17,9 @@ use futures_util::StreamExt;
 use zbus::OwnedFd;
 
 pub use ameleo_display_protocol::{
-    AgentProxy, CameraProxy, ClipboardProxy, DriveProxy, FileClipboardProxy, HOST_PATH, MouseProxy,
-    PORT_NAME, PrinterProxy, camera, camera_control, drive, file_contents, iface, mime, printer,
+    AgentProxy, CameraProxy, ClipboardProxy, ConsentProxy, DriveProxy, FileClipboardProxy,
+    HOST_PATH, MouseProxy, PORT_NAME, PrinterProxy, camera, camera_control, consent, drive,
+    file_contents, iface, mime, printer,
 };
 
 /// How long the agent has to answer the D-Bus handshake, once the guest opened its port.
