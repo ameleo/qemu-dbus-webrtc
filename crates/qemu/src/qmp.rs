@@ -28,7 +28,7 @@ pub struct Qmp {
 impl Qmp {
     /// Connect to a QMP socket and leave capabilities negotiation mode.
     pub fn connect(path: &Path) -> Result<Self> {
-        let stream = UnixStream::connect(path)
+        let stream = connect_within(path, IO_TIME)
             .with_context(|| format!("connecting to QMP at {}", path.display()))?;
         // A QEMU that never answers fails the exchange rather than hold its thread for ever.
         stream.set_read_timeout(Some(IO_TIME))?;
@@ -124,5 +124,52 @@ impl Qmp {
         }
         serde_json::from_str(&line)
             .with_context(|| format!("unreadable QMP message: {}", line.trim_end()))
+    }
+}
+
+/// Connect to the Unix socket at `path`, waiting at most `time` for room in its backlog: a
+/// QEMU that stopped accepting (its main loop stuck) fails the connection rather than hold the
+/// caller's thread for ever. Linux bounds a Unix socket's connect by its send timeout.
+fn connect_within(path: &Path, time: std::time::Duration) -> std::io::Result<UnixStream> {
+    use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType, sockopt};
+    let socket = rustix::net::socket_with(
+        AddressFamily::UNIX,
+        SocketType::STREAM,
+        SocketFlags::CLOEXEC,
+        None,
+    )?;
+    sockopt::set_socket_timeout(&socket, sockopt::Timeout::Send, Some(time))?;
+    rustix::net::connect(&socket, &SocketAddrUnix::new(path)?)?;
+    Ok(UnixStream::from(socket))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_socket_that_takes_nobody_fails_the_connection() {
+        use rustix::net::{AddressFamily, SocketAddrUnix, SocketType};
+        let dir = std::env::temp_dir().join(format!("qdw-qmp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("qmp.sock");
+        let _ = std::fs::remove_file(&path);
+        // A listener that accepts nothing, with no room beyond one waiting connection.
+        let listener = rustix::net::socket(AddressFamily::UNIX, SocketType::STREAM, None).unwrap();
+        rustix::net::bind(&listener, &SocketAddrUnix::new(&path).unwrap()).unwrap();
+        rustix::net::listen(&listener, 0).unwrap();
+        let time = std::time::Duration::from_millis(200);
+        // The backlog fills, then a connection waits for room: at most `time`.
+        let mut waiting = Vec::new();
+        let failed = loop {
+            let started = std::time::Instant::now();
+            match connect_within(&path, time) {
+                Ok(stream) => waiting.push(stream),
+                Err(e) => break (e, started.elapsed()),
+            }
+            assert!(waiting.len() < 16, "the backlog never filled");
+        };
+        assert!(failed.1 >= time && failed.1 < time * 10, "{failed:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
