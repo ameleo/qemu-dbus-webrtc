@@ -15,12 +15,19 @@ What each release brings. The packages are on the
   answers, by the users allowed to: an account's `power = true`, or the broker for the users it
   relays (`Connect.power`). Through libvirt, or QEMU's QMP socket. The offer lists it
   (`power_actions`); the client asks with `Power`, answered by `PowerDone`.
+- **Shadowing with the guest's user's consent:** a shadow client needs the right to (an
+  account's `shadow = true`, or the broker's `Connect.may_shadow`) and the consent of the user
+  signed in to the guest, asked on their desktop by the guest agent (`fr.ameleo.Agent.Consent1`,
+  ameleo-display-protocol 0.3); it may ask for control too, asked again. New messages: `Waiting`,
+  `ControlRequest`, `Control`, `Ended CONSENT_STOPPED`.
 
 ### Changed
 
 - A VM whose last client ended its session without a `Leave` (a lost connection, or a client
   that does not send it yet) stays attached a minute, for the client to come back, rather than
   five seconds.
+- Shadow clients no longer end when the console's user leaves, but when the guest's user stops
+  them; anyone who may open a VM no longer may watch it.
 
 ### Fixed
 

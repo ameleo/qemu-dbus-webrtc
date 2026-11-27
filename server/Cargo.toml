@@ -54,3 +54,5 @@ rcgen = { version = "0.14", default-features = false, features = ["crypto", "rin
 # The broker's test: a broker served in TLS, locally.
 tonic = { workspace = true, features = ["codegen", "channel", "router", "server", "tls-ring"] }
 tokio-stream = { workspace = true, features = ["net"] }
+# Time paused and advanced by hand, for the waits of the guest's consent.
+tokio = { workspace = true, features = ["test-util"] }

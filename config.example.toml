@@ -24,6 +24,9 @@ vms = ["win11-alice", "b8ff54ee-77f5-43dd-aa19-de8eaed5eb75"]
 # It may also reset these VMs from the console's toolbar, for a guest that no longer answers
 # (through libvirt, or QEMU's QMP socket). Default: false.
 power = true
+# It may also watch these VMs' sessions (?shadow in the address), and ask to control them, once
+# the user signed in to the guest agreed, through the guest agent. Default: false.
+shadow = true
 
 [listen]
 # Address of the client page and signaling endpoint. Default: 127.0.0.1:8090 (local only).

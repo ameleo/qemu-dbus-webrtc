@@ -70,6 +70,7 @@ impl Broker for TestBroker {
                 }),
                 shadow: false,
                 power: false,
+                may_shadow: false,
             })),
         }))
         .await

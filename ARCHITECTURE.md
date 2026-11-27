@@ -135,9 +135,24 @@ targets current hardware, which the royalty-free codecs cover.
 
 One client controls the session at a time, as with RDP: its keyboard and pointer, clipboard,
 microphone, drives and printers are connected to the guest, and the guest resolution follows its
-window. A new client takes over the session, and the previous one is ended with a reason. Shadow
-clients (`shadow` in their hello) are view-only, unlimited in number, and are disconnected when
-the user leaves (not on a takeover); handing them keyboard and mouse control is planned.
+window. A new client takes over the session, and the previous one is ended with a reason.
+
+Someone else may watch the session (a shadow client: `shadow` in its hello), and control it
+besides its user, only with the consent of the user signed in to the guest, given on their own
+desktop: the server asks through the guest agent (`fr.ameleo.Agent.Consent1`) and never decides
+for them. Neither the console's client nor anything the server knows of it stands for that user:
+the one connected may not be the one signed in, and the page is the most exposed part. The
+shadow client needs the right to (an account's `shadow = true`, or the broker's
+`Connect.may_shadow`); it is told it waits (`Waiting`) while the agent shows the request, which
+defaults to no and expires after 30 seconds, and is refused when the user says no, nobody is
+signed in, the session is locked, or no agent asks. Nothing of the guest reaches it before the
+user agrees. It then sees and hears the guest; it may ask for control (`ControlRequest`), which
+the agent asks the user in turn, and gets its answer (`Control`): granted, its keyboard and
+pointer act in the guest besides the user's, never its clipboard, drives, printers or cameras.
+While a consent lasts, the agent shows who watches or controls, with a way to stop; the user
+stopping, the session locking or its user changing ends it, and the server ends the shadow
+session (`Ended CONSENT_STOPPED`) or takes control back. Shadow clients are unlimited in number
+and do not depend on the console's user: a takeover or the user leaving does not end them.
 
 When the user leaves, the server tells the guest agent (`Agent1.Reset`), which lets go of what
 the client brought (clipboard, drives, printers, cameras) and locks the guest's session if a user

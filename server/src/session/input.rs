@@ -255,19 +255,22 @@ impl ViewerInput {
     /// Release whatever the viewer left pressed: everything, a failure on one key not leaving
     /// the next ones pressed; the first failure, if any.
     pub async fn release_all(&mut self) -> Result<()> {
+        // What fails to be released stays held, for the next try (the session's end).
         let mut first = Ok(());
         for keycode in std::mem::take(&mut self.keys) {
-            if let Err(e) = self.qemu.key(keycode, false).await
-                && first.is_ok()
-            {
-                first = Err(e);
+            if let Err(e) = self.qemu.key(keycode, false).await {
+                self.keys.insert(keycode);
+                if first.is_ok() {
+                    first = Err(e);
+                }
             }
         }
         for button in std::mem::take(&mut self.buttons) {
-            if let Err(e) = self.button(button, false).await
-                && first.is_ok()
-            {
-                first = Err(e);
+            if let Err(e) = self.button(button, false).await {
+                self.buttons.insert(button);
+                if first.is_ok() {
+                    first = Err(e);
+                }
             }
         }
         first

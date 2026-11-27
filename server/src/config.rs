@@ -145,6 +145,9 @@ struct AccountFile {
     /// It may reset them, from the console.
     #[serde(default)]
     power: bool,
+    /// It may watch their sessions, and ask to control them, with the guest's user's consent.
+    #[serde(default)]
+    shadow: bool,
 }
 
 /// Who may open a VM's console.
@@ -553,6 +556,7 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
                 let mut new = Account::new(account.user, account.password, grant)
                     .with_context(|| format!("in the [[account]] of {user}"))?;
                 new.power = account.power;
+                new.shadow = account.shadow;
                 accounts.push(new);
             }
             if accounts.is_empty() {
@@ -683,7 +687,7 @@ mod tests {
         let config = parse_with(&format!(
             "[auth]\nuser = \"admin\"\npassword = \"{admin}\"\n\
              [[account]]\nuser = \"alice\"\npassword = \"{alice}\"\nvms = [\"win11\"]\n\
-             power = true\n"
+             power = true\nshadow = true\n"
         ))
         .unwrap();
         let Auth::Password(accounts) = config.auth().unwrap() else {
@@ -697,6 +701,9 @@ mod tests {
         // The power actions only for the account that says so.
         assert!(accounts.check("alice", "secret").unwrap().power);
         assert!(!accounts.check("admin", "root").unwrap().power);
+        // Watching too.
+        assert!(accounts.check("alice", "secret").unwrap().shadow);
+        assert!(!accounts.check("admin", "root").unwrap().shadow);
         // Accounts alone, without [auth]'s user.
         let alone =
             format!("[[account]]\nuser = \"alice\"\npassword = \"{alice}\"\nvms = [\"*\"]\n");

@@ -8,15 +8,16 @@ use tracing::{Instrument, debug, info, warn};
 
 use qdw_protocol::Message;
 use qdw_protocol::v1::{
-    BandwidthEstimate, ControlMessage, EncodeLatency, Ended, Input, Microphone, MonitorLayout,
-    PointerMode, Power, PowerAction, PowerDone, SessionDescription, VideoPause, client_message,
-    control_message, ended, server_message,
+    BandwidthEstimate, Control, ControlMessage, ControlRequest, EncodeLatency, Ended, Input,
+    Microphone, MonitorLayout, PointerMode, Power, PowerAction, PowerDone, SessionDescription,
+    VideoPause, Waiting, client_message, control_message, ended, server_message,
 };
 
 use super::shared::{Request, Shared};
-use super::signalling::{Socket, close, receive, send};
+use super::signalling::{Rights, Socket, close, receive, refuse, send};
 use crate::guest::cameras::{CamerasFollow, ViewerCameras};
 use crate::guest::clipboard::{ViewerClipboard, ViewerFollow};
+use crate::guest::consent::{Granted, Kind, Refused};
 use crate::guest::drives::{DrivesFollow, ViewerDrives};
 use crate::guest::printers::{PrintersFollow, ViewerPrinters};
 use crate::session::input::ViewerInput;
@@ -73,21 +74,38 @@ pub(crate) enum Departure {
     ServerStopping,
     /// The VM stopped.
     VmStopped,
+    /// To a shadow client: the guest's user stopped being watched, or their consent no longer
+    /// holds.
+    ConsentStopped,
 }
 
 /// The session of a client of the VM: `codecs` it decodes, from its hello, whether it only
-/// watches, and whether its user may ask the VM's power actions. Returns how it ended, and the
-/// id of its user (`None` for a shadow client, or a session that did not start).
+/// watches, and what else it may do (`rights`). Returns how it ended, and the id of its user
+/// (`None` for a shadow client, or a session that did not start).
 pub(crate) async fn viewer(
     mut socket: Socket,
     client: &Client,
     codecs: Vec<String>,
     shadow: bool,
-    power: bool,
+    rights: Rights,
     server_stopping: watch::Receiver<bool>,
 ) -> (Result<Departure>, Option<u64>) {
     let stopping = server_stopping.clone();
     let shared = client.shared().clone();
+
+    // A shadow client watches only once the user signed in to the guest agreed, before anything
+    // of the guest reaches it.
+    let watching = if shadow {
+        match consented(&mut socket, &shared, &rights.who).await {
+            Ok(granted) => Some(granted),
+            Err(message) => {
+                refuse(&mut socket, &message).await;
+                return (Err(anyhow::anyhow!(message)), None);
+            }
+        }
+    } else {
+        None
+    };
 
     // The video in 10 bits if this viewer and all the others decode it.
     let deep = codecs.iter().any(|c| shared.codec.deep_by(c));
@@ -164,8 +182,6 @@ pub(crate) async fn viewer(
     // goes, seconds later. The session ends as soon as the display loop sees the VM stop,
     // whatever it waits on.
     let mut vm_stopped = shared.vm_stopped.clone();
-    // A shadow client watches the user: it goes when the user does.
-    let mut user_left = user_id.is_none().then(|| shared.user.left());
     let ended = tokio::select! {
         ended = run(
             &mut socket,
@@ -184,26 +200,17 @@ pub(crate) async fn viewer(
                 server_stopping,
                 // The VM's power actions, for a user who may ask them.
                 power_actions: match &shared.power {
-                    Some(control) if power && !shadow => control.actions().to_vec(),
+                    Some(control) if rights.power && !shadow => control.actions().to_vec(),
                     _ => Vec::new(),
                 },
+                watching,
+                who: rights.who,
             },
             &shared,
         ) => ended,
         true = async { vm_stopped.wait_for(|stopped| *stopped).await.is_ok() } => {
             info!("the VM stopped: the session ends");
             Ok(Departure::VmStopped)
-        }
-        () = async {
-            match &mut user_left {
-                Some(left) => {
-                    let _ = left.changed().await;
-                }
-                None => std::future::pending().await,
-            }
-        } => {
-            info!("the user left: the shadow session ends");
-            Ok(Departure::Left)
         }
     };
     // A VM that stops (shut down, powered off) may break the session before the display loop
@@ -224,6 +231,17 @@ pub(crate) async fn viewer(
         }
         ended => ended,
     };
+    // The peer connection goes first: nothing more of the guest reaches the client while it is
+    // told the session ended, however slowly it reads.
+    drop(session);
+    if let Ok(Departure::ConsentStopped) = ended {
+        let reason = ended::Reason::ConsentStopped.into();
+        let told = send(
+            &mut socket,
+            server_message::Message::Ended(Ended { reason }),
+        );
+        let _ = tokio::time::timeout(TELL_TIME, told).await;
+    }
     // Whatever ended the session, the WebSocket closes with a close frame, whose status tells
     // the client how: a normal end, the server going away (it may come back), or a failure.
     let code = match &ended {
@@ -269,6 +287,50 @@ pub(crate) async fn viewer(
     (ended, user_id)
 }
 
+/// A task aborted when dropped: a request for control the client no longer waits for.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Ask the user signed in to the guest whether `who` may watch, the client told it waits
+/// (`Waiting`). Gives up when the client goes meanwhile. The error is what the client is told.
+async fn consented(socket: &mut Socket, shared: &Shared, who: &str) -> Result<Granted, String> {
+    send(socket, server_message::Message::Waiting(Waiting {}))
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    let asked = shared.consents.ask(Kind::View, who);
+    // Only a close is expected meanwhile; anything else waits for the offer.
+    let gone = async {
+        loop {
+            match receive(socket).await {
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => return,
+            }
+        }
+    };
+    tokio::select! {
+        answer = asked => match answer {
+            Ok(granted) => {
+                info!(who, "shadow session: the guest's user agreed");
+                Ok(granted)
+            }
+            Err(Refused::NoAgent) => {
+                info!(who, "shadow client refused: no guest agent asks its user");
+                Err("the guest has no agent to ask its user: nobody may watch".into())
+            }
+            Err(Refused::No) => {
+                info!(who, "shadow client refused by the guest's user");
+                Err("the user of the guest did not agree".into())
+            }
+        },
+        () = gone => Err("the client left before the guest's user answered".into()),
+    }
+}
+
 /// How a session whose peer connection closed ended: a client that leaves sends its `Leave`
 /// on the signalling, then closes its peer connection, whose end may well arrive first; so the
 /// `Leave` is waited for a moment.
@@ -286,6 +348,9 @@ async fn leave_after_closed(socket: &mut Socket) -> Departure {
         .await
         .unwrap_or(Departure::Lost)
 }
+
+/// How long a client has to take what ends its session, before the close.
+const TELL_TIME: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// How long after a session failed the display loop may see the VM stop, when that is why: it
 /// looks every second.
@@ -340,6 +405,10 @@ struct Follow {
     server_stopping: watch::Receiver<bool>,
     /// The power actions the user may ask; none for a shadow client.
     power_actions: Vec<PowerAction>,
+    /// For a shadow client: the consent it watches by, until the guest's user stops it.
+    watching: Option<Granted>,
+    /// Who the client's user is, for the guest's user when they are asked.
+    who: String,
 }
 
 fn send_all(session: &Session, channel: Channel, messages: Vec<Vec<u8>>) {
@@ -408,18 +477,69 @@ async fn run(
     let mut reception = tokio::time::interval(std::time::Duration::from_secs(5));
     // The power actions under way answer here.
     let (power_done_tx, mut power_done) = mpsc::unbounded_channel::<(PowerAction, Result<()>)>();
+    // A shadow client: the consent it watches by, and the one it controls by. A request for
+    // control is a task, aborted (which withdraws it) when dropped, with its own answer: an
+    // answer only ever settles its own request.
+    let mut watching = follow.watching.take();
+    let mut controlling: Option<Granted> = None;
+    let mut control_asked: Option<(AbortOnDrop, oneshot::Receiver<Result<Granted, Refused>>)> =
+        None;
     loop {
         tokio::select! {
-            _ = reception.tick() => session.report_reception(),
+            // What ends the session or a right first: once one is ready, no input and no request
+            // goes through before it.
+            biased;
             () = &mut taken_over => {
                 info!("another client took the session over");
                 send(socket, server_message::Message::Ended(Ended { reason: ended::Reason::TakenOver.into() })).await?;
                 return Ok(Departure::TakenOver);
             }
+            // The media stops with the session, before the client is told (`viewer`).
+            () = async {
+                match &mut watching {
+                    Some(granted) => granted.stopped().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                info!("the guest's user stopped being watched: the shadow session ends");
+                return Ok(Departure::ConsentStopped);
+            }
+            () = async {
+                match &mut controlling {
+                    Some(granted) => granted.stopped().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                info!("the guest's user took control back");
+                controlling = None;
+                if let Err(e) = input.release_all().await {
+                    debug!(error = %format!("{e:#}"), "keys not released");
+                }
+                send(socket, server_message::Message::Control(Control { granted: false })).await?;
+            }
             true = async { server_stopping.wait_for(|stopping| *stopping).await.is_ok() } => {
                 send(socket, server_message::Message::Ended(Ended { reason: ended::Reason::ServerStopping.into() })).await?;
                 return Ok(Departure::ServerStopping);
             }
+            answer = async {
+                match &mut control_asked {
+                    Some((_, answer)) => answer.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                control_asked = None;
+                // Granted, and still holding, as the view it comes with.
+                let viewing = watching.as_ref().is_some_and(|view| !view.is_over());
+                match answer {
+                    Ok(Ok(granted)) if viewing && !granted.is_over() => {
+                        info!("the guest's user gave control");
+                        controlling = Some(granted);
+                        send(socket, server_message::Message::Control(Control { granted: true })).await?;
+                    }
+                    _ => send(socket, server_message::Message::Control(Control { granted: false })).await?,
+                }
+            }
+            _ = reception.tick() => session.report_reception(),
             signal = signals.recv() => match signal {
                 Some(Signal::Offer(sdp)) => {
                     send(socket, server_message::Message::Offer(SessionDescription {
@@ -434,7 +554,11 @@ async fn run(
                         power_actions: follow.power_actions.iter().map(|&a| a.into()).collect(),
                     })).await?
                 }
-                Some(Signal::Message(Channel::Input | Channel::Clipboard | Channel::Drive | Channel::Printer | Channel::Camera, _)) if !user => {}
+                // A shadow client's keyboard and pointer act only while the guest's user lets
+                // them; its clipboard, drives, printers and cameras never do.
+                Some(Signal::Message(Channel::Input, _))
+                    if !user && !controlling.as_ref().is_some_and(|control| !control.is_over()) => {}
+                Some(Signal::Message(Channel::Clipboard | Channel::Drive | Channel::Printer | Channel::Camera, _)) if !user => {}
                 Some(Signal::Message(Channel::Camera, bytes)) => {
                     if let Err(e) = cameras.message(&bytes).await {
                         warn!(error = %format!("{e:#}"), "camera");
@@ -601,6 +725,34 @@ async fn run(
                 Some(client_message::Message::Ice(_)) => {}
                 Some(client_message::Message::Hello(_)) => anyhow::bail!("a second hello"),
                 Some(client_message::Message::Leave(_)) => return Ok(Departure::Left),
+                // The user's own client has control: only a shadow client asks it, while it may
+                // still watch.
+                Some(client_message::Message::Control(ControlRequest { wanted: true })) => {
+                    let viewing = watching.as_ref().is_some_and(|view| !view.is_over());
+                    if viewing && controlling.is_none() && control_asked.is_none() {
+                        let consents = shared.consents.clone();
+                        let who = follow.who.clone();
+                        let (answer, answered) = oneshot::channel();
+                        let task = tokio::spawn(
+                            async move {
+                                let _ = answer.send(consents.ask(Kind::Control, &who).await);
+                            }
+                            .in_current_span(),
+                        );
+                        control_asked = Some((AbortOnDrop(task), answered));
+                    }
+                }
+                Some(client_message::Message::Control(ControlRequest { wanted: false })) => {
+                    let asked = control_asked.take().is_some();
+                    let had = controlling.take().is_some();
+                    if had && let Err(e) = input.release_all().await {
+                        debug!(error = %format!("{e:#}"), "keys not released");
+                    }
+                    if asked || had {
+                        info!("the shadow client gave control back");
+                        send(socket, server_message::Message::Control(Control { granted: false })).await?;
+                    }
+                }
                 Some(client_message::Message::Power(Power { action })) => {
                     let action = PowerAction::try_from(action).unwrap_or_default();
                     match &shared.power {
