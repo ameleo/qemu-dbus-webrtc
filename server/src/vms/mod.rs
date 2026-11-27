@@ -6,6 +6,7 @@
 
 pub mod copied;
 pub mod libvirt;
+pub mod power;
 pub mod providers;
 pub mod proxmox;
 pub mod vm;
@@ -234,7 +235,10 @@ impl Vms {
                     let Some(how) = self.attach_to(uuid).await? else {
                         return Ok(None);
                     };
-                    let vm = match vm::start(&how, uuid, &self.config, self.reap.clone()).await {
+                    // What asks its power actions, if anything can.
+                    let power = power::Control::of(&self.providers, uuid, &how).await;
+                    let start = vm::start(&how, uuid, &self.config, power, self.reap.clone());
+                    let vm = match start.await {
                         Ok(vm) => vm,
                         Err(e) => {
                             // What the provider remembered of it may be stale.

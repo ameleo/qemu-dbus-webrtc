@@ -70,6 +70,8 @@ pub struct Shared {
     pub user: Arc<User>,
     /// The connection to the guest agent, while there is one.
     pub agent: watch::Receiver<Option<zbus::Connection>>,
+    /// What asks the VM's power actions, if anything can.
+    pub power: Option<Arc<crate::vms::power::Control>>,
     /// The bounds of the bandwidth estimation.
     pub bitrates: Bitrates,
     /// How clients reach the host from outside.

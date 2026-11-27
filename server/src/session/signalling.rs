@@ -40,6 +40,8 @@ pub enum Admission<'a> {
         user: String,
         /// View-only, as the broker says; the client may ask it too.
         shadow: bool,
+        /// The user may ask the VM's power actions, as the broker says.
+        power: bool,
     },
 }
 
@@ -61,19 +63,21 @@ pub async fn open(
     };
     let mut shadow = hello.shadow;
     // The VMs the client may open: all without accounts, those of its account otherwise; the one
-    // the broker names, for a connection it relays.
-    let grant = match admission {
+    // the broker names, for a connection it relays. And whether it may ask their power actions:
+    // as its account or the broker says; never without accounts.
+    let (grant, power) = match admission {
         Admission::Broker {
             user,
             shadow: view_only,
+            power,
         } => {
             shadow |= view_only;
-            info!(id, user, shadow, "relayed by the broker");
-            crate::host::access::Grant::Only(vec![id.to_owned()])
+            info!(id, user, shadow, power, "relayed by the broker");
+            (crate::host::access::Grant::Only(vec![id.to_owned()]), power)
         }
         Admission::Local {
             auth: Auth::None, ..
-        } => crate::host::access::Grant::All,
+        } => (crate::host::access::Grant::All, false),
         Admission::Local {
             auth: Auth::Password(accounts),
             checks,
@@ -89,7 +93,9 @@ pub async fn open(
             let granted = {
                 let _turn = checks.acquire().await?;
                 tokio::task::spawn_blocking(move || {
-                    accounts.check(&user, &password).map(|a| a.grant.clone())
+                    accounts
+                        .check(&user, &password)
+                        .map(|a| (a.grant.clone(), a.power))
                 })
                 .await?
             };
@@ -99,7 +105,7 @@ pub async fn open(
                 refuse(&mut socket, "wrong user or password").await;
                 return Ok(());
             };
-            info!(id, user = hello.user, "logged in");
+            info!(id, user = hello.user, power = grant.1, "logged in");
             grant
         }
     };
@@ -161,7 +167,7 @@ pub async fn open(
     // The user's session, then the guest told the user left: the server waits for both, should
     // it stop meanwhile.
     let departing = (!shadow).then(|| vms.departing());
-    let (ended, user) = viewer(socket, &client, codecs, shadow, stopping)
+    let (ended, user) = viewer(socket, &client, codecs, shadow, power, stopping)
         .instrument(span.clone())
         .await;
     let departure = {

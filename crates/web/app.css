@@ -78,6 +78,16 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 #panel-tech[open] summary { margin-bottom: 8px; }
 #panel-tech dl { font-size: 12px; }
 
+/* Leaving or resetting the VM, under the toolbar. */
+.menu { position: fixed; top: 64px; left: 50%; z-index: 9; transform: translateX(-50%); display: flex;
+        flex-direction: column; min-width: 200px; padding: 5px; background: var(--surface);
+        border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow);
+        backdrop-filter: blur(12px); }
+.menu button { padding: 8px 12px; border: 0; border-radius: 7px; background: transparent; text-align: left;
+               cursor: pointer; }
+.menu button:hover, .menu button:focus-visible { background: rgba(255, 255, 255, .08); outline: none; }
+.menu button.danger { color: var(--danger); }
+
 /* Cards over the screen: connecting, signing in, the end of a session. */
 #overlay { position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center;
            padding: 16px; background: radial-gradient(ellipse at center, rgba(20, 22, 30, .82), rgba(0, 0, 0, .94)); }
@@ -97,6 +107,7 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .primary, .secondary { min-width: 120px; padding: 8px 14px; border-radius: 8px; cursor: pointer; font-weight: 500; }
 .primary { border: 0; background: var(--accent); color: #fff; }
 .primary:hover { filter: brightness(1.08); }
+.primary.danger { background: var(--danger); }
 .secondary { border: 1px solid var(--line); background: var(--raised); }
 #login { display: flex; flex-direction: column; gap: 10px; margin-top: 18px; text-align: left; }
 #login label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; }

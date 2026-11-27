@@ -95,6 +95,9 @@ message Connect {
   User user = 3;
   // View-only: the host serves it as a shadow client.
   bool shadow = 4;
+  // The user may ask the VM's power actions (qdw.v1.Power: reset it), as its manager allows.
+  // Ignored for a shadow client.
+  bool power = 5;
 }
 
 message User {

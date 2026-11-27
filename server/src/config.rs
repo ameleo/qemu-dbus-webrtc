@@ -142,6 +142,9 @@ struct AccountFile {
     password: String,
     /// The VMs it may open, each by its UUID or its name; "*" for all of them.
     vms: Vec<String>,
+    /// It may reset them, from the console.
+    #[serde(default)]
+    power: bool,
 }
 
 /// Who may open a VM's console.
@@ -547,10 +550,10 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
                 let user = account.user.clone();
                 let grant = Grant::new(account.vms)
                     .with_context(|| format!("in the [[account]] of {user}"))?;
-                accounts.push(
-                    Account::new(account.user, account.password, grant)
-                        .with_context(|| format!("in the [[account]] of {user}"))?,
-                );
+                let mut new = Account::new(account.user, account.password, grant)
+                    .with_context(|| format!("in the [[account]] of {user}"))?;
+                new.power = account.power;
+                accounts.push(new);
             }
             if accounts.is_empty() {
                 None
@@ -679,7 +682,8 @@ mod tests {
         };
         let config = parse_with(&format!(
             "[auth]\nuser = \"admin\"\npassword = \"{admin}\"\n\
-             [[account]]\nuser = \"alice\"\npassword = \"{alice}\"\nvms = [\"win11\"]\n"
+             [[account]]\nuser = \"alice\"\npassword = \"{alice}\"\nvms = [\"win11\"]\n\
+             power = true\n"
         ))
         .unwrap();
         let Auth::Password(accounts) = config.auth().unwrap() else {
@@ -690,6 +694,9 @@ mod tests {
             accounts.check("alice", "secret").unwrap().grant,
             Grant::Only(vec!["win11".into()])
         );
+        // The power actions only for the account that says so.
+        assert!(accounts.check("alice", "secret").unwrap().power);
+        assert!(!accounts.check("admin", "root").unwrap().power);
         // Accounts alone, without [auth]'s user.
         let alone =
             format!("[[account]]\nuser = \"alice\"\npassword = \"{alice}\"\nvms = [\"*\"]\n");

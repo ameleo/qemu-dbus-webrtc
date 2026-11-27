@@ -7,4 +7,4 @@ pub mod audio;
 pub mod display;
 pub mod files;
 pub mod input;
-mod qmp;
+pub mod qmp;

@@ -4,7 +4,7 @@
 //! with a D-Bus display (`<graphics type='dbus'>`), running or not, by UUID and name; the bus
 //! of a running one's display, from its live definition; and starting one that is off, when
 //! the configuration allows it. Without libvirt-dbus, the displays' sockets alone: the running
-//! domains only, and their UUID read from the VMs.
+//! domains only, and their UUID read from the VMs. Through libvirt-dbus too, resetting a domain.
 
 use std::path::PathBuf;
 
@@ -31,6 +31,7 @@ trait Connect {
 #[zbus::proxy(interface = "org.libvirt.Domain", default_service = "org.libvirt")]
 trait Domain {
     fn create(&self, flags: u32) -> zbus::Result<()>;
+    fn reset(&self, flags: u32) -> zbus::Result<()>;
     #[zbus(name = "GetXMLDesc")]
     fn get_xml_desc(&self, flags: u32) -> zbus::Result<String>;
     #[zbus(property)]
@@ -221,6 +222,26 @@ impl Provider for Libvirt {
         }
         .boxed()
     }
+}
+
+impl Libvirt {
+    /// libvirt-dbus's connection, when it knows the domain `uuid`: what resets it (`reset`).
+    pub async fn knows(&self, uuid: &str) -> Option<zbus::Connection> {
+        let system = self.libvirt().await?;
+        let connect = ConnectProxy::new(&system).await.ok()?;
+        connect.domain_lookup_by_uuid(uuid).await.ok()?;
+        Some(system)
+    }
+}
+
+/// Have libvirt reset the domain `uuid` at once, as its reset button would.
+pub async fn reset(system: &zbus::Connection, uuid: &str) -> Result<()> {
+    let path = ConnectProxy::new(system)
+        .await?
+        .domain_lookup_by_uuid(uuid)
+        .await?;
+    domain(system, path).await?.reset(0).await?;
+    Ok(())
 }
 
 /// The domain at `path`. Its properties are read when asked, not cached: zbus's cache fails

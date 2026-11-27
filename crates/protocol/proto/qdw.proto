@@ -28,6 +28,7 @@ message ClientMessage {
     SessionDescription answer = 2;
     IceCandidate ice = 3;
     Leave leave = 4;
+    Power power = 5;
   }
 }
 
@@ -39,13 +40,36 @@ message ClientMessage {
 // client took the session meanwhile. A shadow client's Leave changes nothing.
 message Leave {}
 
+// The user asks a power action of the VM, one the offer lists (SessionDescription
+// power_actions). The server answers with a PowerDone. An action not in the offer, or asked by
+// a shadow client, is refused.
+message Power {
+  PowerAction action = 1;
+}
+
+// What the user may do to the VM through its manager (libvirt, QEMU's QMP), beyond its console.
+enum PowerAction {
+  POWER_ACTION_UNSPECIFIED = 0;
+  // Reset the VM at once, as its reset button would, for a guest that no longer answers: what
+  // it did not save is lost. A guest that answers restarts from its own menu.
+  RESET = 1;
+}
+
 message ServerMessage {
   oneof message {
     SessionDescription offer = 1;
     IceCandidate ice = 2;
     Error error = 3;
     Ended ended = 4;
+    PowerDone power_done = 5;
   }
+}
+
+// The answer to a Power: the VM's manager took the action (an empty error), or not; the server
+// does not say why, which may name the host's paths, its log does.
+message PowerDone {
+  PowerAction action = 1;
+  string error = 2;
 }
 
 // Why the session is over, when there is more to say than its end: the server closes the
@@ -113,6 +137,9 @@ message SessionDescription {
   // (WebRTC's iceTransportPolicy "relay"). A connection broker that is the deployment's only
   // exposed machine sets it in the offer it relays.
   bool relay_only = 5;
+  // In the server's offer: the power actions the user may ask (Power). None for a shadow
+  // client, a user without the right to, or a VM whose manager the server cannot ask.
+  repeated PowerAction power_actions = 6;
 }
 
 // A TURN server, as WebRTC's RTCIceServer: the URIs it is reached at (RFC 7065:

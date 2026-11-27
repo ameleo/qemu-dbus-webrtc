@@ -38,12 +38,15 @@ impl Grant {
     }
 }
 
-/// A user, its password's Argon2id hash in the PHC format, and the VMs it may open.
+/// A user, its password's Argon2id hash in the PHC format, the VMs it may open, and whether it
+/// may ask their power actions.
 #[derive(Debug, Clone)]
 pub struct Account {
     pub user: String,
     hash: String,
     pub grant: Grant,
+    /// It may reset the VMs it opens, from the console. Not unless said.
+    pub power: bool,
 }
 
 impl Account {
@@ -59,7 +62,12 @@ impl Account {
                  `qemu-dbus-webrtc hash-password`"
             );
         }
-        Ok(Self { user, hash, grant })
+        Ok(Self {
+            user,
+            hash,
+            grant,
+            power: false,
+        })
     }
 }
 

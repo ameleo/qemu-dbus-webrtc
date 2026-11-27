@@ -152,6 +152,18 @@ The server cannot tell one person from another: someone who takes the session wi
 after a lost connection finds it as the last user left it, as after a takeover. Without an agent,
 nothing is done.
 
+The user may also reset the VM, for a guest that no longer answers, from the menu of the toolbar's
+power button (with leaving), when allowed to: an account's `power = true`, or the broker's
+`Connect.power` for the users it relays; never a shadow client, nor anyone without accounts. A
+guest that answers restarts or shuts down from its own menu, so the console offers nothing gentler,
+which would also need the guest to follow a request (the ACPI power button, which Windows' power
+settings may have it ignore, or the QEMU guest agent). The server asks the VM's manager: libvirt,
+when libvirt-dbus knows the domain; otherwise QEMU's QMP socket, when the server attaches through
+it (`system_reset`). A VM on a D-Bus bus that libvirt does not manage cannot be reset. The offer
+lists the actions the user may ask (`power_actions`); the client asks one (`Power`), which the
+server takes only if listed, and answers when the manager took it or failed (`PowerDone`; why it
+failed only in the server's log, as it may name the host's paths).
+
 The guest resolution follows the user's window: once the size has been stable for 300 ms, the
 server requests it from the guest (`SetUIInfo`, rounded to even values between 200 and 8192
 pixels). A request sent while the guest boots is lost, as its display driver restores the mode

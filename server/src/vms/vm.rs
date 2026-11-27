@@ -181,10 +181,11 @@ pub async fn start(
     attach: &Attach,
     uuid: &str,
     config: &VmConfig,
+    power: Option<crate::vms::power::Control>,
     stopped: Arc<tokio::sync::Notify>,
 ) -> Result<Vm> {
     let span = info_span!("vm", name = tracing::field::Empty);
-    start_in(attach, uuid, config, stopped, span.clone())
+    start_in(attach, uuid, config, power, stopped, span.clone())
         .instrument(span)
         .await
 }
@@ -193,6 +194,7 @@ async fn start_in(
     attach: &Attach,
     uuid: &str,
     config: &VmConfig,
+    power: Option<crate::vms::power::Control>,
     stopped: Arc<tokio::sync::Notify>,
     span: tracing::Span,
 ) -> Result<Vm> {
@@ -331,6 +333,7 @@ async fn start_in(
         layout: layout.clone(),
         user: Default::default(),
         agent,
+        power: power.map(Arc::new),
         bitrates: args.bitrates,
         network: args.network.clone(),
         depths: Default::default(),
