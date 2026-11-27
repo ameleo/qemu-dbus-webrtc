@@ -21,11 +21,12 @@ libvirt, plain QEMU) starts and stops VMs.
   `/vm/<uuid>/signal`; the VM name can replace the UUID. The VM is only looked up once the
   client has authenticated and announced the codecs it decodes, so the list of VMs is never
   disclosed to anyone else. The server attaches to a VM when its first client connects, after
-  checking the VM's UUID, and detaches when the last client leaves: 5 s after a clean close
-  (enough to reload the page), one minute after a lost connection (the client may reconnect),
-  and immediately when the VM stops, which it detects by polling every second. A VM without
-  clients costs nothing. On shutdown, the server ends all sessions and detaches from all VMs
-  before exiting.
+  checking the VM's UUID, and detaches when the last client leaves: 5 s after a client that
+  said it leaves (enough to reload the page), a little over a minute after a lost connection
+  (the client may reconnect, then the guest is told its user left), and immediately when the VM
+  stops, which it detects by polling every second. A VM without clients costs nothing. On
+  shutdown, the server ends all sessions, tells the guests their users left, and detaches from
+  all VMs before exiting.
 - **Connectivity (ICE):** each session binds its own UDP sockets (in `udp_ports` when set) and
   offers their host candidates, `public_address` on them when set, and the address a STUN
   server sees each socket at (server-reflexive, RFC 8489; Google's server by default). The
@@ -137,6 +138,19 @@ microphone, drives and printers are connected to the guest, and the guest resolu
 window. A new client takes over the session, and the previous one is ended with a reason. Shadow
 clients (`shadow` in their hello) are view-only, unlimited in number, and are disconnected when
 the user leaves (not on a takeover); handing them keyboard and mouse control is planned.
+
+When the user leaves, the server tells the guest agent (`Agent1.Reset`), which lets go of what
+the client brought (clipboard, drives, printers, cameras) and locks the guest's session if a user
+is logged on: whether and how to lock is the agent's to decide, not the server's. A client that
+leaves on purpose (its disconnect button, its window closed) says so (`Leave`) before it closes
+the signalling; a session that ends without it is a lost connection, which the client may
+restore. The guest is told at once after a `Leave` or when the server stops, and a minute after
+a lost connection if no client took the session meanwhile; not when another client takes the
+session over, nor when the VM stops. Telling the guest and a client taking the session run one
+at a time, so that a Reset never lets go of what a client that just took the session brought.
+The server cannot tell one person from another: someone who takes the session within the minute
+after a lost connection finds it as the last user left it, as after a takeover. Without an agent,
+nothing is done.
 
 The guest resolution follows the user's window: once the size has been stable for 300 ms, the
 server requests it from the guest (`SetUIInfo`, rounded to even values between 200 and 8192

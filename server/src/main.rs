@@ -26,6 +26,9 @@ use qdw_video::gpus;
 /// (an encoder takes up to two seconds to finish).
 const STOP_TIME: std::time::Duration = std::time::Duration::from_secs(1);
 const DETACH_TIME: std::time::Duration = std::time::Duration::from_secs(4);
+/// How long the users' sessions have to end and their guests to be told, then: a session ends
+/// within a few seconds, and the agent has five to answer.
+const DEPART_TIME: std::time::Duration = std::time::Duration::from_secs(15);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -105,6 +108,13 @@ async fn main() -> Result<()> {
     info!("stopping: the sessions end");
     vms.stop();
     tokio::time::sleep(STOP_TIME).await;
+    // The users gone, and their guests told.
+    if tokio::time::timeout(DEPART_TIME, vms.departed())
+        .await
+        .is_err()
+    {
+        warn!("the guests were not all told their users left in time");
+    }
     // Then the VMs, their encoders finished: nothing is left playing.
     if tokio::time::timeout(DETACH_TIME, vms.detach_all())
         .await

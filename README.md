@@ -96,6 +96,8 @@ With a guest agent implementing the
 - **Camera redirection:** client cameras in the guest, with their controls (brightness, focus,
   zoom...). A camera streams, as H.264 encoded by the client, only while a guest application
   uses it (browser and native client).
+- **Session lock:** the guest's session is locked when its user leaves, at once on a disconnect,
+  a minute after a lost connection the client has not restored.
 
 Agents, both under the GPL version 3:
 [ameleo-display-agent-linux](https://github.com/ameleo/ameleo-display-agent-linux) for Linux
