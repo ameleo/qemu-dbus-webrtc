@@ -16,9 +16,18 @@ use qdw_video::encode::{EncodedFrame, Encoder, Settings};
 use qdw_video::record;
 
 use crate::config::VmConfig;
-use crate::transport::{self, SoundViewers, VideoViewers};
-use crate::web::{self, Request};
-use crate::{agent, audio, cameras, clipboard, copied, drives, input, layout, pointer, printers};
+use crate::guest::agent;
+use crate::guest::cameras;
+use crate::guest::clipboard;
+use crate::guest::drives;
+use crate::guest::printers;
+use crate::session::audio;
+use crate::session::input;
+use crate::session::layout;
+use crate::session::pointer;
+use crate::session::transport::{self, SoundViewers, VideoViewers};
+use crate::session::{self, Request};
+use crate::vms::copied;
 
 /// On a still screen, a console with viewers still gets a frame this often. Each one is nearly
 /// empty since nothing changed, but it shows the stream is alive: a WebRTC receiver that gets
@@ -124,7 +133,7 @@ impl Drop for Aborted {
 /// forgets its listeners.
 pub struct Vm {
     /// What its viewers share.
-    pub shared: web::Shared,
+    pub shared: session::Shared,
     pub name: String,
     /// What is logged of the VM, its viewers' sessions included, is in it.
     pub span: tracing::Span,
@@ -242,9 +251,9 @@ async fn start_in(
         info!(console = id, "listening");
     }
     drop(events_tx);
-    let screens: Vec<web::Screen> = graphic
+    let screens: Vec<session::Screen> = graphic
         .iter()
-        .map(|&(head, console, _)| web::Screen {
+        .map(|&(head, console, _)| session::Screen {
             console,
             head,
             viewers: VideoViewers::default(),
@@ -298,7 +307,7 @@ async fn start_in(
     ));
     // Turns true when the display loop ends: the VM stopped, unless the server detached.
     let (stopped_tx, stopped_rx) = tokio::sync::watch::channel(false);
-    let shared = web::Shared {
+    let shared = session::Shared {
         name: name.clone(),
         vm_stopped: stopped_rx,
         codec: args.settings.codec,

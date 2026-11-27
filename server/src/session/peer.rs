@@ -37,9 +37,9 @@ use tracing::{debug, info, warn};
 use qdw_protocol::MAX_CAMERA_STREAMS;
 use qdw_video::encode::{Codec, HevcFmtp};
 
-use crate::audio::Mic;
-use crate::stun;
-use crate::transport::{
+use crate::network::stun;
+use crate::session::audio::Mic;
+use crate::session::transport::{
     Bitrates, Channel, MAX_SCREENS, Signal, SoundViewers, Start, VideoViewers, Viewer, leave,
 };
 use qdw_audio::OpusFrame;
@@ -362,7 +362,7 @@ impl Peer {
             let _ = signals.send(Signal::Closed);
         });
 
-        let id = crate::transport::viewer_id();
+        let id = crate::session::transport::viewer_id();
         for (screen, viewers) in viewers.iter().enumerate().take(screens) {
             viewers
                 .lock()
@@ -1146,12 +1146,12 @@ mod tests {
                         data: frame.into(),
                         keyframe: true,
                     };
-                    crate::transport::fan_out(&viewers, &frame);
+                    crate::session::transport::fan_out(&viewers, &frame);
                     let sound = OpusFrame {
                         data: vec![0xfc, 0xff, 0xfe].into(),
                         pts: Duration::from_millis(10 * i),
                     };
-                    crate::transport::fan_out(&audio_viewers, &sound);
+                    crate::session::transport::fan_out(&audio_viewers, &sound);
                     std::thread::sleep(Duration::from_millis(10));
                 }
             }

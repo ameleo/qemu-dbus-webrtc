@@ -11,10 +11,10 @@ use anyhow::{Context, Result, bail};
 use qdw_video::encode::{Codec, Settings};
 use serde::Deserialize;
 
-use crate::providers::{self, Providers, Source};
-use crate::transport;
-use crate::turn;
-use crate::web;
+use crate::network::turn;
+use crate::session;
+use crate::session::transport;
+use crate::vms::providers::{Providers, Source};
 
 pub const USAGE: &str = "usage: qemu-dbus-webrtc [--config <file.toml>] \
                          [--qmp <QMP socket> | --dbus <D-Bus address> | --domain <libvirt domain>]... \
@@ -254,7 +254,7 @@ pub struct VmConfig {
 #[derive(Debug, Clone)]
 pub enum Auth {
     /// The accounts, and the VMs each may open (see `access.rs`).
-    Password(crate::access::Accounts),
+    Password(crate::host::access::Accounts),
     /// Anyone who reaches the server: for a test, on a trusted network.
     None,
 }
@@ -277,7 +277,7 @@ impl Config {
     }
 
     /// The certificate to serve with.
-    pub fn tls(&self) -> Result<web::Tls> {
+    pub fn tls(&self) -> Result<session::Tls> {
         // Plain HTTP would carry the session in clear.
         self.tls.clone().context(
             "a certificate and its key are required, the pages being served in HTTPS only: \
@@ -294,15 +294,15 @@ pub struct Config {
     pub listen: SocketAddr,
     /// Their certificate, always in HTTPS: required to serve (see `Config::tls`), not by the
     /// tools.
-    tls: Option<web::Tls>,
+    tls: Option<session::Tls>,
     /// Where the VMs are found.
     pub providers: Providers,
     /// The certificate from an ACME authority, if one gives it.
-    pub acme: Option<crate::acme::Acme>,
+    pub acme: Option<crate::host::acme::Acme>,
     /// The connection broker the host reaches, if it has one.
-    pub broker: Option<crate::broker::Settings>,
+    pub broker: Option<crate::host::broker::Settings>,
     /// How the host gets its certificate from the broker's ACME server, if it does.
-    pub attestation: Option<crate::attestation::Settings>,
+    pub attestation: Option<crate::host::attestation::Settings>,
 }
 
 /// The settings from the configuration file, if `--config` names one, then from the other
@@ -384,12 +384,12 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
         .collect::<Result<Vec<_>>>()?;
     let providers = Providers::new(
         file.libvirt.enabled.unwrap_or(true).then(|| {
-            crate::libvirt::Libvirt::new(libvirt_dir, file.libvirt.start.unwrap_or(false))
+            crate::vms::libvirt::Libvirt::new(libvirt_dir, file.libvirt.start.unwrap_or(false))
         }),
         file.proxmox
             .enabled
             .unwrap_or(false)
-            .then(|| providers::Proxmox {
+            .then(|| crate::vms::proxmox::Proxmox {
                 run_dir: file
                     .proxmox
                     .run_dir
@@ -469,7 +469,7 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
         listen.key.get_or_insert_with(|| DEFAULT_KEY.into());
     }
     let tls = match (listen.certificate, listen.key) {
-        (Some(certificate), Some(key)) => Some(web::Tls { certificate, key }),
+        (Some(certificate), Some(key)) => Some(session::Tls { certificate, key }),
         (None, None) => None,
         _ => bail!("HTTPS takes a certificate and its key"),
     };
@@ -483,7 +483,7 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
                 (None, None) => None,
                 _ => bail!("[acme] External Account Binding takes both eab_kid and eab_hmac_key"),
             };
-            Some(crate::acme::Acme {
+            Some(crate::host::acme::Acme {
                 directory: acme.directory,
                 domains: acme.domains,
                 contact: acme.contact,
@@ -533,7 +533,7 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
 
     let auth = match file.auth.method.as_deref() {
         None | Some("password") => {
-            use crate::access::{Account, Accounts, Grant};
+            use crate::host::access::{Account, Accounts, Grant};
             let mut accounts = Vec::new();
             // [auth]'s user: every VM, as before accounts had their VMs.
             match (file.auth.user, file.auth.password) {
@@ -582,7 +582,7 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
                 Some("none") => None,
                 Some(tcti) => Some(tcti.to_owned()),
             };
-            let attestation = crate::attestation::Settings {
+            let attestation = crate::host::attestation::Settings {
                 directory: directory.clone(),
                 host_id: b.host_id.clone(),
                 roots,
@@ -594,7 +594,7 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
                 enrollment: None,
             };
             let broker =
-                crate::broker::settings(b.url, b.host_id, b.ca_bundle, attestation.clone())
+                crate::host::broker::settings(b.url, b.host_id, b.ca_bundle, attestation.clone())
                     .context("in [broker]")?;
             (Some(broker), Some(attestation))
         }
@@ -668,7 +668,7 @@ mod tests {
     /// [auth]'s user opens every VM; each [[account]] its own; mistakes fail the start.
     #[test]
     fn accounts() {
-        use crate::access::{Grant, hash};
+        use crate::host::access::{Grant, hash};
         let dir = std::env::temp_dir().join(format!("qdw-config-accounts-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("host.toml");

@@ -8,8 +8,8 @@
 //! stream it says who it is and lists its VMs whenever they change; the broker asks it for
 //! connections there. It sends no console page (`Page` is deprecated): the broker serves its
 //! own. For each connection, the host opens a relay stream, which carries the user's signalling
-//! as a WebSocket would (`web::Socket::Relayed`), and serves it as it serves its own clients, the
-//! broker having checked the user and their access to the VM.
+//! as a WebSocket would (`session::Socket::Relayed`), and serves it as it serves its own
+//! clients, the broker having checked the user and their access to the VM.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -26,8 +26,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::{Channel, Endpoint};
 use tracing::{Instrument, debug, info, info_span, warn};
 
+use crate::session;
 use crate::vms::Vms;
-use crate::web;
 
 /// How often the host looks for changes in its VMs, to tell the broker.
 const INVENTORY_INTERVAL: Duration = Duration::from_secs(5);
@@ -54,7 +54,7 @@ pub struct Settings {
     /// The roots that authenticate the broker, instead of the system's.
     pub ca_bundle: Option<PathBuf>,
     /// How the host gets its certificate, with which it authenticates to the broker.
-    pub attestation: crate::attestation::Settings,
+    pub attestation: crate::host::attestation::Settings,
 }
 
 impl std::fmt::Debug for Settings {
@@ -72,7 +72,7 @@ type Client = BrokerClient<Channel>;
 /// Stay connected to the broker until the server stops.
 pub async fn keep(settings: Settings, vms: Arc<Vms>) {
     let mut stopping = vms.stopping();
-    let identity = match crate::attestation::identity::Identity::new(&settings.attestation) {
+    let identity = match crate::host::attestation::identity::Identity::new(&settings.attestation) {
         Ok(identity) => identity,
         Err(e) => {
             warn!(error = %format!("{e:#}"), "no identity for the broker: not connecting");
@@ -84,7 +84,7 @@ pub async fn keep(settings: Settings, vms: Arc<Vms>) {
         // The certificate renewed when due, before connecting with it.
         if identity.renew_at() <= std::time::SystemTime::now() {
             info!("renewing the host's certificate");
-            if let Err(e) = crate::attestation::enroll(&settings.attestation).await {
+            if let Err(e) = crate::host::attestation::enroll(&settings.attestation).await {
                 warn!(error = %format!("{e:#}"), "renewing the host's certificate");
             }
         }
@@ -117,7 +117,7 @@ pub async fn keep(settings: Settings, vms: Arc<Vms>) {
 /// the host was connected, an error when it could not connect.
 async fn connected(
     settings: &Settings,
-    identity: &crate::attestation::identity::Identity,
+    identity: &crate::host::attestation::identity::Identity,
     vms: &Arc<Vms>,
 ) -> Result<()> {
     let client = client(settings, identity).await?;
@@ -194,7 +194,7 @@ async fn connected(
 /// the host by its own (TLS client authentication), its key in the TPM. HTTP/2 (ALPN).
 async fn client(
     settings: &Settings,
-    identity: &crate::attestation::identity::Identity,
+    identity: &crate::host::attestation::identity::Identity,
 ) -> Result<Client> {
     let mut roots = rustls::RootCertStore::empty();
     match &settings.ca_bundle {
@@ -219,7 +219,9 @@ async fn client(
     ))
     .with_safe_default_protocol_versions()?
     .with_root_certificates(roots)
-    .with_client_cert_resolver(Arc::new(crate::attestation::identity::Resolver(certified)));
+    .with_client_cert_resolver(Arc::new(crate::host::attestation::identity::Resolver(
+        certified,
+    )));
     config.alpn_protocols = vec![b"h2".to_vec()];
     let tls = tokio_rustls::TlsConnector::from(Arc::new(config));
     let connector = tower::service_fn(move |uri: tonic::codegen::http::Uri| {
@@ -315,15 +317,15 @@ async fn relay(
         .user
         .map(|u| if u.name.is_empty() { u.id } else { u.name })
         .unwrap_or_default();
-    let socket = web::Socket::Relayed(Relayed {
+    let socket = session::Socket::Relayed(Relayed {
         to_broker: Some(to_broker),
         incoming,
     });
-    let admission = web::Admission::Broker {
+    let admission = session::Admission::Broker {
         user,
         shadow: connect.shadow,
     };
-    if let Err(e) = web::open(socket, &vms, admission, &connect.vm_uuid, vms.stopping()).await {
+    if let Err(e) = session::open(socket, &vms, admission, &connect.vm_uuid, vms.stopping()).await {
         warn!(error = %format!("{e:#}"), "relayed session ended");
     }
 }
@@ -388,7 +390,7 @@ pub fn settings(
     url: String,
     host_id: String,
     ca_bundle: Option<PathBuf>,
-    attestation: crate::attestation::Settings,
+    attestation: crate::host::attestation::Settings,
 ) -> Result<Settings> {
     if !url.starts_with("https://") {
         anyhow::bail!("the broker's URL is https://host:port: the host talks to it in TLS only");
@@ -590,8 +592,8 @@ mod tests {
         );
 
         let config = crate::config::parse(Vec::new()).unwrap();
-        let vms = Vms::new(crate::providers::Providers::default(), config.vm);
-        let attestation = crate::attestation::Settings {
+        let vms = Vms::new(crate::vms::providers::Providers::default(), config.vm);
+        let attestation = crate::host::attestation::Settings {
             directory: format!("https://localhost:{port}/acme/directory"),
             host_id: "host-1".into(),
             roots: None,
@@ -631,7 +633,7 @@ mod tests {
 
     #[test]
     fn settings_refused() {
-        let attestation = crate::attestation::Settings {
+        let attestation = crate::host::attestation::Settings {
             directory: "https://broker:8443/acme/directory".into(),
             host_id: "h".into(),
             roots: None,

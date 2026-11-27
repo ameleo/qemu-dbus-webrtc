@@ -4,7 +4,7 @@
 //! to attach to their display. Each one lists the VMs it sees (their way in while they run,
 //! and their UUID and names when it knows them without attaching), and may start one that is
 //! off; the server takes the VM a client asks for by its UUID or name. A new VM manager is a
-//! new provider: libvirt is in `libvirt.rs`.
+//! new provider: libvirt is in `libvirt.rs`, Proxmox VE in `proxmox.rs`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -17,7 +17,8 @@ use futures_util::future::BoxFuture;
 use qdw_qemu::display::{self, Attach, VmProxy};
 use tracing::{debug, warn};
 
-use crate::libvirt::Libvirt;
+use crate::vms::libvirt::Libvirt;
+use crate::vms::proxmox::Proxmox;
 
 /// The most UUIDs read from VMs kept: past it, they are read again.
 const MAX_PROBED: usize = 256;
@@ -70,66 +71,6 @@ pub enum Found<'a> {
         provider: &'a dyn Provider,
         startable: bool,
     },
-}
-
-/// Proxmox VE: each VM's QMP socket is `<vmid>.qmp` in `run_dir`, and its UUID is in its
-/// configuration, `<vmid>.conf` in `conf_dir` (`smbios1: uuid=...`). The VM must run with
-/// `-display dbus,p2p=on` (`args:` in its configuration). Not tried yet.
-pub struct Proxmox {
-    pub run_dir: PathBuf,
-    pub conf_dir: PathBuf,
-}
-
-impl Provider for Proxmox {
-    fn name(&self) -> &'static str {
-        "proxmox"
-    }
-
-    fn candidates(&self) -> BoxFuture<'_, Result<Vec<Candidate>>> {
-        async move { self.running() }.boxed()
-    }
-}
-
-impl Proxmox {
-    fn running(&self) -> Result<Vec<Candidate>> {
-        let entries = match std::fs::read_dir(&self.run_dir) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(e).with_context(|| format!("reading {}", self.run_dir.display())),
-        };
-        Ok(entries
-            .flatten()
-            .filter_map(|e| {
-                let name = e.file_name().to_string_lossy().into_owned();
-                let vmid = name.strip_suffix(".qmp")?;
-                let conf = std::fs::read_to_string(self.conf_dir.join(format!("{vmid}.conf")))
-                    .unwrap_or_default();
-                // Its VM id, and its name.
-                let mut names = vec![vmid.to_owned()];
-                names.extend(proxmox_field(&conf, "name").map(str::to_owned));
-                Some(Candidate {
-                    attach: Some(Attach::P2p { qmp: e.path() }),
-                    uuid: proxmox_field(&conf, "smbios1").and_then(|smbios| {
-                        smbios
-                            .split(',')
-                            .find_map(|field| field.trim().strip_prefix("uuid="))
-                            .map(str::to_owned)
-                    }),
-                    names,
-                    startable: false,
-                })
-            })
-            .collect())
-    }
-}
-
-/// A field of a Proxmox VE VM configuration, `<field>: <value>`, in its main section (before
-/// the snapshots').
-fn proxmox_field<'a>(conf: &'a str, field: &str) -> Option<&'a str> {
-    conf.lines()
-        .take_while(|line| !line.starts_with('['))
-        .find_map(|line| line.strip_prefix(field)?.strip_prefix(':'))
-        .map(str::trim)
 }
 
 /// A VM given by hand: in the configuration (`[[vm]]`) or on the command line.
@@ -435,31 +376,6 @@ impl Providers {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_proxmox_vm() {
-        let dir = std::env::temp_dir().join(format!("qdw-proxmox-{}", std::process::id()));
-        let (run_dir, conf_dir) = (dir.join("run"), dir.join("conf"));
-        std::fs::create_dir_all(&run_dir).unwrap();
-        std::fs::create_dir_all(&conf_dir).unwrap();
-        std::fs::write(run_dir.join("101.qmp"), "").unwrap();
-        std::fs::write(run_dir.join("101.pid"), "").unwrap();
-        std::fs::write(
-            conf_dir.join("101.conf"),
-            "boot: order=scsi0\nname: win11\n\
-             smbios1: uuid=7b3a1c2d-0000-4000-8000-123456789abc,manufacturer=QQ\n\
-             [snap]\nname: old\nsmbios1: uuid=00000000-0000-0000-0000-000000000000\n",
-        )
-        .unwrap();
-        let candidates = Proxmox { run_dir, conf_dir }.running().unwrap();
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(
-            candidates[0].uuid.as_deref(),
-            Some("7b3a1c2d-0000-4000-8000-123456789abc")
-        );
-        assert_eq!(candidates[0].names, ["101", "win11"]);
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
 
     #[test]
     fn a_domain_by_its_name() {

@@ -891,9 +891,12 @@ mod tests {
             HostFileClipboard::name().as_str(),
             iface::HOST_FILE_CLIPBOARD
         );
-        assert_eq!(crate::drives::HostDrive::name().as_str(), iface::HOST_DRIVE);
         assert_eq!(
-            crate::printers::HostPrinter::name().as_str(),
+            crate::guest::drives::HostDrive::name().as_str(),
+            iface::HOST_DRIVE
+        );
+        assert_eq!(
+            crate::guest::printers::HostPrinter::name().as_str(),
             iface::HOST_PRINTER
         );
     }

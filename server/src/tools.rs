@@ -21,6 +21,6 @@ fn hash_password() -> Result<()> {
     if password != again {
         bail!("the two passwords differ");
     }
-    println!("{}", crate::access::hash(&password)?);
+    println!("{}", crate::host::access::hash(&password)?);
     Ok(())
 }

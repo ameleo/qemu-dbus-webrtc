@@ -9,11 +9,11 @@ use std::time::Duration;
 use qdw_qemu::agent;
 use tracing::{info, warn};
 
-use crate::cameras::Cameras;
-use crate::clipboard::Clipboard;
-use crate::drives::Drives;
-use crate::input::AgentMouse;
-use crate::printers::Printers;
+use crate::guest::cameras::Cameras;
+use crate::guest::clipboard::Clipboard;
+use crate::guest::drives::Drives;
+use crate::guest::printers::Printers;
+use crate::session::input::AgentMouse;
 
 /// How long before trying the agent again, when it could not be reached.
 const RETRY: Duration = Duration::from_secs(3);

@@ -14,7 +14,7 @@ use qdw_qemu::audio::{self, AudioEvent, Format, Recorder};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
-use crate::transport::{self, SoundViewers};
+use crate::session::transport::{self, SoundViewers};
 
 /// How long a viewer keeps the microphone after it stopped sending sound.
 const SPEAKER_HOLD: Duration = Duration::from_secs(1);
