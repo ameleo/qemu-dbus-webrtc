@@ -57,19 +57,28 @@ impl Control {
         if action != PowerAction::Reset {
             bail!("{} cannot be asked of this VM", action.as_str_name());
         }
-        let run = async {
-            match self {
-                Self::Libvirt { system, uuid } => libvirt::reset(system, uuid).await,
-                Self::Qmp(qmp) => {
-                    let qmp = qmp.clone();
-                    // QMP is a short blocking exchange; keep it off the async threads.
-                    tokio::task::spawn_blocking(move || Qmp::connect(&qmp)?.command("system_reset"))
-                        .await?
+        match self {
+            Self::Libvirt { system, uuid } => {
+                tokio::time::timeout(POWER_TIME, libvirt::reset(system, uuid))
+                    .await
+                    .context("libvirt did not answer in time")?
+            }
+            Self::Qmp(qmp) => {
+                let qmp = qmp.clone();
+                // QMP is a short blocking exchange; keep it off the async threads.
+                let mut task = tokio::task::spawn_blocking(move || {
+                    Qmp::connect(&qmp)?.command("system_reset")
+                });
+                match tokio::time::timeout(POWER_TIME, &mut task).await {
+                    Ok(joined) => joined?,
+                    Err(_) => {
+                        // Not started yet, it never will: the user is told it failed. Started,
+                        // QMP's own deadlines end it.
+                        task.abort();
+                        bail!("QEMU did not answer in time")
+                    }
                 }
             }
-        };
-        tokio::time::timeout(POWER_TIME, run)
-            .await
-            .context("the VM's manager did not answer in time")?
+        }
     }
 }
