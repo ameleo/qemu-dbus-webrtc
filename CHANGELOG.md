@@ -34,6 +34,9 @@ What each release brings. The packages are on the
 - A session broken by its VM stopping (shut down from the guest) before the server saw the VM
   stop ended as a failure of the server, which the page retries: it started the VM again. It now
   ends normally.
+- A QEMU that stopped accepting on its QMP socket held the thread connecting to it (attaching to
+  the VM, resetting it) for ever: the connection now waits at most ten seconds, as the exchange
+  that follows.
 
 ## 0.3.0 — 2026-11-18
 
