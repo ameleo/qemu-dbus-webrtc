@@ -236,7 +236,7 @@ pub async fn open(
     let delay = match departure {
         Departure::Left | Departure::ServerStopping => Duration::ZERO,
         Departure::Lost => TELL_AFTER_LOST,
-        Departure::TakenOver | Departure::VmStopped => return Ok(()),
+        Departure::TakenOver | Departure::VmStopped | Departure::ConsentStopped => return Ok(()),
     };
     let tell = async move {
         if !delay.is_zero() {

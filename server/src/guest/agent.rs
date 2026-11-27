@@ -87,6 +87,7 @@ pub async fn run(vm: zbus::Connection, users: Users) {
                 info!("guest agent gone");
             }
             Err(e) if e.is::<agent::NoDevice>() => {
+                consents.absent();
                 info!(
                     "no guest agent device on this VM: no clipboard, no drives, no printers, no cameras"
                 );

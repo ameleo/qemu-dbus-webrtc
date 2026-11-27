@@ -1965,6 +1965,9 @@ $("watching").hidden = !shadow;
 // of it (Control).
 const takeControl = {
   set(granted) {
+    // Control gone, the pointer this page held goes back to the viewer, who could not even reach
+    // the toolbar otherwise.
+    if (!granted && pointer.locked()) document.exitPointerLock();
     shadowControl.granted = granted;
     $("control").classList.toggle("on", granted || shadowControl.asking);
     tip("control", granted ? T.controlGiveBack : T.controlAsk);
