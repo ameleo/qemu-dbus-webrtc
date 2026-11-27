@@ -103,6 +103,18 @@ pub struct Vms {
     stopping: tokio::sync::watch::Sender<bool>,
     /// Wakes the reaper before its time.
     reap: Arc<tokio::sync::Notify>,
+    /// The users' sessions, and the guests told their users left after them: the server waits
+    /// for them before it detaches from the VMs.
+    departures: Arc<tokio::sync::watch::Sender<usize>>,
+}
+
+/// A user's session, then the guest told the user left: counted until dropped.
+pub struct Departing(Arc<tokio::sync::watch::Sender<usize>>);
+
+impl Drop for Departing {
+    fn drop(&mut self) {
+        self.0.send_modify(|departures| *departures -= 1);
+    }
 }
 
 impl Vms {
@@ -113,6 +125,7 @@ impl Vms {
             attached: Default::default(),
             attaching: Default::default(),
             stopping: tokio::sync::watch::Sender::new(false),
+            departures: Arc::new(tokio::sync::watch::Sender::new(0)),
             reap: Default::default(),
         });
         tokio::spawn(reap(Arc::downgrade(&vms), vms.reap.clone()));
@@ -129,6 +142,21 @@ impl Vms {
         let attached: Vec<_> = self.attached.lock().await.drain().collect();
         let shut_down = attached.iter().map(|(_, entry)| entry.vm.shut_down());
         futures_util::future::join_all(shut_down).await;
+    }
+
+    /// A user's session starts: counted until the guest is told the user left, or need not be.
+    pub fn departing(&self) -> Departing {
+        self.departures.send_modify(|departures| *departures += 1);
+        Departing(self.departures.clone())
+    }
+
+    /// Wait until every user's session ended and its guest was told.
+    pub async fn departed(&self) {
+        let _ = self
+            .departures
+            .subscribe()
+            .wait_for(|departures| *departures == 0)
+            .await;
     }
 
     /// Turns true when the server stops.

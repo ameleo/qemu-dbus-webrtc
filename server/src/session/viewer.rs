@@ -60,15 +60,31 @@ async fn stun_server(server: &str) -> Option<std::net::SocketAddr> {
     }
 }
 
+/// How a viewer's session ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Departure {
+    /// The client said it leaves (`Leave`), or, for a shadow client, the user left.
+    Left,
+    /// The connection ended without a `Leave`: the client may come back.
+    Lost,
+    /// Another client took the session over.
+    TakenOver,
+    /// The server stops.
+    ServerStopping,
+    /// The VM stopped.
+    VmStopped,
+}
+
 /// The session of a client of the VM: `codecs` it decodes, from its hello, and whether it
-/// only watches.
+/// only watches. Returns how it ended, and the id of its user (`None` for a shadow client, or
+/// a session that did not start).
 pub(crate) async fn viewer(
     mut socket: Socket,
     client: &Client,
     codecs: Vec<String>,
     shadow: bool,
     server_stopping: watch::Receiver<bool>,
-) -> Result<()> {
+) -> (Result<Departure>, Option<u64>) {
     let stopping = server_stopping.clone();
     let shared = client.shared().clone();
 
@@ -119,10 +135,13 @@ pub(crate) async fn viewer(
                 .requests
                 .send(Request::TenBits(shared.depths.leave(depth_id)));
             close(&mut socket, axum::extract::ws::close_code::ERROR).await;
-            return Err(e);
+            return (Err(e), None);
         }
     };
-    let user = (!shadow).then(|| shared.user.take_over());
+    let user = match shadow {
+        true => None,
+        false => Some(shared.user.take_over().await),
+    };
     info!(shadow, "viewer session");
     let (clipboard, clip) = shared.clipboard.viewer();
     let (drives, drives_follow) = shared.drives.viewer();
@@ -167,7 +186,7 @@ pub(crate) async fn viewer(
         ) => ended,
         true = async { vm_stopped.wait_for(|stopped| *stopped).await.is_ok() } => {
             info!("the VM stopped: the session ends");
-            Ok(())
+            Ok(Departure::VmStopped)
         }
         () = async {
             match &mut user_left {
@@ -178,14 +197,14 @@ pub(crate) async fn viewer(
             }
         } => {
             info!("the user left: the shadow session ends");
-            Ok(())
+            Ok(Departure::Left)
         }
     };
     // Whatever ended the session, the WebSocket closes with a close frame, whose status tells
     // the client how: a normal end, the server going away (it may come back), or a failure.
     let code = match &ended {
-        Ok(()) if *stopping.borrow() => axum::extract::ws::close_code::AWAY,
-        Ok(()) => axum::extract::ws::close_code::NORMAL,
+        Ok(_) if *stopping.borrow() => axum::extract::ws::close_code::AWAY,
+        Ok(_) => axum::extract::ws::close_code::NORMAL,
         Err(_) => axum::extract::ws::close_code::ERROR,
     };
     close(&mut socket, code).await;
@@ -213,8 +232,39 @@ pub(crate) async fn viewer(
     let _ = shared
         .requests
         .send(Request::TenBits(shared.depths.leave(depth_id)));
-    ended
+    // A server that stops ends the session from either side: whatever ended it, the server
+    // stops, even when telling the client failed.
+    let ended = if *stopping.borrow() {
+        if let Err(e) = &ended {
+            debug!(error = %format!("{e:#}"), "the session ended as the server stops");
+        }
+        Ok(Departure::ServerStopping)
+    } else {
+        ended
+    };
+    (ended, user_id)
 }
+
+/// How a session whose peer connection closed ended: a client that leaves sends its `Leave`
+/// on the signalling, then closes its peer connection, whose end may well arrive first; so the
+/// `Leave` is waited for a moment.
+async fn leave_after_closed(socket: &mut Socket) -> Departure {
+    let leave = async {
+        loop {
+            match receive(socket).await {
+                Ok(Some(client_message::Message::Leave(_))) => return Departure::Left,
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => return Departure::Lost,
+            }
+        }
+    };
+    tokio::time::timeout(LEAVE_TIME, leave)
+        .await
+        .unwrap_or(Departure::Lost)
+}
+
+/// How long a `Leave` may come after the peer connection closed.
+const LEAVE_TIME: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// How long the guest has to release what a session that ends held: keys, the clipboard,
 /// drives, printers, cameras.
@@ -275,7 +325,7 @@ async fn run(
     state: &mut ViewerState,
     mut follow: Follow,
     shared: &Shared,
-) -> Result<()> {
+) -> Result<Departure> {
     let keyframe = || {
         for screen in &shared.screens {
             let _ = shared.requests.send(Request::Keyframe {
@@ -332,11 +382,11 @@ async fn run(
             () = &mut taken_over => {
                 info!("another client took the session over");
                 send(socket, server_message::Message::Ended(Ended { reason: ended::Reason::TakenOver.into() })).await?;
-                return Ok(());
+                return Ok(Departure::TakenOver);
             }
             true = async { server_stopping.wait_for(|stopping| *stopping).await.is_ok() } => {
                 send(socket, server_message::Message::Ended(Ended { reason: ended::Reason::ServerStopping.into() })).await?;
-                return Ok(());
+                return Ok(Departure::ServerStopping);
             }
             signal = signals.recv() => match signal {
                 Some(Signal::Offer(sdp)) => {
@@ -442,7 +492,7 @@ async fn run(
                         session.send(Channel::Control, message.encode_to_vec());
                     }
                 }
-                Some(Signal::Closed) | None => return Ok(()),
+                Some(Signal::Closed) | None => return Ok(leave_after_closed(socket).await),
             },
             Ok(()) = follow.pointer.changed() => {
                 if let Some(sent) = &mut sent {
@@ -502,7 +552,8 @@ async fn run(
                 }
                 Some(client_message::Message::Ice(_)) => {}
                 Some(client_message::Message::Hello(_)) => anyhow::bail!("a second hello"),
-                None => return Ok(()),
+                Some(client_message::Message::Leave(_)) => return Ok(Departure::Left),
+                None => return Ok(Departure::Lost),
             },
         }
     }

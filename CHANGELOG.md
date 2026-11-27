@@ -3,6 +3,21 @@
 What each release brings. The packages are on the
 [releases page](https://github.com/ameleo/qemu-dbus-webrtc/releases).
 
+## Unreleased
+
+### Added
+
+- **The guest told when its user leaves** (`Agent1.Reset`): its agent lets go of what the client
+  brought and locks the guest's session. At once on a disconnect or a closed page, a minute after
+  a lost connection the client has not restored, not on a takeover. Clients say they leave with
+  the new `Leave` message; the page sends it.
+
+### Changed
+
+- A VM whose last client ended its session without a `Leave` (a lost connection, or a client
+  that does not send it yet) stays attached a minute, for the client to come back, rather than
+  five seconds.
+
 ## 0.3.0 — 2026-11-18
 
 Serving through a connection broker, with the host's certificate in its TPM; relaying through

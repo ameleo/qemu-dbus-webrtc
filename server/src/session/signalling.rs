@@ -3,16 +3,19 @@
 //! A client's signalling, over its WebSocket or relayed by the broker: its hello, its account
 //! checked, the VM found and attached to, then its session.
 
+use std::time::Duration;
+
 use anyhow::Result;
 use axum::extract::ws::{Message as WsMessage, WebSocket};
 use tokio::sync::watch;
-use tracing::{Instrument, info, warn};
+use tracing::{Instrument, debug, info, warn};
 
 use qdw_protocol::Message;
 use qdw_protocol::v1::{ClientMessage, Error, ServerMessage, client_message, server_message};
 
-use super::viewer::viewer;
+use super::viewer::{Departure, viewer};
 use crate::config::Auth;
+use crate::guest::agent;
 use crate::vms::Vms;
 
 /// The error that asks a client for an account: the page shows its login form on it.
@@ -154,19 +157,76 @@ pub async fn open(
     };
     let span = client.span().clone();
     let codecs = hello.codecs;
-    let ended = viewer(socket, &client, codecs, shadow, stopping)
+    let mut server_stopping = stopping.clone();
+    // The user's session, then the guest told the user left: the server waits for both, should
+    // it stop meanwhile.
+    let departing = (!shadow).then(|| vms.departing());
+    let (ended, user) = viewer(socket, &client, codecs, shadow, stopping)
         .instrument(span.clone())
         .await;
-    let _entered = span.enter();
-    match &ended {
-        Ok(()) => {
-            info!("viewer left");
-            client.leaves();
+    let departure = {
+        let _entered = span.enter();
+        match &ended {
+            Ok(departure) => {
+                info!(?departure, "viewer left");
+                *departure
+            }
+            Err(e) => {
+                warn!(error = %format!("{e:#}"), "viewer session ended");
+                Departure::Lost
+            }
         }
-        Err(e) => warn!(error = %format!("{e:#}"), "viewer session ended"),
+    };
+    // A client that may come back keeps the VM attached a while.
+    if departure != Departure::Lost {
+        client.leaves();
+    }
+    // The guest is told its user left: at once when the user said so or the server stops, a
+    // while after a lost connection, for the client to come back first; not when another user
+    // took the session, nor when the VM stopped.
+    let Some(user) = user else {
+        return Ok(());
+    };
+    let delay = match departure {
+        Departure::Left | Departure::ServerStopping => Duration::ZERO,
+        Departure::Lost => TELL_AFTER_LOST,
+        Departure::TakenOver | Departure::VmStopped => return Ok(()),
+    };
+    let tell = async move {
+        if !delay.is_zero() {
+            // At once if the server stops meanwhile. The VM stays attached until then.
+            tokio::select! {
+                () = tokio::time::sleep(delay) => {}
+                _ = server_stopping.wait_for(|stopping| *stopping) => {}
+            }
+        }
+        let shared = client.shared();
+        if !*shared.vm_stopped.borrow() {
+            let told = shared
+                .user
+                .after_leaving(user, || agent::user_left(&shared.agent))
+                .await;
+            if !told {
+                debug!("another user came: the guest is not told the last one left");
+            }
+        }
+        // Nothing to wait for any more: the VM need not stay attached for long.
+        client.leaves();
+        drop(client);
+        drop(departing);
+    }
+    .instrument(span);
+    if delay.is_zero() {
+        tell.await;
+    } else {
+        tokio::spawn(tell);
     }
     Ok(())
 }
+
+/// How long after a lost connection the guest is told its user left, unless a user came
+/// meanwhile: as long as a VM stays attached for a client that was cut off.
+const TELL_AFTER_LOST: Duration = Duration::from_secs(60);
 
 /// Whether `grant` names the VM `uuid`: "*", its UUID, or a name the VM goes by now. A name
 /// that names no VM, or several, names none.

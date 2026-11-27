@@ -17,6 +17,8 @@ use crate::session::input::AgentMouse;
 
 /// How long before trying the agent again, when it could not be reached.
 const RETRY: Duration = Duration::from_secs(3);
+/// How long the agent has to answer `Reset`.
+const RESET_TIME: Duration = Duration::from_secs(5);
 
 /// Keep a connection to the guest agent: when the agent or the guest restarts, connect again
 /// once the guest opens the agent's port, and bring the drives, printers and cameras back.
@@ -24,6 +26,7 @@ const RETRY: Duration = Duration::from_secs(3);
 /// drives, no printers and no cameras.
 pub async fn run(
     vm: zbus::Connection,
+    link: tokio::sync::watch::Sender<Option<zbus::Connection>>,
     mouse: AgentMouse,
     clipboard: Arc<Clipboard>,
     drives: Arc<Drives>,
@@ -38,7 +41,9 @@ pub async fn run(
                 info!("guest agent connected");
                 // Detached however this ends, this task aborted included (the server detaches
                 // from the VM): what holds the connection lets it go, and QEMU takes the next.
+                link.send_replace(Some(connection.clone()));
                 let _attached = Attached {
+                    link: link.clone(),
                     mouse: mouse.clone(),
                     clipboard: clipboard.clone(),
                     drives: drives.clone(),
@@ -84,8 +89,25 @@ pub async fn run(
     }
 }
 
+/// Tell the guest agent, if there is one, that the user left (`Agent1.Reset`): it lets go of
+/// what the user's client brought (clipboard, drives, printers, cameras) and decides whether
+/// and how to lock the guest's session.
+pub async fn user_left(agent: &tokio::sync::watch::Receiver<Option<zbus::Connection>>) {
+    let Some(connection) = agent.borrow().clone() else {
+        info!("no guest agent: the guest is not told its user left");
+        return;
+    };
+    let reset = async { agent::AgentProxy::new(&connection).await?.reset().await };
+    match tokio::time::timeout(RESET_TIME, reset).await {
+        Ok(Ok(())) => info!("the guest agent told the user left"),
+        Ok(Err(e)) => warn!(error = %e, "the guest agent not told the user left"),
+        Err(_) => warn!("the guest agent did not answer, told the user left"),
+    }
+}
+
 /// What uses the agent's connection, detached from it when dropped.
 struct Attached {
+    link: tokio::sync::watch::Sender<Option<zbus::Connection>>,
     mouse: AgentMouse,
     clipboard: Arc<Clipboard>,
     drives: Arc<Drives>,
@@ -95,6 +117,7 @@ struct Attached {
 
 impl Drop for Attached {
     fn drop(&mut self) {
+        self.link.send_replace(None);
         self.clipboard.detach();
         self.drives.detach();
         self.printers.detach();
