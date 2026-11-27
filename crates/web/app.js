@@ -213,6 +213,7 @@ const card = {
     // Nothing of the session's over the card: the toolbar up, the details closed.
     $("panel").hidden = true;
     $("details").classList.remove("on");
+    power.close();
     bar.el.classList.add("collapsed");
     $("card-icon").className = icon === "spin" ? "spinner" : "";
     $("card-icon-path").setAttribute("d", icon === "spin" ? "" : ICONS[icon] || "");
@@ -262,7 +263,7 @@ const bar = {
   },
   hide() {
     clearTimeout(this.timer);
-    if (!$("panel").hidden || this.el.matches(":hover")) return;
+    if (!$("panel").hidden || !$("power-menu").hidden || this.el.matches(":hover")) return;
     this.el.classList.add("collapsed");
   },
 };
@@ -279,7 +280,6 @@ for (const b of document.querySelectorAll("#bar button, #panel button")) {
 // Tooltips.
 const tip = (id, text) => { $(id).title = text; $(id).setAttribute("aria-label", text); };
 tip("cad", T.cad);
-tip("power", T.reset);
 tip("details", T.details);
 tip("leave", T.leave);
 tip("fullscreen", T.fullScreen);
@@ -1870,28 +1870,60 @@ $("cad").addEventListener("click", () => {
 for (const id of ["cad"]) if (shadow) $(id).hidden = true;
 
 // The VM's reset (PowerAction RESET = 1), when the server offers it to the user: none for a
-// shadow client, a user without the right, or a VM the server cannot reset. Confirmed first;
-// the card over the screen keeps the keys from the guest meanwhile.
+// shadow client, a user without the right, or a VM the server cannot reset. It sits with leaving,
+// under the same button: a menu then, with both; leaving at once otherwise. The reset is
+// confirmed first; the card over the screen keeps the keys from the guest meanwhile.
 const RESET = 1;
 const power = {
-  offered(actions) { $("power").hidden = !actions.includes(RESET); },
+  reset: false,
+  offered(actions) {
+    this.reset = actions.includes(RESET);
+    this.close();
+  },
+  open() {
+    panel.toggle(false);
+    const item = (label, run, danger = false) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.setAttribute("role", "menuitem");
+      if (danger) b.className = "danger";
+      b.textContent = label;
+      b.addEventListener("click", () => { this.close(); run(); });
+      return b;
+    };
+    $("power-menu").replaceChildren(
+      item(T.leave, () => session.leave()),
+      item(T.reset, () => this.confirm(), true),
+    );
+    $("power-menu").hidden = false;
+    $("leave").classList.add("on");
+    bar.show();
+  },
+  close() {
+    $("power-menu").hidden = true;
+    $("leave").classList.remove("on");
+  },
+  confirm() {
+    card.show({ icon: "power", title: T.resetTitle, text: T.resetText, actions: [
+      [T.reset, () => { card.hide(); send(powerAction(RESET)); }, true, true],
+      [T.cancel, () => card.hide(), false],
+    ] });
+  },
   done(action, error) {
     if (action !== RESET) return;
     if (error) toast.show(T.resetFailed(error), 6000);
     else toast.show(T.resetDone);
   },
 };
-$("power").addEventListener("click", () => {
-  panel.toggle(false);
-  card.show({ icon: "power", title: T.resetTitle, text: T.resetText, actions: [
-    [T.reset, () => { card.hide(); send(powerAction(RESET)); }, true, true],
-    [T.cancel, () => card.hide(), false],
-  ] });
+// A click elsewhere closes the menu.
+document.addEventListener("pointerdown", (e) => {
+  if (!$("power-menu").hidden && !e.target.closest("#power-menu, #leave")) power.close();
 });
 $("watching").hidden = !shadow;
 
 const panel = {
   toggle(open = $("panel").hidden) {
+    if (open) power.close();
     $("panel").hidden = !open;
     $("details").classList.toggle("on", open);
     if (open) { bar.show(); quality.sample().catch(() => {}); } else bar.hide();
@@ -1900,6 +1932,10 @@ const panel = {
 $("details").addEventListener("click", () => panel.toggle());
 $("panel-close").addEventListener("click", () => panel.toggle(false));
 $("leave").addEventListener("click", () => {
+  if (power.reset) {
+    if ($("power-menu").hidden) power.open(); else power.close();
+    return;
+  }
   panel.toggle(false);
   session.leave();
 });

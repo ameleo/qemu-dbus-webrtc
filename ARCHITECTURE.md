@@ -152,7 +152,8 @@ The server cannot tell one person from another: someone who takes the session wi
 after a lost connection finds it as the last user left it, as after a takeover. Without an agent,
 nothing is done.
 
-The user may also reset the VM, for a guest that no longer answers, when allowed to: an
+The user may also reset the VM, for a guest that no longer answers, from the menu of the
+toolbar's power button (with leaving), when allowed to: an
 account's `power = true`, or the broker's `Connect.power` for the users it relays; never a shadow
 client, nor anyone without accounts. A guest that answers restarts or shuts down from its own
 menu, so the console offers nothing gentler, which would also need the guest to follow a
