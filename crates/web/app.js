@@ -1968,6 +1968,8 @@ const takeControl = {
     // Control gone, the pointer this page held goes back to the viewer, who could not even reach
     // the toolbar otherwise.
     if (!granted && pointer.locked()) document.exitPointerLock();
+    // Control given, the lock keys go with the next event: those pressed meanwhile were not sent.
+    if (granted && !shadowControl.granted) input.syncLocks = true;
     shadowControl.granted = granted;
     $("control").classList.toggle("on", granted || shadowControl.asking);
     tip("control", granted ? T.controlGiveBack : T.controlAsk);
