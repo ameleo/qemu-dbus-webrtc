@@ -45,7 +45,7 @@ pub struct Account {
     pub user: String,
     hash: String,
     pub grant: Grant,
-    /// It may reboot, shut down, reset or power off the VMs it opens. Not unless said.
+    /// It may reset the VMs it opens, from the console. Not unless said.
     pub power: bool,
 }
 

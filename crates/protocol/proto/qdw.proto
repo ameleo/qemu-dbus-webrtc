@@ -47,20 +47,12 @@ message Power {
   PowerAction action = 1;
 }
 
-// What the user may do to the VM through its manager, beyond its console: libvirt, QEMU's QMP.
+// What the user may do to the VM through its manager (libvirt, QEMU's QMP), beyond its console.
 enum PowerAction {
   POWER_ACTION_UNSPECIFIED = 0;
-  // Restart the guest cleanly: its operating system shuts down, then the VM starts again. Only
-  // through the QEMU guest agent (libvirt), which fails when the agent does not answer: the
-  // ACPI power button alone may be ignored by the guest.
-  REBOOT = 1;
-  // Shut the guest down cleanly, through the QEMU guest agent as REBOOT: the VM stops when its
-  // operating system has, and the session ends with it.
-  SHUTDOWN = 2;
-  // Reset the VM at once, as its reset button would: what the guest did not save is lost.
-  RESET = 3;
-  // Stop the VM at once, as pulling its plug would: what the guest did not save is lost.
-  POWER_OFF = 4;
+  // Reset the VM at once, as its reset button would, for a guest that no longer answers: what
+  // it did not save is lost. A guest that answers restarts from its own menu.
+  RESET = 1;
 }
 
 message ServerMessage {
@@ -73,8 +65,7 @@ message ServerMessage {
   }
 }
 
-// The answer to a Power: the VM's manager took the action (an empty error), or why not. A
-// clean reboot or shutdown taken may still be ignored by the guest.
+// The answer to a Power: the VM's manager took the action (an empty error), or why not.
 message PowerDone {
   PowerAction action = 1;
   string error = 2;

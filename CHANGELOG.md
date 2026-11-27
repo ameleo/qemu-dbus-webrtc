@@ -11,17 +11,22 @@ What each release brings. The packages are on the
   brought and locks the guest's session. At once on a disconnect or a closed page, a minute after
   a lost connection the client has not restored, not on a takeover. Clients say they leave with
   the new `Leave` message; the page sends it.
-- **Power actions on the VM** for the users allowed to: restart and shut down cleanly, reset and
-  power off at once, from the page's toolbar, each confirmed first. An account's `power = true`
-  allows them, or the broker for the users it relays (`Connect.power`). Through libvirt, the
-  clean ones only with the QEMU guest agent; or QEMU's QMP socket (reset and power off). The offer lists them (`power_actions`); the
-  client asks with `Power`, answered by `PowerDone`.
+- **Resetting the VM** from the page's toolbar, confirmed first, for a guest that no longer
+  answers, by the users allowed to: an account's `power = true`, or the broker for the users it
+  relays (`Connect.power`). Through libvirt, or QEMU's QMP socket. The offer lists it
+  (`power_actions`); the client asks with `Power`, answered by `PowerDone`.
 
 ### Changed
 
 - A VM whose last client ended its session without a `Leave` (a lost connection, or a client
   that does not send it yet) stays attached a minute, for the client to come back, rather than
   five seconds.
+
+### Fixed
+
+- A session broken by its VM stopping (shut down from the guest) before the server saw the VM
+  stop ended as a failure of the server, which the page retries: it started the VM again. It now
+  ends normally.
 
 ## 0.3.0 — 2026-11-18
 

@@ -58,18 +58,11 @@ const WORDS = {
     details: "Connection details",
     leave: "Disconnect",
     cancel: "Cancel",
-    power: {
-      menu: "Restart or shut down the VM",
-      reboot: { label: "Restart", title: "Restart the VM?",
-        text: "Its system shuts down cleanly, then starts again.", done: "Restart asked of the VM." },
-      shutdown: { label: "Shut down", title: "Shut the VM down?",
-        text: "Its system shuts down cleanly, and the session ends with it.", done: "Shutdown asked of the VM." },
-      reset: { label: "Reset", title: "Reset the VM?",
-        text: "It restarts at once: what was not saved is lost.", done: "The VM was reset." },
-      powerOff: { label: "Power off", title: "Power the VM off?",
-        text: "It stops at once: what was not saved is lost.", done: "The VM was powered off." },
-      failed: (m) => `The VM could not do it: ${m}`,
-    },
+    reset: "Reset the VM",
+    resetTitle: "Reset the VM?",
+    resetText: "It restarts at once, as with its reset button: what was not saved is lost. A VM that still answers restarts from its own menu.",
+    resetDone: "The VM was reset.",
+    resetFailed: (m) => `The VM could not be reset: ${m}`,
     hint: "Click the screen to use the guest's mouse; Esc gives it back.",
     dropHere: "Drop to copy into the virtual machine",
     filesReady: (n) => `${n} ${n === 1 ? "file" : "files"} ready: paste in the virtual machine (Ctrl+V).`,
@@ -151,18 +144,11 @@ const WORDS = {
     details: "Détails de la connexion",
     leave: "Se déconnecter",
     cancel: "Annuler",
-    power: {
-      menu: "Redémarrer ou éteindre la machine",
-      reboot: { label: "Redémarrer", title: "Redémarrer la machine ?",
-        text: "Son système s'arrête proprement, puis redémarre.", done: "Redémarrage demandé à la machine." },
-      shutdown: { label: "Éteindre", title: "Éteindre la machine ?",
-        text: "Son système s'arrête proprement, et la session se termine avec lui.", done: "Arrêt demandé à la machine." },
-      reset: { label: "Réinitialiser", title: "Réinitialiser la machine ?",
-        text: "Elle redémarre immédiatement : ce qui n'est pas enregistré est perdu.", done: "La machine a été réinitialisée." },
-      powerOff: { label: "Forcer l'arrêt", title: "Forcer l'arrêt de la machine ?",
-        text: "Elle s'arrête immédiatement : ce qui n'est pas enregistré est perdu.", done: "La machine a été arrêtée." },
-      failed: (m) => `La machine n'a pas pu le faire : ${m}`,
-    },
+    reset: "Réinitialiser la machine",
+    resetTitle: "Réinitialiser la machine ?",
+    resetText: "Elle redémarre immédiatement, comme avec son bouton de réinitialisation : ce qui n'est pas enregistré est perdu. Une machine qui répond encore redémarre depuis son propre menu.",
+    resetDone: "La machine a été réinitialisée.",
+    resetFailed: (m) => `La machine n'a pas pu être réinitialisée : ${m}`,
     hint: "Cliquez sur l'écran pour utiliser la souris de la machine ; Échap la rend.",
     dropHere: "Déposez pour copier dans la machine virtuelle",
     filesReady: (n) => `${n} ${n === 1 ? "fichier prêt" : "fichiers prêts"} : collez dans la machine virtuelle (Ctrl+V).`,
@@ -227,7 +213,6 @@ const card = {
     // Nothing of the session's over the card: the toolbar up, the details closed.
     $("panel").hidden = true;
     $("details").classList.remove("on");
-    power.close();
     bar.el.classList.add("collapsed");
     $("card-icon").className = icon === "spin" ? "spinner" : "";
     $("card-icon-path").setAttribute("d", icon === "spin" ? "" : ICONS[icon] || "");
@@ -277,7 +262,7 @@ const bar = {
   },
   hide() {
     clearTimeout(this.timer);
-    if (!$("panel").hidden || !$("power-menu").hidden || this.el.matches(":hover")) return;
+    if (!$("panel").hidden || this.el.matches(":hover")) return;
     this.el.classList.add("collapsed");
   },
 };
@@ -294,7 +279,7 @@ for (const b of document.querySelectorAll("#bar button, #panel button")) {
 // Tooltips.
 const tip = (id, text) => { $(id).title = text; $(id).setAttribute("aria-label", text); };
 tip("cad", T.cad);
-tip("power", T.power.menu);
+tip("power", T.reset);
 tip("details", T.details);
 tip("leave", T.leave);
 tip("fullscreen", T.fullScreen);
@@ -378,7 +363,7 @@ const ice = (candidate, mline) => pb.message((o) => pb.bytes(o, 3, pb.message((c
 // The user leaves on purpose: the server tells the guest at once, rather than wait for a client
 // that lost its connection to come back.
 const leaving = () => pb.message((o) => pb.bytes(o, 4, []));
-// A power action of the VM, one the offer lists.
+// A power action of the VM, one the offer lists: its reset.
 const powerAction = (action) => pb.message((o) => pb.bytes(o, 5, pb.message((p) => pb.uint(p, 1, action))));
 
 // The VM's signalling, next to its page (/vm/<uuid>/signal), and the peer connection, both new
@@ -603,7 +588,7 @@ const onMessage = async (event) => {
   if (message.has(1)) {
     const offer = pb.parse(message.get(1)[0]);
     setName(str(offer, 2));
-    // power_actions = 6: what the user may ask of the VM; none for a user without the right.
+    // power_actions = 6: what the user may ask of the VM (its reset); none without the right.
     power.offered(uints(offer, 6));
     // ice_servers = 3: the STUN server the server asks, for the browser to find its own
     // public address behind a NAT; turn_servers = 4: the relays it may send through when it
@@ -1884,62 +1869,29 @@ $("cad").addEventListener("click", () => {
 });
 for (const id of ["cad"]) if (shadow) $(id).hidden = true;
 
-// The VM's power actions the server offers the user (PowerAction: 1 restart, 2 shut down,
-// 3 reset, 4 power off): a menu under the toolbar, each confirmed first. None offered, no
-// button: a shadow client, a user without the right, or a VM the server cannot ask.
-const POWER = [[1, "reboot", false], [2, "shutdown", false], [3, "reset", true], [4, "powerOff", true]];
+// The VM's reset (PowerAction RESET = 1), when the server offers it to the user: none for a
+// shadow client, a user without the right, or a VM the server cannot reset. Confirmed first;
+// the card over the screen keeps the keys from the guest meanwhile.
+const RESET = 1;
 const power = {
-  actions: [],
-  offered(actions) {
-    this.actions = POWER.filter(([n]) => actions.includes(n));
-    $("power").hidden = !this.actions.length;
-    this.close();
-  },
-  open() {
-    panel.toggle(false);
-    $("power-menu").replaceChildren(...this.actions.map(([n, key, danger]) => {
-      const b = document.createElement("button");
-      b.type = "button";
-      b.setAttribute("role", "menuitem");
-      if (danger) b.className = "danger";
-      b.textContent = T.power[key].label;
-      b.addEventListener("click", () => this.confirm(n, key, danger));
-      return b;
-    }));
-    $("power-menu").hidden = false;
-    $("power").classList.add("on");
-    bar.show();
-  },
-  close() {
-    $("power-menu").hidden = true;
-    $("power").classList.remove("on");
-  },
-  // Asked once confirmed; the card over the screen keeps the keys from the guest meanwhile.
-  confirm(n, key, danger) {
-    const words = T.power[key];
-    card.show({ icon: "power", title: words.title, text: words.text, actions: [
-      [words.label, () => { card.hide(); send(powerAction(n)); }, true, danger],
-      [T.cancel, () => card.hide(), false],
-    ] });
-  },
-  done(n, error) {
-    const key = POWER.find(([m]) => m === n)?.[1];
-    if (error) toast.show(T.power.failed(error), 6000);
-    else if (key) toast.show(T.power[key].done);
+  offered(actions) { $("power").hidden = !actions.includes(RESET); },
+  done(action, error) {
+    if (action !== RESET) return;
+    if (error) toast.show(T.resetFailed(error), 6000);
+    else toast.show(T.resetDone);
   },
 };
 $("power").addEventListener("click", () => {
-  if ($("power-menu").hidden) power.open(); else power.close();
-});
-// A click elsewhere closes the menu.
-document.addEventListener("pointerdown", (e) => {
-  if (!$("power-menu").hidden && !e.target.closest("#power-menu, #power")) power.close();
+  panel.toggle(false);
+  card.show({ icon: "power", title: T.resetTitle, text: T.resetText, actions: [
+    [T.reset, () => { card.hide(); send(powerAction(RESET)); }, true, true],
+    [T.cancel, () => card.hide(), false],
+  ] });
 });
 $("watching").hidden = !shadow;
 
 const panel = {
   toggle(open = $("panel").hidden) {
-    if (open) power.close();
     $("panel").hidden = !open;
     $("details").classList.toggle("on", open);
     if (open) { bar.show(); quality.sample().catch(() => {}); } else bar.hide();

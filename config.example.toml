@@ -21,9 +21,8 @@ password = "$argon2id$v=19$m=19456,t=2,p=1$..."
 user = "alice"
 password = "$argon2id$v=19$m=19456,t=2,p=1$..."
 vms = ["win11-alice", "b8ff54ee-77f5-43dd-aa19-de8eaed5eb75"]
-# It may also restart, shut down, reset or power off these VMs, from the console's toolbar
-# (through libvirt, or QEMU's QMP socket; a clean restart or shutdown needs the QEMU guest
-# agent). Default: false.
+# It may also reset these VMs from the console's toolbar, for a guest that no longer answers
+# (through libvirt, or QEMU's QMP socket). Default: false.
 power = true
 
 [listen]

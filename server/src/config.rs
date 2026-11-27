@@ -142,7 +142,7 @@ struct AccountFile {
     password: String,
     /// The VMs it may open, each by its UUID or its name; "*" for all of them.
     vms: Vec<String>,
-    /// It may reboot, shut down, reset or power off them.
+    /// It may reset them, from the console.
     #[serde(default)]
     power: bool,
 }
