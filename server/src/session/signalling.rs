@@ -11,8 +11,7 @@ use tracing::{Instrument, info, warn};
 use qdw_protocol::Message;
 use qdw_protocol::v1::{ClientMessage, Error, ServerMessage, client_message, server_message};
 
-use super::lock::Departure;
-use super::viewer::{Viewer, viewer};
+use super::viewer::viewer;
 use crate::config::Auth;
 use crate::vms::Vms;
 
@@ -35,10 +34,7 @@ pub enum Admission<'a> {
     /// The broker that relays the connection, which checked the user's sign-in and their
     /// access to the VM it names.
     Broker {
-        /// The user's name, for the logs.
         user: String,
-        /// The user's stable identifier, "<issuer>|<subject>".
-        id: String,
         /// View-only, as the broker says; the client may ask it too.
         shadow: bool,
     },
@@ -60,15 +56,6 @@ pub async fn open(
         Ok(Err(e)) => return Err(e),
         Ok(Ok(Some(_))) | Err(_) => anyhow::bail!("no hello"),
     };
-    // Who the user is, to tell one person from another when the session changes hands: the
-    // broker's identifier, the account's user; nobody in particular without accounts.
-    // Each kind its own, so that an account's user never matches a broker's identifier; empty
-    // for nobody in particular, who always finds the guest's session locked.
-    let identity = match &admission {
-        Admission::Broker { id, .. } if !id.is_empty() => format!("broker:{id}"),
-        Admission::Local { .. } if !hello.user.is_empty() => format!("account:{}", hello.user),
-        _ => String::new(),
-    };
     let mut shadow = hello.shadow;
     // The VMs the client may open: all without accounts, those of its account otherwise; the one
     // the broker names, for a connection it relays.
@@ -76,7 +63,6 @@ pub async fn open(
         Admission::Broker {
             user,
             shadow: view_only,
-            ..
         } => {
             shadow |= view_only;
             info!(id, user, shadow, "relayed by the broker");
@@ -167,64 +153,17 @@ pub async fn open(
         }
     };
     let span = client.span().clone();
-    let who = Viewer {
-        codecs: hello.codecs,
-        shadow,
-        identity,
-    };
-    let mut server_stopping = stopping.clone();
-    // The user's session, then the lock after it: the server waits for both, should it stop
-    // meanwhile.
-    let pending = (!shadow).then(|| vms.pending_lock());
-    let (ended, user) = viewer(socket, &client, who, stopping)
+    let codecs = hello.codecs;
+    let ended = viewer(socket, &client, codecs, shadow, stopping)
         .instrument(span.clone())
         .await;
-    let departure = {
-        let _entered = span.enter();
-        match &ended {
-            Ok(departure) => {
-                info!(?departure, "viewer left");
-                *departure
-            }
-            Err(e) => {
-                warn!(error = %format!("{e:#}"), "viewer session ended");
-                Departure::Lost
-            }
+    let _entered = span.enter();
+    match &ended {
+        Ok(()) => {
+            info!("viewer left");
+            client.leaves();
         }
-    };
-    // A client that may come back keeps the VM attached a while.
-    if departure != Departure::Lost {
-        client.leaves();
-    }
-    // The user gone, the guest's session is locked, as the configuration says.
-    let Some(user) = user else {
-        return Ok(());
-    };
-    let shared = client.shared().clone();
-    let Some(delay) = shared.locker.policy.after(departure) else {
-        return Ok(());
-    };
-    let lock = async move {
-        if !delay.is_zero() {
-            // Later, unless the user comes back before; at once if the server stops meanwhile.
-            // The VM stays attached until then.
-            tokio::select! {
-                () = tokio::time::sleep(delay) => {}
-                _ = server_stopping.wait_for(|stopping| *stopping) => {}
-            }
-        }
-        if !*shared.vm_stopped.borrow() {
-            let locker = &shared.locker;
-            shared.user.lock_after(user, || locker.lock()).await;
-        }
-        drop(client);
-        drop(pending);
-    }
-    .instrument(span);
-    if delay.is_zero() {
-        lock.await;
-    } else {
-        tokio::spawn(lock);
+        Err(e) => warn!(error = %format!("{e:#}"), "viewer session ended"),
     }
     Ok(())
 }
@@ -298,7 +237,7 @@ pub(crate) async fn close(socket: &mut Socket, code: u16) {
 
 /// Refuse the client, saying why (an Error), then close: the end is a normal one (1000), the
 /// refusal its reason.
-pub(crate) async fn refuse(socket: &mut Socket, message: &str) {
+async fn refuse(socket: &mut Socket, message: &str) {
     let message = message.to_owned();
     let _ = send(socket, server_message::Message::Error(Error { message })).await;
     close(socket, axum::extract::ws::close_code::NORMAL).await;

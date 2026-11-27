@@ -103,18 +103,6 @@ pub struct Vms {
     stopping: tokio::sync::watch::Sender<bool>,
     /// Wakes the reaper before its time.
     reap: Arc<tokio::sync::Notify>,
-    /// The locks of guests' sessions under way or waiting for their delay: the server waits for
-    /// them before it detaches from the VMs.
-    locks: Arc<tokio::sync::watch::Sender<usize>>,
-}
-
-/// A lock of a guest's session under way or waiting: counted until dropped.
-pub struct PendingLock(Arc<tokio::sync::watch::Sender<usize>>);
-
-impl Drop for PendingLock {
-    fn drop(&mut self) {
-        self.0.send_modify(|locks| *locks -= 1);
-    }
 }
 
 impl Vms {
@@ -125,7 +113,6 @@ impl Vms {
             attached: Default::default(),
             attaching: Default::default(),
             stopping: tokio::sync::watch::Sender::new(false),
-            locks: Arc::new(tokio::sync::watch::Sender::new(0)),
             reap: Default::default(),
         });
         tokio::spawn(reap(Arc::downgrade(&vms), vms.reap.clone()));
@@ -142,17 +129,6 @@ impl Vms {
         let attached: Vec<_> = self.attached.lock().await.drain().collect();
         let shut_down = attached.iter().map(|(_, entry)| entry.vm.shut_down());
         futures_util::future::join_all(shut_down).await;
-    }
-
-    /// A lock of a guest's session is under way or waiting, until the guard is dropped.
-    pub fn pending_lock(&self) -> PendingLock {
-        self.locks.send_modify(|locks| *locks += 1);
-        PendingLock(self.locks.clone())
-    }
-
-    /// Wait until no lock of a guest's session is under way nor waiting.
-    pub async fn locks_done(&self) {
-        let _ = self.locks.subscribe().wait_for(|locks| *locks == 0).await;
     }
 
     /// Turns true when the server stops.

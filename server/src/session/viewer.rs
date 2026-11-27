@@ -13,9 +13,8 @@ use qdw_protocol::v1::{
     server_message,
 };
 
-use super::lock::{Departure, Mode};
 use super::shared::{Request, Shared};
-use super::signalling::{Socket, close, receive, refuse, send};
+use super::signalling::{Socket, close, receive, send};
 use crate::guest::cameras::{CamerasFollow, ViewerCameras};
 use crate::guest::clipboard::{ViewerClipboard, ViewerFollow};
 use crate::guest::drives::{DrivesFollow, ViewerDrives};
@@ -61,46 +60,17 @@ async fn stun_server(server: &str) -> Option<std::net::SocketAddr> {
     }
 }
 
-/// Who a viewer is: the codecs it decodes, from its hello, whether it only watches, and who its
-/// user is, to tell one person from another.
-pub(crate) struct Viewer {
-    pub(crate) codecs: Vec<String>,
-    pub(crate) shadow: bool,
-    pub(crate) identity: String,
-}
-
-/// The session of a client of the VM: how it ended, and the id of its user (`None` for a shadow
-/// client, or a user refused).
+/// The session of a client of the VM: `codecs` it decodes, from its hello, and whether it
+/// only watches.
 pub(crate) async fn viewer(
     mut socket: Socket,
     client: &Client,
-    Viewer {
-        codecs,
-        shadow,
-        identity,
-    }: Viewer,
+    codecs: Vec<String>,
+    shadow: bool,
     server_stopping: watch::Receiver<bool>,
-) -> (Result<Departure>, Option<u64>) {
+) -> Result<()> {
     let stopping = server_stopping.clone();
     let shared = client.shared().clone();
-
-    // The user takes the session before anything of the guest reaches it: the guest's session,
-    // open to another person, is locked first, and the user refused if it cannot be.
-    let user = if shadow {
-        None
-    } else {
-        let locker = &shared.locker;
-        let lock = (locker.policy.mode != Mode::Never).then_some(|| locker.lock());
-        match shared.user.arrive(&identity, lock).await {
-            Some(user) => Some(user),
-            None => {
-                let message = "the guest's session is open to another user and could not be locked";
-                refuse(&mut socket, message).await;
-                return (Err(anyhow::anyhow!(message)), None);
-            }
-        }
-    };
-    let (user_id, taken_over) = user.unzip();
 
     // The video in 10 bits if this viewer and all the others decode it.
     let deep = codecs.iter().any(|c| shared.codec.deep_by(c));
@@ -149,12 +119,10 @@ pub(crate) async fn viewer(
                 .requests
                 .send(Request::TenBits(shared.depths.leave(depth_id)));
             close(&mut socket, axum::extract::ws::close_code::ERROR).await;
-            if let Some(id) = user_id {
-                shared.user.leave(id);
-            }
-            return (Err(e), user_id);
+            return Err(e);
         }
     };
+    let user = (!shadow).then(|| shared.user.take_over());
     info!(shadow, "viewer session");
     let (clipboard, clip) = shared.clipboard.viewer();
     let (drives, drives_follow) = shared.drives.viewer();
@@ -171,6 +139,7 @@ pub(crate) async fn viewer(
         printers,
         cameras,
     };
+    let (user_id, taken_over) = user.unzip();
     // The session waits on calls to the VM: when the VM stops, one may only fail when its bus
     // goes, seconds later. The session ends as soon as the display loop sees the VM stop,
     // whatever it waits on.
@@ -198,7 +167,7 @@ pub(crate) async fn viewer(
         ) => ended,
         true = async { vm_stopped.wait_for(|stopped| *stopped).await.is_ok() } => {
             info!("the VM stopped: the session ends");
-            Ok(Departure::VmStopped)
+            Ok(())
         }
         () = async {
             match &mut user_left {
@@ -209,14 +178,14 @@ pub(crate) async fn viewer(
             }
         } => {
             info!("the user left: the shadow session ends");
-            Ok(Departure::Left)
+            Ok(())
         }
     };
     // Whatever ended the session, the WebSocket closes with a close frame, whose status tells
     // the client how: a normal end, the server going away (it may come back), or a failure.
     let code = match &ended {
-        Ok(_) if *stopping.borrow() => axum::extract::ws::close_code::AWAY,
-        Ok(_) => axum::extract::ws::close_code::NORMAL,
+        Ok(()) if *stopping.borrow() => axum::extract::ws::close_code::AWAY,
+        Ok(()) => axum::extract::ws::close_code::NORMAL,
         Err(_) => axum::extract::ws::close_code::ERROR,
     };
     close(&mut socket, code).await;
@@ -244,17 +213,7 @@ pub(crate) async fn viewer(
     let _ = shared
         .requests
         .send(Request::TenBits(shared.depths.leave(depth_id)));
-    // A server that stops ends the session from either side: whatever ended it, the server
-    // stops, even when telling the client failed.
-    let ended = if *stopping.borrow() {
-        if let Err(e) = &ended {
-            debug!(error = %format!("{e:#}"), "the session ended as the server stops");
-        }
-        Ok(Departure::ServerStopping)
-    } else {
-        ended
-    };
-    (ended, user_id)
+    ended
 }
 
 /// How long the guest has to release what a session that ends held: keys, the clipboard,
@@ -316,7 +275,7 @@ async fn run(
     state: &mut ViewerState,
     mut follow: Follow,
     shared: &Shared,
-) -> Result<Departure> {
+) -> Result<()> {
     let keyframe = || {
         for screen in &shared.screens {
             let _ = shared.requests.send(Request::Keyframe {
@@ -373,11 +332,11 @@ async fn run(
             () = &mut taken_over => {
                 info!("another client took the session over");
                 send(socket, server_message::Message::Ended(Ended { reason: ended::Reason::TakenOver.into() })).await?;
-                return Ok(Departure::TakenOver);
+                return Ok(());
             }
             true = async { server_stopping.wait_for(|stopping| *stopping).await.is_ok() } => {
                 send(socket, server_message::Message::Ended(Ended { reason: ended::Reason::ServerStopping.into() })).await?;
-                return Ok(Departure::ServerStopping);
+                return Ok(());
             }
             signal = signals.recv() => match signal {
                 Some(Signal::Offer(sdp)) => {
@@ -483,7 +442,7 @@ async fn run(
                         session.send(Channel::Control, message.encode_to_vec());
                     }
                 }
-                Some(Signal::Closed) | None => return Ok(Departure::Lost),
+                Some(Signal::Closed) | None => return Ok(()),
             },
             Ok(()) = follow.pointer.changed() => {
                 if let Some(sent) = &mut sent {
@@ -543,8 +502,7 @@ async fn run(
                 }
                 Some(client_message::Message::Ice(_)) => {}
                 Some(client_message::Message::Hello(_)) => anyhow::bail!("a second hello"),
-                Some(client_message::Message::Leave(_)) => return Ok(Departure::Left),
-                None => return Ok(Departure::Lost),
+                None => return Ok(()),
             },
         }
     }

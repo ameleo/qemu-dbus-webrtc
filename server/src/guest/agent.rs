@@ -24,7 +24,6 @@ const RETRY: Duration = Duration::from_secs(3);
 /// drives, no printers and no cameras.
 pub async fn run(
     vm: zbus::Connection,
-    link: tokio::sync::watch::Sender<Option<zbus::Connection>>,
     mouse: AgentMouse,
     clipboard: Arc<Clipboard>,
     drives: Arc<Drives>,
@@ -39,9 +38,7 @@ pub async fn run(
                 info!("guest agent connected");
                 // Detached however this ends, this task aborted included (the server detaches
                 // from the VM): what holds the connection lets it go, and QEMU takes the next.
-                link.send_replace(Some(connection.clone()));
                 let _attached = Attached {
-                    link: link.clone(),
                     mouse: mouse.clone(),
                     clipboard: clipboard.clone(),
                     drives: drives.clone(),
@@ -89,7 +86,6 @@ pub async fn run(
 
 /// What uses the agent's connection, detached from it when dropped.
 struct Attached {
-    link: tokio::sync::watch::Sender<Option<zbus::Connection>>,
     mouse: AgentMouse,
     clipboard: Arc<Clipboard>,
     drives: Arc<Drives>,
@@ -99,7 +95,6 @@ struct Attached {
 
 impl Drop for Attached {
     fn drop(&mut self) {
-        self.link.send_replace(None);
         self.clipboard.detach();
         self.drives.detach();
         self.printers.detach();
