@@ -4,13 +4,13 @@
 
 use anyhow::Result;
 use tokio::sync::{mpsc, oneshot, watch};
-use tracing::{debug, info, warn};
+use tracing::{Instrument, debug, info, warn};
 
 use qdw_protocol::Message;
 use qdw_protocol::v1::{
     BandwidthEstimate, ControlMessage, EncodeLatency, Ended, Input, Microphone, MonitorLayout,
-    PointerMode, SessionDescription, VideoPause, client_message, control_message, ended,
-    server_message,
+    PointerMode, Power, PowerAction, PowerDone, SessionDescription, VideoPause, client_message,
+    control_message, ended, server_message,
 };
 
 use super::shared::{Request, Shared};
@@ -75,14 +75,15 @@ pub(crate) enum Departure {
     VmStopped,
 }
 
-/// The session of a client of the VM: `codecs` it decodes, from its hello, and whether it
-/// only watches. Returns how it ended, and the id of its user (`None` for a shadow client, or
-/// a session that did not start).
+/// The session of a client of the VM: `codecs` it decodes, from its hello, whether it only
+/// watches, and whether its user may ask the VM's power actions. Returns how it ended, and the
+/// id of its user (`None` for a shadow client, or a session that did not start).
 pub(crate) async fn viewer(
     mut socket: Socket,
     client: &Client,
     codecs: Vec<String>,
     shadow: bool,
+    power: bool,
     server_stopping: watch::Receiver<bool>,
 ) -> (Result<Departure>, Option<u64>) {
     let stopping = server_stopping.clone();
@@ -181,6 +182,11 @@ pub(crate) async fn viewer(
                 cameras: cameras_follow,
                 taken_over,
                 server_stopping,
+                // The VM's power actions, for a user who may ask them.
+                power_actions: match &shared.power {
+                    Some(control) if power && !shadow => control.actions().to_vec(),
+                    _ => Vec::new(),
+                },
             },
             &shared,
         ) => ended,
@@ -199,6 +205,24 @@ pub(crate) async fn viewer(
             info!("the user left: the shadow session ends");
             Ok(Departure::Left)
         }
+    };
+    // A VM that stops (shut down, powered off) may break the session before the display loop
+    // sees it stop: a failure then is the VM stopping, a normal end the client does not retry.
+    let ended = match ended {
+        Err(e) => {
+            let stopped =
+                tokio::time::timeout(STOP_SEEN_TIME, vm_stopped.wait_for(|stopped| *stopped))
+                    .await
+                    .is_ok_and(|seen| seen.is_ok());
+            if stopped {
+                debug!(error = %format!("{e:#}"), "the session failed as the VM stopped");
+                info!("the VM stopped: the session ends");
+                Ok(Departure::VmStopped)
+            } else {
+                Err(e)
+            }
+        }
+        ended => ended,
     };
     // Whatever ended the session, the WebSocket closes with a close frame, whose status tells
     // the client how: a normal end, the server going away (it may come back), or a failure.
@@ -263,6 +287,10 @@ async fn leave_after_closed(socket: &mut Socket) -> Departure {
         .unwrap_or(Departure::Lost)
 }
 
+/// How long after a session failed the display loop may see the VM stop, when that is why: it
+/// looks every second.
+const STOP_SEEN_TIME: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// How long a `Leave` may come after the peer connection closed.
 const LEAVE_TIME: std::time::Duration = std::time::Duration::from_secs(1);
 
@@ -310,6 +338,8 @@ struct Follow {
     taken_over: Option<oneshot::Receiver<()>>,
     /// Turns true when the server stops.
     server_stopping: watch::Receiver<bool>,
+    /// The power actions the user may ask; none for a shadow client.
+    power_actions: Vec<PowerAction>,
 }
 
 fn send_all(session: &Session, channel: Channel, messages: Vec<Vec<u8>>) {
@@ -376,6 +406,8 @@ async fn run(
         session.send(Channel::Control, message.encode_to_vec());
     };
     let mut reception = tokio::time::interval(std::time::Duration::from_secs(5));
+    // The power actions under way answer here.
+    let (power_done_tx, mut power_done) = mpsc::unbounded_channel::<(PowerAction, Result<()>)>();
     loop {
         tokio::select! {
             _ = reception.tick() => session.report_reception(),
@@ -399,6 +431,7 @@ async fn run(
                             .map(|t| t.for_session(std::time::SystemTime::now())).collect(),
                         // A broker in front decides it, in the offer it relays.
                         relay_only: false,
+                        power_actions: follow.power_actions.iter().map(|&a| a.into()).collect(),
                     })).await?
                 }
                 Some(Signal::Message(Channel::Input | Channel::Clipboard | Channel::Drive | Channel::Printer | Channel::Camera, _)) if !user => {}
@@ -544,6 +577,20 @@ async fn run(
             Some(message) = follow.printers.outgoing.recv() => session.send(Channel::Printer, message),
             Some(call) = follow.cameras.calls.recv() => send_all(session, Channel::Camera, cameras.call(call, session)),
             Some(message) = follow.cameras.outgoing.recv() => session.send(Channel::Camera, message),
+            Some((action, result)) = power_done.recv() => {
+                let error = match result {
+                    Ok(()) => {
+                        info!(action = action.as_str_name(), "power action taken");
+                        String::new()
+                    }
+                    // The client is told the cause alone: the rest may name the host's paths.
+                    Err(e) => {
+                        warn!(action = action.as_str_name(), error = %format!("{e:#}"), "power action failed");
+                        e.root_cause().to_string()
+                    }
+                };
+                send(socket, server_message::Message::PowerDone(PowerDone { action: action.into(), error })).await?;
+            }
             message = receive(socket) => match message? {
                 Some(client_message::Message::Answer(SessionDescription { sdp, .. })) => session.apply_answer(&sdp)?,
                 // An empty candidate marks the end of the client's candidates.
@@ -553,6 +600,27 @@ async fn run(
                 Some(client_message::Message::Ice(_)) => {}
                 Some(client_message::Message::Hello(_)) => anyhow::bail!("a second hello"),
                 Some(client_message::Message::Leave(_)) => return Ok(Departure::Left),
+                Some(client_message::Message::Power(Power { action })) => {
+                    let action = PowerAction::try_from(action).unwrap_or_default();
+                    match &shared.power {
+                        Some(control) if follow.power_actions.contains(&action) => {
+                            info!(action = action.as_str_name(), "power action asked");
+                            let control = control.clone();
+                            let done = power_done_tx.clone();
+                            tokio::spawn(
+                                async move {
+                                    let _ = done.send((action, control.run(action).await));
+                                }
+                                .in_current_span(),
+                            );
+                        }
+                        _ => {
+                            warn!(action = action.as_str_name(), "power action refused: not offered");
+                            let error = "this power action is not allowed".to_owned();
+                            send(socket, server_message::Message::PowerDone(PowerDone { action: action.into(), error })).await?;
+                        }
+                    }
+                }
                 None => return Ok(Departure::Lost),
             },
         }

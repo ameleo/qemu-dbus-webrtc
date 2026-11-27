@@ -21,6 +21,10 @@ password = "$argon2id$v=19$m=19456,t=2,p=1$..."
 user = "alice"
 password = "$argon2id$v=19$m=19456,t=2,p=1$..."
 vms = ["win11-alice", "b8ff54ee-77f5-43dd-aa19-de8eaed5eb75"]
+# It may also restart, shut down, reset or power off these VMs, from the console's toolbar
+# (through libvirt, or QEMU's QMP socket; a clean restart or shutdown needs the QEMU guest
+# agent). Default: false.
+power = true
 
 [listen]
 # Address of the client page and signaling endpoint. Default: 127.0.0.1:8090 (local only).

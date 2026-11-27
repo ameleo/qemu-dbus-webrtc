@@ -63,6 +63,9 @@ Without guest software:
 - **Session handling:** the guest resolution follows the client window. One client controls
   the session at a time; a new client takes it over. Shadow clients (`?shadow` in the URL) are
   view-only.
+- **Power actions:** restart, shut down, reset or power off the VM from the toolbar, each
+  confirmed, for the users allowed to (an account's `power = true`, or the broker), through
+  libvirt or QEMU's QMP socket; a clean restart or shutdown through the QEMU guest agent.
 - **Browsers:** Chrome and Firefox, with packet loss recovery (NACK/RTX). Clients are told when
   they cannot decode the stream (Firefox does not support VP9 4:4:4).
 - **Input:** keyboard by scancode, so the guest applies its own layout; lock key state

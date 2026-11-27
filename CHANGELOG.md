@@ -11,6 +11,11 @@ What each release brings. The packages are on the
   brought and locks the guest's session. At once on a disconnect or a closed page, a minute after
   a lost connection the client has not restored, not on a takeover. Clients say they leave with
   the new `Leave` message; the page sends it.
+- **Power actions on the VM** for the users allowed to: restart and shut down cleanly, reset and
+  power off at once, from the page's toolbar, each confirmed first. An account's `power = true`
+  allows them, or the broker for the users it relays (`Connect.power`). Through libvirt, the
+  clean ones only with the QEMU guest agent; or QEMU's QMP socket (reset and power off). The offer lists them (`power_actions`); the
+  client asks with `Power`, answered by `PowerDone`.
 
 ### Changed
 

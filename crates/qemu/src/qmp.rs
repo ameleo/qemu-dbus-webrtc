@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! A minimal QMP client: just enough to hand QEMU a peer-to-peer D-Bus display connection
-//! (`-display dbus,p2p=on`), through `getfd` and `add_client`.
+//! (`-display dbus,p2p=on`), through `getfd` and `add_client`, and to run commands without
+//! arguments.
 
 use std::io::{BufRead, BufReader, IoSlice, Write};
 use std::mem::MaybeUninit;
@@ -47,6 +48,12 @@ impl Qmp {
             Some(json!({ "protocol": "@dbus-display", "fdname": FD_NAME })),
             None,
         )?;
+        Ok(())
+    }
+
+    /// Run a command without arguments (`system_reset`, `system_powerdown`, `quit`...).
+    pub fn command(&mut self, command: &str) -> Result<()> {
+        self.execute(command, None, None)?;
         Ok(())
     }
 

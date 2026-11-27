@@ -324,6 +324,7 @@ async fn relay(
     let admission = session::Admission::Broker {
         user,
         shadow: connect.shadow,
+        power: connect.power,
     };
     if let Err(e) = session::open(socket, &vms, admission, &connect.vm_uuid, vms.stopping()).await {
         warn!(error = %format!("{e:#}"), "relayed session ended");
@@ -506,6 +507,7 @@ mod tests {
                         name: "Alice".into(),
                     }),
                     shadow: false,
+                    power: false,
                 })),
             };
             // The stream stays open after the Connect, as the host's connection does.

@@ -4,13 +4,15 @@
 //! with a D-Bus display (`<graphics type='dbus'>`), running or not, by UUID and name; the bus
 //! of a running one's display, from its live definition; and starting one that is off, when
 //! the configuration allows it. Without libvirt-dbus, the displays' sockets alone: the running
-//! domains only, and their UUID read from the VMs.
+//! domains only, and their UUID read from the VMs. Through libvirt-dbus too, the domains'
+//! power actions: reboot and shut down through the QEMU guest agent, reset, destroy.
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
+use qdw_protocol::v1::PowerAction;
 use qdw_qemu::display::Attach;
 use tracing::{debug, info, warn};
 use zbus::OwnedObjectPath;
@@ -31,6 +33,10 @@ trait Connect {
 #[zbus::proxy(interface = "org.libvirt.Domain", default_service = "org.libvirt")]
 trait Domain {
     fn create(&self, flags: u32) -> zbus::Result<()>;
+    fn reboot(&self, flags: u32) -> zbus::Result<()>;
+    fn shutdown(&self, flags: u32) -> zbus::Result<()>;
+    fn reset(&self, flags: u32) -> zbus::Result<()>;
+    fn destroy(&self, flags: u32) -> zbus::Result<()>;
     #[zbus(name = "GetXMLDesc")]
     fn get_xml_desc(&self, flags: u32) -> zbus::Result<String>;
     #[zbus(property)]
@@ -223,6 +229,61 @@ impl Provider for Libvirt {
     }
 }
 
+impl Libvirt {
+    /// libvirt-dbus's connection, when it knows the domain `uuid`, and whether the domain has a
+    /// channel to the QEMU guest agent: what asks it the domain's power actions (`power`).
+    pub async fn knows(&self, uuid: &str) -> Option<(zbus::Connection, bool)> {
+        let system = self.libvirt().await?;
+        let connect = ConnectProxy::new(&system).await.ok()?;
+        let path = connect.domain_lookup_by_uuid(uuid).await.ok()?;
+        let xml = domain(&system, path)
+            .await
+            .ok()?
+            .get_xml_desc(0)
+            .await
+            .ok()?;
+        Some((system, has_guest_agent(&xml)))
+    }
+}
+
+/// Whether a domain definition has a channel to the QEMU guest agent: a `<target>` named
+/// `org.qemu.guest_agent.0`, which only a channel's target has; libvirt reboots and shuts the
+/// guest down through it.
+fn has_guest_agent(xml: &str) -> bool {
+    xml.match_indices("<target ").any(|(start, _)| {
+        let tag = &xml[start..];
+        let tag = &tag[..tag.find('>').unwrap_or(tag.len())];
+        attribute(tag, "name").as_deref() == Some(GUEST_AGENT)
+    })
+}
+
+/// The QEMU guest agent's channel.
+const GUEST_AGENT: &str = "org.qemu.guest_agent.0";
+
+/// libvirt's flag that has a reboot or shutdown go through the QEMU guest agent alone
+/// (`VIR_DOMAIN_REBOOT_GUEST_AGENT`, `VIR_DOMAIN_SHUTDOWN_GUEST_AGENT`): without it, libvirt may
+/// press the ACPI power button, which the guest's settings may have it ignore.
+const BY_GUEST_AGENT: u32 = 1 << 1;
+
+/// Ask libvirt a power action of the domain `uuid`: a clean reboot or shutdown through the QEMU
+/// guest agent (it fails when the agent does not answer), a reset, or stopping it at once
+/// (destroy).
+pub async fn power(system: &zbus::Connection, uuid: &str, action: PowerAction) -> Result<()> {
+    let path = ConnectProxy::new(system)
+        .await?
+        .domain_lookup_by_uuid(uuid)
+        .await?;
+    let domain = domain(system, path).await?;
+    match action {
+        PowerAction::Reboot => domain.reboot(BY_GUEST_AGENT).await?,
+        PowerAction::Shutdown => domain.shutdown(BY_GUEST_AGENT).await?,
+        PowerAction::Reset => domain.reset(0).await?,
+        PowerAction::PowerOff => domain.destroy(0).await?,
+        PowerAction::Unspecified => bail!("no power action"),
+    }
+    Ok(())
+}
+
 /// The domain at `path`. Its properties are read when asked, not cached: zbus's cache fails
 /// on some of libvirt's domain properties ("incorrect type").
 async fn domain(system: &zbus::Connection, path: OwnedObjectPath) -> Result<DomainProxy<'static>> {
@@ -283,6 +344,21 @@ fn domain_of_socket(file: &str) -> Option<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guest_agent_channel() {
+        let with = "<channel type='unix'><source mode='bind'/>\
+            <target type='virtio' name='org.qemu.guest_agent.0' state='connected'/></channel>\
+            <channel type='dbus'><target type='virtio' name='fr.ameleo.agent.0'/></channel>";
+        assert!(has_guest_agent(with));
+        let without = "<channel type='dbus'><source channel='fr.ameleo.agent.0'/>\
+            <target type='virtio' name='fr.ameleo.agent.0' state='connected'/></channel>\
+            <console type='pty'><target type='serial' port='0'/></console>";
+        assert!(!has_guest_agent(without));
+        assert!(has_guest_agent(
+            r#"<target type="virtio" name="org.qemu.guest_agent.0"/>"#
+        ));
+    }
 
     #[test]
     fn the_display_of_a_definition() {

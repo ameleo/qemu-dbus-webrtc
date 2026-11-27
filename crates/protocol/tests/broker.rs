@@ -69,6 +69,7 @@ impl Broker for TestBroker {
                     name: "Alice".into(),
                 }),
                 shadow: false,
+                power: false,
             })),
         }))
         .await

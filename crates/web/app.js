@@ -57,6 +57,19 @@ const WORDS = {
     cadSent: "Ctrl+Alt+Del sent.",
     details: "Connection details",
     leave: "Disconnect",
+    cancel: "Cancel",
+    power: {
+      menu: "Restart or shut down the VM",
+      reboot: { label: "Restart", title: "Restart the VM?",
+        text: "Its system shuts down cleanly, then starts again.", done: "Restart asked of the VM." },
+      shutdown: { label: "Shut down", title: "Shut the VM down?",
+        text: "Its system shuts down cleanly, and the session ends with it.", done: "Shutdown asked of the VM." },
+      reset: { label: "Reset", title: "Reset the VM?",
+        text: "It restarts at once: what was not saved is lost.", done: "The VM was reset." },
+      powerOff: { label: "Power off", title: "Power the VM off?",
+        text: "It stops at once: what was not saved is lost.", done: "The VM was powered off." },
+      failed: (m) => `The VM could not do it: ${m}`,
+    },
     hint: "Click the screen to use the guest's mouse; Esc gives it back.",
     dropHere: "Drop to copy into the virtual machine",
     filesReady: (n) => `${n} ${n === 1 ? "file" : "files"} ready: paste in the virtual machine (Ctrl+V).`,
@@ -137,6 +150,19 @@ const WORDS = {
     cadSent: "Ctrl+Alt+Suppr envoyé.",
     details: "Détails de la connexion",
     leave: "Se déconnecter",
+    cancel: "Annuler",
+    power: {
+      menu: "Redémarrer ou éteindre la machine",
+      reboot: { label: "Redémarrer", title: "Redémarrer la machine ?",
+        text: "Son système s'arrête proprement, puis redémarre.", done: "Redémarrage demandé à la machine." },
+      shutdown: { label: "Éteindre", title: "Éteindre la machine ?",
+        text: "Son système s'arrête proprement, et la session se termine avec lui.", done: "Arrêt demandé à la machine." },
+      reset: { label: "Réinitialiser", title: "Réinitialiser la machine ?",
+        text: "Elle redémarre immédiatement : ce qui n'est pas enregistré est perdu.", done: "La machine a été réinitialisée." },
+      powerOff: { label: "Forcer l'arrêt", title: "Forcer l'arrêt de la machine ?",
+        text: "Elle s'arrête immédiatement : ce qui n'est pas enregistré est perdu.", done: "La machine a été arrêtée." },
+      failed: (m) => `La machine n'a pas pu le faire : ${m}`,
+    },
     hint: "Cliquez sur l'écran pour utiliser la souris de la machine ; Échap la rend.",
     dropHere: "Déposez pour copier dans la machine virtuelle",
     filesReady: (n) => `${n} ${n === 1 ? "fichier prêt" : "fichiers prêts"} : collez dans la machine virtuelle (Ctrl+V).`,
@@ -193,6 +219,7 @@ const ICONS = {
   error: "M12 8v5M12 16h.01M10.3 3.9L2.4 17.5A2 2 0 0 0 4.1 20.5h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z",
   lock: "M7 11V7a5 5 0 0 1 10 0v4M5 11h14v10H5z",
   swap: "M7 7h13l-4-4M17 17H4l4 4",
+  power: "M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5",
 };
 const card = {
   show({ icon = "spin", title = "", text = "", actions = [], login = false }) {
@@ -200,6 +227,7 @@ const card = {
     // Nothing of the session's over the card: the toolbar up, the details closed.
     $("panel").hidden = true;
     $("details").classList.remove("on");
+    power.close();
     bar.el.classList.add("collapsed");
     $("card-icon").className = icon === "spin" ? "spinner" : "";
     $("card-icon-path").setAttribute("d", icon === "spin" ? "" : ICONS[icon] || "");
@@ -207,10 +235,10 @@ const card = {
     $("card-text").textContent = text;
     $("login").hidden = !login;
     const box = $("card-actions");
-    box.replaceChildren(...actions.map(([label, run, primary = true]) => {
+    box.replaceChildren(...actions.map(([label, run, primary = true, danger = false]) => {
       const b = document.createElement("button");
       b.type = "button";
-      b.className = primary ? "primary" : "secondary";
+      b.className = (primary ? "primary" : "secondary") + (danger ? " danger" : "");
       b.textContent = label;
       b.addEventListener("click", run);
       return b;
@@ -249,7 +277,7 @@ const bar = {
   },
   hide() {
     clearTimeout(this.timer);
-    if (!$("panel").hidden || this.el.matches(":hover")) return;
+    if (!$("panel").hidden || !$("power-menu").hidden || this.el.matches(":hover")) return;
     this.el.classList.add("collapsed");
   },
 };
@@ -266,6 +294,7 @@ for (const b of document.querySelectorAll("#bar button, #panel button")) {
 // Tooltips.
 const tip = (id, text) => { $(id).title = text; $(id).setAttribute("aria-label", text); };
 tip("cad", T.cad);
+tip("power", T.power.menu);
 tip("details", T.details);
 tip("leave", T.leave);
 tip("fullscreen", T.fullScreen);
@@ -299,6 +328,17 @@ const pb = {
     out.push(Number(v));
   },
   message(build) { const out = []; build(out); return out; },
+  // The numbers of a packed repeated field.
+  varints(bytes) {
+    const out = [];
+    let i = 0;
+    while (i < bytes.length) {
+      let n = 0, shift = 1, b;
+      do { b = bytes[i++]; n += (b & 0x7f) * shift; shift *= 128; } while (b & 0x80);
+      out.push(n);
+    }
+    return out;
+  },
   // The fields of a message: field number -> list of values (numbers, or byte arrays).
   parse(bytes) {
     const fields = new Map();
@@ -320,8 +360,10 @@ const pb = {
 };
 const str = (fields, n) => pb.text.decode(fields.get(n)?.[0] || new Uint8Array());
 const uint = (fields, n) => fields.get(n)?.[0] || 0;
+// A repeated number field: packed (one byte array), or a value each.
+const uints = (fields, n) => (fields.get(n) || []).flatMap((v) => typeof v === "number" ? [v] : pb.varints(v));
 
-// ClientMessage: hello = 1, answer = 2, ice = 3, leave = 4.
+// ClientMessage: hello = 1, answer = 2, ice = 3, leave = 4, power = 5 (Power: action = 1).
 // Hello: codecs = 1, shadow = 2, user = 3, password = 4. With ?shadow in the address, the page
 // only watches.
 const shadow = new URLSearchParams(location.search).has("shadow");
@@ -336,6 +378,8 @@ const ice = (candidate, mline) => pb.message((o) => pb.bytes(o, 3, pb.message((c
 // The user leaves on purpose: the server tells the guest at once, rather than wait for a client
 // that lost its connection to come back.
 const leaving = () => pb.message((o) => pb.bytes(o, 4, []));
+// A power action of the VM, one the offer lists.
+const powerAction = (action) => pb.message((o) => pb.bytes(o, 5, pb.message((p) => pb.uint(p, 1, action))));
 
 // The VM's signalling, next to its page (/vm/<uuid>/signal), and the peer connection, both new
 // for each connection: first with no account, then, if the server asks for one, with what the
@@ -548,16 +592,19 @@ window.addEventListener("pagehide", () => {
   session.teardown();
 });
 
-// ServerMessage: offer = 1, ice = 2, error = 3, ended = 4; SessionDescription: sdp = 1,
-// vm_name = 2, ice_servers = 3, turn_servers = 4 (TurnServer: urls = 1, username = 2,
-// credential = 3), relay_only = 5; Ended: reason = 1 (1 another client took the session over, 2
-// the server stops). The server ends a session by closing the WebSocket cleanly.
+// ServerMessage: offer = 1, ice = 2, error = 3, ended = 4, power_done = 5; SessionDescription:
+// sdp = 1, vm_name = 2, ice_servers = 3, turn_servers = 4 (TurnServer: urls = 1, username = 2,
+// credential = 3), relay_only = 5, power_actions = 6; Ended: reason = 1 (1 another client took
+// the session over, 2 the server stops); PowerDone: action = 1, error = 2. The server ends a
+// session by closing the WebSocket cleanly.
 const onMessage = async (event) => {
   const message = pb.parse(new Uint8Array(event.data));
   const peer = pc;
   if (message.has(1)) {
     const offer = pb.parse(message.get(1)[0]);
     setName(str(offer, 2));
+    // power_actions = 6: what the user may ask of the VM; none for a user without the right.
+    power.offered(uints(offer, 6));
     // ice_servers = 3: the STUN server the server asks, for the browser to find its own
     // public address behind a NAT; turn_servers = 4: the relays it may send through when it
     // cannot reach the server directly (only TCP or TLS out). The candidates it finds go to the
@@ -601,6 +648,9 @@ const onMessage = async (event) => {
     } else {
       session.end({ icon: "error", title: T.errorTitle, text: error });
     }
+  } else if (message.has(5)) {
+    const done = pb.parse(message.get(5)[0]);
+    power.done(uint(done, 1), str(done, 2));
   } else if (message.has(4)) {
     const reason = uint(pb.parse(message.get(4)[0]), 1);
     if (reason === 1) {
@@ -1833,10 +1883,63 @@ $("cad").addEventListener("click", () => {
   toast.show(T.cadSent, 1800);
 });
 for (const id of ["cad"]) if (shadow) $(id).hidden = true;
+
+// The VM's power actions the server offers the user (PowerAction: 1 restart, 2 shut down,
+// 3 reset, 4 power off): a menu under the toolbar, each confirmed first. None offered, no
+// button: a shadow client, a user without the right, or a VM the server cannot ask.
+const POWER = [[1, "reboot", false], [2, "shutdown", false], [3, "reset", true], [4, "powerOff", true]];
+const power = {
+  actions: [],
+  offered(actions) {
+    this.actions = POWER.filter(([n]) => actions.includes(n));
+    $("power").hidden = !this.actions.length;
+    this.close();
+  },
+  open() {
+    panel.toggle(false);
+    $("power-menu").replaceChildren(...this.actions.map(([n, key, danger]) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.setAttribute("role", "menuitem");
+      if (danger) b.className = "danger";
+      b.textContent = T.power[key].label;
+      b.addEventListener("click", () => this.confirm(n, key, danger));
+      return b;
+    }));
+    $("power-menu").hidden = false;
+    $("power").classList.add("on");
+    bar.show();
+  },
+  close() {
+    $("power-menu").hidden = true;
+    $("power").classList.remove("on");
+  },
+  // Asked once confirmed; the card over the screen keeps the keys from the guest meanwhile.
+  confirm(n, key, danger) {
+    const words = T.power[key];
+    card.show({ icon: "power", title: words.title, text: words.text, actions: [
+      [words.label, () => { card.hide(); send(powerAction(n)); }, true, danger],
+      [T.cancel, () => card.hide(), false],
+    ] });
+  },
+  done(n, error) {
+    const key = POWER.find(([m]) => m === n)?.[1];
+    if (error) toast.show(T.power.failed(error), 6000);
+    else if (key) toast.show(T.power[key].done);
+  },
+};
+$("power").addEventListener("click", () => {
+  if ($("power-menu").hidden) power.open(); else power.close();
+});
+// A click elsewhere closes the menu.
+document.addEventListener("pointerdown", (e) => {
+  if (!$("power-menu").hidden && !e.target.closest("#power-menu, #power")) power.close();
+});
 $("watching").hidden = !shadow;
 
 const panel = {
   toggle(open = $("panel").hidden) {
+    if (open) power.close();
     $("panel").hidden = !open;
     $("details").classList.toggle("on", open);
     if (open) { bar.show(); quality.sample().catch(() => {}); } else bar.hide();
