@@ -1904,6 +1904,8 @@ const power = {
     $("leave").classList.remove("on");
   },
   confirm() {
+    // A key held now would stay pressed in the guest: the card keeps the key's release from it.
+    input.releaseAll();
     card.show({ icon: "power", title: T.resetTitle, text: T.resetText, actions: [
       [T.reset, () => { card.hide(); send(powerAction(RESET)); }, true, true],
       [T.cancel, () => card.hide(), false],

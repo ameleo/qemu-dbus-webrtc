@@ -14,6 +14,9 @@ use anyhow::{Context, Result, bail};
 use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags, sendmsg};
 use serde_json::{Value, json};
 
+/// How long QEMU has to answer, or to take what is written, on its QMP socket.
+const IO_TIME: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Name under which the display socket is handed to QEMU, then consumed by `add_client`.
 const FD_NAME: &str = "qemu-dbus-webrtc";
 
@@ -27,6 +30,9 @@ impl Qmp {
     pub fn connect(path: &Path) -> Result<Self> {
         let stream = UnixStream::connect(path)
             .with_context(|| format!("connecting to QMP at {}", path.display()))?;
+        // A QEMU that never answers fails the exchange rather than hold its thread for ever.
+        stream.set_read_timeout(Some(IO_TIME))?;
+        stream.set_write_timeout(Some(IO_TIME))?;
         let reader = BufReader::new(stream.try_clone()?);
         let mut qmp = Self { stream, reader };
         let greeting = qmp.read_message()?;

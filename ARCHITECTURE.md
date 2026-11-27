@@ -161,8 +161,8 @@ settings may have it ignore, or the QEMU guest agent). The server asks the VM's 
 when libvirt-dbus knows the domain; otherwise QEMU's QMP socket, when the server attaches through
 it (`system_reset`). A VM on a D-Bus bus that libvirt does not manage cannot be reset. The offer
 lists the actions the user may ask (`power_actions`); the client asks one (`Power`), which the
-server takes only if listed, and answers when the manager took it or failed (`PowerDone`, with the
-error's cause alone).
+server takes only if listed, and answers when the manager took it or failed (`PowerDone`; why it
+failed only in the server's log, as it may name the host's paths).
 
 The guest resolution follows the user's window: once the size has been stable for 300 ms, the
 server requests it from the guest (`SetUIInfo`, rounded to even values between 200 and 8192

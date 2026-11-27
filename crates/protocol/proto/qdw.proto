@@ -65,7 +65,8 @@ message ServerMessage {
   }
 }
 
-// The answer to a Power: the VM's manager took the action (an empty error), or why not.
+// The answer to a Power: the VM's manager took the action (an empty error), or not; the server
+// does not say why, which may name the host's paths, its log does.
 message PowerDone {
   PowerAction action = 1;
   string error = 2;

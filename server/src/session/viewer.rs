@@ -583,10 +583,11 @@ async fn run(
                         info!(action = action.as_str_name(), "power action taken");
                         String::new()
                     }
-                    // The client is told the cause alone: the rest may name the host's paths.
+                    // The client is not told why: the errors may name the host's paths. The
+                    // server's log says.
                     Err(e) => {
                         warn!(action = action.as_str_name(), error = %format!("{e:#}"), "power action failed");
-                        e.root_cause().to_string()
+                        "the VM's manager did not do it".to_owned()
                     }
                 };
                 send(socket, server_message::Message::PowerDone(PowerDone { action: action.into(), error })).await?;
