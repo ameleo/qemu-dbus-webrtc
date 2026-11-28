@@ -39,7 +39,8 @@ What each release brings. The packages are on the
   that follows.
 - A client's own WebSocket carries nothing once its session is set up, and a proxy or a router
   on the way could drop it as idle (nginx's stream proxy after ten minutes), which ended the
-  session: the server now pings it every 30 seconds, and lets go of a client silent for 90.
+  session: the server now pings it every 30 seconds, and lets go of a client that has not
+  answered a ping for 90.
 
 ## 0.3.0 — 2026-11-18
 

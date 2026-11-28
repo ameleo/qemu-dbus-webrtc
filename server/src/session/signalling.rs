@@ -293,7 +293,7 @@ async fn granted(vms: &Vms, grant: &crate::host::access::Grant, uuid: &str) -> b
 /// idle for a while (nginx's stream proxy after ten minutes, by default). The broker's link has
 /// its own keepalive.
 const PING_EVERY: Duration = Duration::from_secs(30);
-/// A client heard of for this long, not even a pong, is gone.
+/// A client that has not answered a ping for this long, not even with a pong, is gone.
 const SILENCE: Duration = Duration::from_secs(90);
 
 /// A client's signalling: its WebSocket, or a connection the broker relays (`host/broker.rs`),
@@ -307,7 +307,9 @@ pub enum Socket {
 pub struct Direct {
     socket: WebSocket,
     ping: tokio::time::Interval,
-    heard: tokio::time::Instant,
+    /// When the first ping the client has not answered went: the silence counts from there,
+    /// not from a time the server was not listening (setting up the session, starting the VM).
+    unanswered: Option<tokio::time::Instant>,
 }
 
 impl Socket {
@@ -318,7 +320,7 @@ impl Socket {
         Self::Ws(Direct {
             socket,
             ping,
-            heard: now,
+            unanswered: None,
         })
     }
 
@@ -338,7 +340,7 @@ impl Socket {
                 tokio::select! {
                     biased;
                     message = direct.socket.recv() => {
-                        direct.heard = tokio::time::Instant::now();
+                        direct.unanswered = None;
                         match message {
                             None | Some(Ok(WsMessage::Close(_))) => return Ok(None),
                             Some(Ok(WsMessage::Binary(bytes))) => return Ok(Some(bytes.into())),
@@ -347,9 +349,15 @@ impl Socket {
                         }
                     }
                     _ = direct.ping.tick() => {
-                        if direct.heard.elapsed() >= SILENCE {
-                            info!(seconds = direct.heard.elapsed().as_secs(), "the client's WebSocket went silent");
-                            return Ok(None);
+                        // Biased: whatever the client sent meanwhile, its pong included, was
+                        // read first.
+                        if let Some(since) = direct.unanswered {
+                            if since.elapsed() >= SILENCE {
+                                info!(seconds = since.elapsed().as_secs(), "the client's WebSocket went silent");
+                                return Ok(None);
+                            }
+                        } else {
+                            direct.unanswered = Some(tokio::time::Instant::now());
                         }
                         direct.socket.send(WsMessage::Ping(Default::default())).await?;
                     }
@@ -456,6 +464,39 @@ mod tests {
             }
         }
         assert!(received.try_recv().is_err(), "the client was let go");
+        client
+            .send(ClientMessage::Binary(vec![7].into()))
+            .await
+            .unwrap();
+        assert_eq!(received.recv().await.unwrap(), Some(vec![7]));
+    }
+
+    /// A session longer to set up than `SILENCE` keeps its client: the silence counts from the
+    /// first ping.
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_setup_keeps_the_client() {
+        let (got, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::get(move |upgrade: axum::extract::WebSocketUpgrade| {
+                let got = got.clone();
+                async move {
+                    upgrade.on_upgrade(move |socket| async move {
+                        let mut socket = Socket::direct(socket);
+                        tokio::time::sleep(SILENCE * 3).await;
+                        let _ = got.send(socket.receive_binary().await.ok().flatten());
+                    })
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let (mut client, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        match client.next().await {
+            Some(Ok(ClientMessage::Ping(_))) => {}
+            other => panic!("not a ping: {other:?}"),
+        }
         client
             .send(ClientMessage::Binary(vec![7].into()))
             .await
