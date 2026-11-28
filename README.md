@@ -107,8 +107,8 @@ With a guest agent implementing the
 Agents, both under the GPL version 3:
 [ameleo-display-agent-linux](https://github.com/ameleo/ameleo-display-agent-linux) for Linux
 guests, and [ameleo-display-agent-win](https://github.com/ameleo/ameleo-display-agent-win) for
-Windows guests, where drives, printers and file copy and paste need a companion service (see its
-README).
+Windows guests, where client drives also need Dokany, and client printers the agent's Print
+Support App (see its README).
 
 Clients: the web page served by the server, and a native client based on libwebrtc (in
 development). The web page speaks English or French, as the browser does; its tools are in a bar
