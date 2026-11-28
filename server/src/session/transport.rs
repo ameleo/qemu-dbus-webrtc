@@ -101,6 +101,9 @@ pub struct Network {
     /// The UDP ports the sessions' sockets take, inclusive, those the NAT forwards; any when
     /// `None`.
     pub udp_ports: Option<(u16, u16)>,
+    /// One UDP port for every session instead (`crate::network::mux`): the only one to
+    /// forward.
+    pub udp_port: Option<u16>,
     /// A STUN server, "host:port": each session asks it the address a NAT maps its sockets to,
     /// and gives it to the clients for theirs. Without one, the server and its clients reveal
     /// their addresses to no third party, and a client outside the host's network reaches it
@@ -170,6 +173,9 @@ pub struct Start {
     pub bitrates: Bitrates,
     /// The UDP ports the sockets take (see `Network::udp_ports`).
     pub udp_ports: Option<(u16, u16)>,
+    /// The sockets of the one port for every session, when the host has one
+    /// (`Network::udp_port`): `udp_ports` then does not count.
+    pub mux: Option<Arc<crate::network::mux::Mux>>,
     /// The host's public addresses, `Network::public_address` resolved: announced on the
     /// ports of the sockets that reach them.
     pub public: Vec<std::net::IpAddr>,

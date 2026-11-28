@@ -27,9 +27,16 @@ libvirt, plain QEMU) starts and stops VMs.
   stops, which it detects by polling every second. A VM without clients costs nothing. On
   shutdown, the server ends all sessions, tells the guests their users left, and detaches from
   all VMs before exiting.
-- **Connectivity (ICE):** each session binds its own UDP sockets (in `udp_ports` when set) and
-  offers their host candidates, `public_address` on them when set, and the address a STUN
-  server sees each socket at (server-reflexive, RFC 8489; Google's server by default). The
+- **Connectivity (ICE):** each session binds its own UDP sockets (in `udp_ports` when set), or
+  shares the host's sockets on one port (`udp_port`), and offers their host candidates,
+  `public_address` on them when set, and the address a STUN server sees each socket at
+  (server-reflexive, RFC 8489; Google's server by default). On the shared port, one task reads
+  each socket and hands each datagram to its session (`network/mux.rs`): a connectivity check
+  by its receiver's username fragment, which each session takes unique; the response to a
+  session's check by its transaction; anything else (DTLS, RTP) by the client address, which a
+  session claims once it answers a check from it (the check's integrity holds) or sends it
+  media, never on its checks alone, so that a client's answer naming another client's address
+  cannot take that client's datagrams. The
   offer also gives the client the STUN server, for its own reflexive address, and the TURN
   relays of `[[turn]]` (RFC 8656), with fixed credentials or credentials computed for the
   session from a secret shared with the relay (the TURN REST API draft, as coturn's

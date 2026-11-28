@@ -37,6 +37,7 @@ use tracing::{debug, info, warn};
 use qdw_protocol::MAX_CAMERA_STREAMS;
 use qdw_video::encode::{Codec, HevcFmtp};
 
+use crate::network::mux::{Datagram, Registration};
 use crate::network::stun;
 use crate::session::audio::Mic;
 use crate::session::transport::{
@@ -96,13 +97,6 @@ enum Command {
     CameraKeyframe(String),
 }
 
-/// A datagram for the session: where it came from, to which of its sockets.
-struct Datagram {
-    local: SocketAddr,
-    source: SocketAddr,
-    data: Vec<u8>,
-}
-
 pub struct Peer {
     commands: mpsc::UnboundedSender<Command>,
     task: tokio::task::JoinHandle<()>,
@@ -135,6 +129,7 @@ impl Peer {
             mic,
             bitrates,
             udp_ports,
+            mux,
             public,
             stun,
         } = start;
@@ -211,16 +206,38 @@ impl Peer {
                 ..FormatParams::default()
             },
         );
+        // With one port for every session, the datagrams come through the port's reader, by
+        // the session's ICE username fragment: registered before the offer gives it.
+        let (incoming_tx, incoming) = mpsc::channel(INCOMING);
+        let registration = mux.as_ref().map(|mux| mux.register(incoming_tx.clone()));
+        if let Some(registration) = &registration {
+            config = config.set_local_ice_credentials(registration.creds.clone());
+        }
         let mut rtc = config.build(Instant::now());
         // The capacity the estimation probes for: up to the most the video may take. No
         // minimum: a still desktop sends little, and padding it up would only load the link.
         rtc.bwe()
             .set_bitrate(Bitrate::ZERO, Bitrate::kbps(u64::from(bitrates.max)));
 
-        // A host candidate on each address of the host, in a socket of its own: the answer's
-        // checks say which one reaches the client.
+        // A host candidate on each address of the host, in a socket of its own (or the
+        // address's socket on the shared port): the answer's checks say which one reaches the
+        // client.
         let mut sockets = HashMap::new();
-        for address in host_addresses()? {
+        let mut readers = Vec::new();
+        if let Some(mux) = &mux {
+            for (local, socket) in mux.sockets(&host_addresses()?) {
+                let candidate =
+                    Candidate::host(local, "udp").map_err(|e| anyhow!("candidate {local}: {e}"))?;
+                rtc.add_local_candidate(candidate);
+                if let Some(server) = stun.filter(|s| s.is_ipv4() == local.is_ipv4()) {
+                    let reflexive =
+                        tokio::task::block_in_place(|| mux.reflexive(local, &socket, server));
+                    add_reflexive(&mut rtc, reflexive, local, server)?;
+                }
+                sockets.insert(local, socket);
+            }
+        }
+        for address in host_addresses()?.into_iter().filter(|_| mux.is_none()) {
             let socket = match bind(address, udp_ports) {
                 Ok(socket) => socket,
                 Err(e) => {
@@ -237,20 +254,18 @@ impl Peer {
             // most, off the async threads.
             if let Some(server) = stun.filter(|s| s.is_ipv4() == local.is_ipv4()) {
                 let reflexive = tokio::task::block_in_place(|| stun::reflexive(&socket, server));
-                match reflexive {
-                    Some(mapped) if mapped != local => {
-                        let candidate = Candidate::server_reflexive(mapped, local, "udp")
-                            .map_err(|e| anyhow!("candidate {mapped}: {e}"))?;
-                        debug!(%mapped, %local, "reflexive candidate");
-                        rtc.add_local_candidate(candidate);
-                    }
-                    Some(_) => {}
-                    None => debug!(%local, %server, "no answer from the STUN server"),
-                }
+                add_reflexive(&mut rtc, reflexive, local, server)?;
             }
             socket.set_nonblocking(true)?;
-            sockets.insert(local, Arc::new(UdpSocket::from_std(socket)?));
+            let socket = Arc::new(UdpSocket::from_std(socket)?);
+            readers.push(AbortOnDrop(tokio::spawn(read(
+                local,
+                socket.clone(),
+                incoming_tx.clone(),
+            ))));
+            sockets.insert(local, socket);
         }
+        drop(incoming_tx);
         if sockets.is_empty() {
             bail!("no address to receive the client on");
         }
@@ -315,17 +330,6 @@ impl Peer {
         let _ = signals.send(Signal::Offer(offer));
 
         let (commands_tx, commands) = mpsc::unbounded_channel();
-        let (incoming_tx, incoming) = mpsc::channel(INCOMING);
-        let readers = sockets
-            .iter()
-            .map(|(&local, socket)| {
-                AbortOnDrop(tokio::spawn(read(
-                    local,
-                    socket.clone(),
-                    incoming_tx.clone(),
-                )))
-            })
-            .collect();
         let paused = Arc::new(AtomicBool::new(false));
         let mic = mic.map(|mic| {
             let speaker = mic.viewer();
@@ -335,6 +339,7 @@ impl Peer {
             rtc,
             sockets,
             _readers: readers,
+            registration,
             pending: Some(pending),
             screen_mids,
             audio_mid,
@@ -470,6 +475,27 @@ fn audio_viewer(id: u64, commands: mpsc::UnboundedSender<Command>) -> Viewer<Opu
     })
 }
 
+/// Add the server-reflexive candidate `reflexive` of the socket `local`, as `server` saw it,
+/// when it differs from the socket's own address.
+fn add_reflexive(
+    rtc: &mut Rtc,
+    reflexive: Option<SocketAddr>,
+    local: SocketAddr,
+    server: SocketAddr,
+) -> Result<()> {
+    match reflexive {
+        Some(mapped) if mapped != local => {
+            let candidate = Candidate::server_reflexive(mapped, local, "udp")
+                .map_err(|e| anyhow!("candidate {mapped}: {e}"))?;
+            debug!(%mapped, %local, "reflexive candidate");
+            rtc.add_local_candidate(candidate);
+        }
+        Some(_) => {}
+        None => debug!(%local, %server, "no answer from the STUN server"),
+    }
+    Ok(())
+}
+
 /// The addresses of the host a client may reach: neither loopback nor IPv6 link-local (which
 /// would need its interface in the candidate).
 /// A UDP socket on `address`: on a port of `ports` (inclusive) when given, the first free one
@@ -508,7 +534,7 @@ fn route_source(ip: IpAddr) -> Option<IpAddr> {
     socket.local_addr().ok().map(|local| local.ip())
 }
 
-fn host_addresses() -> Result<Vec<IpAddr>> {
+pub(crate) fn host_addresses() -> Result<Vec<IpAddr>> {
     Ok(if_addrs::get_if_addrs()
         .context("listing the host's addresses")?
         .into_iter()
@@ -583,6 +609,8 @@ struct State {
     rtc: Rtc,
     sockets: HashMap<SocketAddr, Arc<UdpSocket>>,
     _readers: Vec<AbortOnDrop>,
+    /// The session's routes on the shared port, if it is on it.
+    registration: Option<Registration>,
     /// The offer, until its answer.
     pending: Option<SdpPendingOffer>,
     screen_mids: Vec<Mid>,
@@ -674,6 +702,13 @@ impl State {
             match self.rtc.poll_output()? {
                 Output::Timeout(at) => return Ok(at),
                 Output::Transmit(transmit) => {
+                    if let Some(registration) = &mut self.registration {
+                        registration.sent(
+                            transmit.source,
+                            transmit.destination,
+                            &transmit.contents,
+                        );
+                    }
                     let sent = self
                         .sockets
                         .get(&transmit.source)
@@ -1049,6 +1084,7 @@ mod tests {
                         max: 4000,
                     },
                     udp_ports: None,
+                    mux: None,
                     public: Vec::new(),
                     stun: None,
                 },
@@ -1099,6 +1135,7 @@ mod tests {
                     max: 4000,
                 },
                 udp_ports: None,
+                mux: None,
                 public: Vec::new(),
                 stun: None,
             },
@@ -1249,6 +1286,127 @@ mod tests {
         feeder.join().unwrap();
     }
 
+    /// A str0m client of `peer`, on this host, from `offer`: the VP9 frames it receives in
+    /// ten seconds, five at most.
+    async fn video_received(offer: &str, peer: &Peer) -> usize {
+        let address = host_addresses().unwrap()[0];
+        let socket = UdpSocket::bind((address, 0)).await.unwrap();
+        let local = socket.local_addr().unwrap();
+        let mut client = Rtc::builder()
+            .set_crypto_provider(Arc::new(str0m_rust_crypto::default_provider()))
+            .build(Instant::now());
+        let candidate = Candidate::host(local, "udp").unwrap();
+        client.add_local_candidate(candidate.clone());
+        let answer = client
+            .sdp_api()
+            .accept_offer(str0m::change::SdpOffer::from_sdp_string(offer).unwrap())
+            .unwrap();
+        peer.apply_answer(&answer.to_sdp_string()).unwrap();
+        peer.add_ice_candidate(0, &candidate.to_sdp_string());
+        let mut buffer = vec![0; 2048];
+        let mut video = 0;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && video < 5 {
+            let timeout = loop {
+                match client.poll_output().unwrap() {
+                    Output::Timeout(t) => break t,
+                    Output::Transmit(t) => {
+                        let _ = socket.send_to(&t.contents, t.destination).await;
+                    }
+                    Output::Event(Event::MediaData(data))
+                        if data.params.spec().codec == RtpCodec::Vp9 =>
+                    {
+                        video += 1
+                    }
+                    Output::Event(_) => {}
+                }
+            };
+            let wait = timeout
+                .saturating_duration_since(Instant::now())
+                .max(Duration::from_millis(1));
+            let input = match tokio::time::timeout(wait, socket.recv_from(&mut buffer)).await {
+                Ok(Ok((length, source))) => Input::Receive(
+                    Instant::now(),
+                    Receive {
+                        proto: Protocol::Udp,
+                        source,
+                        destination: local,
+                        contents: buffer[..length].try_into().unwrap(),
+                    },
+                ),
+                _ => Input::Timeout(Instant::now()),
+            };
+            client.handle_input(input).unwrap();
+        }
+        video
+    }
+
+    /// Two sessions on one UDP port (`[listen] udp_port`): their offers give the same port,
+    /// and each client receives its video through it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_sessions_on_one_port() {
+        let mux = Arc::new(crate::network::mux::Mux::new(0));
+        let viewers = VideoViewers::default();
+        let start = || Start {
+            codec: Codec::Vp9,
+            full_chroma: false,
+            ten_bits: false,
+            viewers: vec![viewers.clone()],
+            audio_viewers: SoundViewers::default(),
+            mic: None,
+            bitrates: Bitrates {
+                min: 1000,
+                start: 2000,
+                max: 4000,
+            },
+            udp_ports: None,
+            mux: Some(mux.clone()),
+            public: Vec::new(),
+            stun: None,
+        };
+        let (a_tx, mut a_signals) = mpsc::unbounded_channel();
+        let (b_tx, mut b_signals) = mpsc::unbounded_channel();
+        let a = Peer::start(start(), a_tx, |_| {}).unwrap();
+        let b = Peer::start(start(), b_tx, |_| {}).unwrap();
+        let (Some(Signal::Offer(a_offer)), Some(Signal::Offer(b_offer))) =
+            (a_signals.recv().await, b_signals.recv().await)
+        else {
+            panic!("no offers");
+        };
+        let ports = |offer: &str| -> Vec<String> {
+            offer
+                .lines()
+                .filter(|l| l.starts_with("a=candidate:"))
+                .map(|l| l.split(' ').nth(5).unwrap().to_owned())
+                .collect()
+        };
+        assert!(!ports(&a_offer).is_empty());
+        assert_eq!(ports(&a_offer), ports(&b_offer));
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let feeder = std::thread::spawn({
+            let (viewers, stop) = (viewers.clone(), stop.clone());
+            move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let frame = EncodedFrame {
+                        data: vec![0x82; 3000].into(),
+                        keyframe: true,
+                    };
+                    crate::session::transport::fan_out(&viewers, &frame);
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        });
+        let (a_video, b_video) =
+            tokio::join!(video_received(&a_offer, &a), video_received(&b_offer, &b));
+        stop.store(true, Ordering::Relaxed);
+        feeder.join().unwrap();
+        assert!(
+            a_video >= 5 && b_video >= 5,
+            "{a_video} and {b_video} frames"
+        );
+    }
+
     /// With a range of UDP ports and a public address, the offer's candidates are on ports of
     /// the range, and the public address comes as a server-reflexive candidate on the port of
     /// the socket the host reaches it from (203.0.113.7: an address of TEST-NET-3, RFC 5737,
@@ -1271,6 +1429,7 @@ mod tests {
                     max: 4000,
                 },
                 udp_ports: Some((47100, 47199)),
+                mux: None,
                 public: vec![public],
                 stun: None,
             },

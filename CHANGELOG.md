@@ -21,6 +21,11 @@ What each release brings. The packages are on the
   ameleo-display-protocol 0.3); it may ask for control too, asked again. New messages: `Waiting`,
   `ControlRequest`, `Control`, `Ended CONSENT_STOPPED`.
 
+- **One UDP port for every session** (`[listen] udp_port`, 3478 advised): a router or a
+  firewall forwards that port alone to the host, whatever the number of sessions, rather than a
+  range of one port per session (`udp_ports`, still there). The server sorts each datagram to
+  its session by ICE username fragment, STUN transaction or client address.
+
 ### Changed
 
 - A VM whose last client ended its session without a `Leave` (a lost connection, or a client
