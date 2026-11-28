@@ -266,9 +266,21 @@ LoadCredential=cert.pem:/etc/qemu-dbus-webrtc/tls/cert.pem
 LoadCredentialEncrypted=key.pem:/etc/qemu-dbus-webrtc/tls/key.pem.cred
 ```
 
-An ACME client renewing the certificate restarts the service afterwards, for instance with
-certbot's `--deploy-hook "systemctl restart qemu-dbus-webrtc"`; the clients connected then
-reconnect by themselves, to a guest session locked as on any departure.
+An ACME client renews its own files: copy them into place, then restart the service. With
+certbot, a deploy hook, `/etc/letsencrypt/renewal-hooks/deploy/qemu-dbus-webrtc` (executable):
+
+```
+#!/bin/sh
+set -e
+install -m 0600 "$RENEWED_LINEAGE/fullchain.pem" /etc/qemu-dbus-webrtc/tls/cert.pem
+install -m 0600 "$RENEWED_LINEAGE/privkey.pem" /etc/qemu-dbus-webrtc/tls/key.pem
+systemctl restart qemu-dbus-webrtc
+```
+
+With the key sealed to the TPM, the hook seals the new key instead of copying it:
+`systemd-creds encrypt --with-key=tpm2 --name=key.pem "$RENEWED_LINEAGE/privkey.pem"
+/etc/qemu-dbus-webrtc/tls/key.pem.cred`. The clients connected reconnect by themselves after
+the restart, to a guest session locked as on any departure.
 
 ## Goals
 
