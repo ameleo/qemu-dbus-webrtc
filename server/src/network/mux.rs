@@ -56,8 +56,17 @@ pub struct Mux {
     routes: Arc<Mutex<Routes>>,
     /// The server's own Binding requests, waiting for their responses.
     asked: Asked,
-    /// The address a NAT maps each socket to, and when it was asked.
-    reflexive: Mutex<HashMap<SocketAddr, (Instant, Option<SocketAddr>)>>,
+    /// The address a NAT maps each socket to: one lookup at a time per socket.
+    reflexive: Mutex<HashMap<SocketAddr, Arc<Mutex<Reflexive>>>>,
+}
+
+/// What the STUN server said of a socket.
+#[derive(Default)]
+struct Reflexive {
+    /// When it was last asked.
+    asked: Option<Instant>,
+    /// The last address it gave: kept when a later lookup gets no answer.
+    mapped: Option<SocketAddr>,
 }
 
 struct Bound {
@@ -168,18 +177,26 @@ impl Mux {
     }
 
     /// The address `server` sees the socket `local` at, from a Binding request on it: as
-    /// asked less than `REFLEXIVE_AGE` ago, or asked now. Blocks for a few hundred
-    /// milliseconds at most: call it off the async threads.
+    /// asked less than `REFLEXIVE_AGE` ago, or asked now. Sessions starting together share
+    /// one lookup per socket: the others wait for it, then take its answer. A lookup without
+    /// an answer keeps the address the last one gave. Blocks for a few hundred milliseconds at
+    /// most: call it off the async threads.
     pub fn reflexive(
         &self,
         local: SocketAddr,
         socket: &UdpSocket,
         server: SocketAddr,
     ) -> Option<SocketAddr> {
-        if let Some(&(at, mapped)) = self.reflexive.lock().unwrap().get(&local)
-            && at.elapsed() < REFLEXIVE_AGE
-        {
-            return mapped;
+        let entry = self
+            .reflexive
+            .lock()
+            .unwrap()
+            .entry(local)
+            .or_default()
+            .clone();
+        let mut entry = entry.lock().unwrap();
+        if entry.asked.is_some_and(|at| at.elapsed() < REFLEXIVE_AGE) {
+            return entry.mapped;
         }
         let rng = ring::rand::SystemRandom::new();
         let mut mapped = None;
@@ -200,11 +217,11 @@ impl Mux {
                 break;
             }
         }
-        self.reflexive
-            .lock()
-            .unwrap()
-            .insert(local, (Instant::now(), mapped));
-        mapped
+        entry.asked = Some(Instant::now());
+        if mapped.is_some() {
+            entry.mapped = mapped;
+        }
+        entry.mapped
     }
 }
 
@@ -361,6 +378,67 @@ mod tests {
             .ok()
             .flatten()
             .map(|d| d.data)
+    }
+
+    /// A STUN server on this host that answers the first `answers` requests, with the
+    /// source as XOR-MAPPED-ADDRESS, and counts them all.
+    fn stun_server(answers: usize) -> (SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
+        let server = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let address = server.local_addr().unwrap();
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = count.clone();
+        std::thread::spawn(move || {
+            let mut buffer = [0u8; 1500];
+            while let Ok((_, from)) = server.recv_from(&mut buffer) {
+                let n = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n >= answers {
+                    continue;
+                }
+                let IpAddr::V4(ip) = from.ip() else { continue };
+                let cookie = 0x2112_A442u32.to_be_bytes();
+                let mut response = vec![0x01, 0x01, 0x00, 0x0c];
+                response.extend_from_slice(&cookie);
+                response.extend_from_slice(&buffer[8..20]);
+                response.extend_from_slice(&[0x00, 0x20, 0x00, 0x08, 0x00, 0x01]);
+                response.extend_from_slice(&(from.port() ^ 0x2112).to_be_bytes());
+                response.extend(ip.octets().iter().zip(cookie).map(|(b, c)| b ^ c));
+                let _ = server.send_to(&response, from);
+            }
+        });
+        (address, count)
+    }
+
+    /// Sessions starting together share one lookup per socket; a lookup without an answer
+    /// keeps the address the last one gave.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn one_reflexive_lookup_per_socket() {
+        let mux = Arc::new(Mux::new(0));
+        let [(local, socket)] = &mux.sockets(&LOOPBACK)[..] else {
+            panic!("no socket");
+        };
+        let (local, socket) = (*local, socket.clone());
+        let (server, count) = stun_server(1);
+        let lookups: Vec<_> = (0..4)
+            .map(|_| {
+                let (mux, socket) = (mux.clone(), socket.clone());
+                tokio::task::spawn_blocking(move || mux.reflexive(local, &socket, server))
+            })
+            .collect();
+        for lookup in lookups {
+            assert_eq!(lookup.await.unwrap(), Some(local));
+        }
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // Asked again once stale: the server no longer answers, the address stays.
+        mux.reflexive.lock().unwrap()[&local].lock().unwrap().asked = None;
+        let again = tokio::task::spawn_blocking({
+            let mux = mux.clone();
+            move || mux.reflexive(local, &socket, server)
+        });
+        assert_eq!(again.await.unwrap(), Some(local));
+        assert_eq!(
+            count.load(std::sync::atomic::Ordering::SeqCst),
+            1 + stun::TRIES as usize
+        );
     }
 
     /// Two sessions on one socket: each gets its checks, the responses to its own checks and
