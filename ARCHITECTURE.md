@@ -258,13 +258,14 @@ applications often close and reopen the microphone within moments. The audio tra
 negotiated throughout. In the browser page, a button grants microphone access (browsers require
 a click and a permission); the microphone then only opens while the guest records.
 
-## Devices: RDP channel formats over data channels
+## Devices over data channels
 
 WebRTC carries video and audio natively, including the browser's camera and microphone
-(`getUserMedia`). For everything else, the project reuses the Remote Desktop Protocol's device
-redirection formats, each on its own reliable, ordered data channel. They are specified, proven
-in production, and implemented on the client side by the IronRDP crates (MIT/Apache-2.0). Only
-channels without a patent listed in Microsoft's Open Specifications patent map are used.
+(`getUserMedia`). Everything else goes on reliable, ordered data channels, one per function.
+Most carry a project format modeled on the matching Remote Desktop Protocol channel, whose
+semantics are specified and proven in production; only RDP channels without a patent listed in
+Microsoft's Open Specifications patent map serve as models. Smart cards and USB devices are
+emulated by QEMU instead, with their own protocols.
 
 | Function | Format | Data channel | Browser | Native client |
 |---|---|---|---|---|
@@ -273,8 +274,8 @@ channels without a patent listed in Microsoft's Open Specifications patent map a
 | Printers | project format, modeled on MS-RDPEPC and MS-RDPEXPS | `printer` | no | full |
 | Cameras | project format, modeled on MS-RDPECAM; video on WebRTC tracks | `camera` | yes | full |
 | Monitor layout, resize | project format, modeled on MS-RDPEDISP | `control` | one monitor | several |
-| Smart cards | MS-RDPESC | `rdpdr` | no | planned |
-| USB | MS-RDPEUSB | `urbdrc` | no | planned |
+| Smart cards | VSCard, to QEMU's `usb-ccid` | — | no | planned |
+| USB | usbredir, to QEMU's `usb-redir` | — | no | not planned |
 | Keyboard, mouse | project format, modeled on RDP | `input` | yes | yes |
 | Cursor shape | project format | `pointer` | yes | yes |
 
@@ -318,10 +319,13 @@ as received, without transcoding. The client keeps the camera resolution from th
 (WebRTC would otherwise lower it while its bandwidth estimate ramps up, which the guest decoder,
 configured for the announced format, rejects).
 
-Of IronRDP, only the channel crates are used: `ironrdp-displaycontrol` (and later
-`ironrdp-rdpeusb`) with their base crates. They do no I/O: bytes received on a data channel go
-in, messages to send come out. The RDP server, connection and graphics crates are not needed:
-WebRTC provides the transport, security and media.
+Smart cards and USB devices will not go through the guest agent: QEMU emulates the device itself
+(a `usb-ccid` reader with a `ccid-card-passthru` card, or a `usb-redir` device), so the guest
+uses its own drivers, from the logon screen on. The server will relay the device protocol (VSCard,
+usbredir) between a data channel and a QEMU character device. A browser reaches neither (it has
+no access to PC/SC, and WebUSB blocks most device classes), so both need the native client.
+Generic USB redirection is not planned: the channels above cover what a desktop uses every day,
+and redirecting each USB transfer across the network suffers from its latency.
 
 In the guest, the optional guest agent (D-Bus over a QEMU character device, its contract defined
 in [ameleo-display-protocol](https://github.com/ameleo/ameleo-display-protocol)) provides what
