@@ -37,6 +37,9 @@ What each release brings. The packages are on the
 - A QEMU that stopped accepting on its QMP socket held the thread connecting to it (attaching to
   the VM, resetting it) for ever: the connection now waits at most ten seconds, as the exchange
   that follows.
+- A client's own WebSocket carries nothing once its session is set up, and a proxy or a router
+  on the way could drop it as idle (nginx's stream proxy after ten minutes), which ended the
+  session: the server now pings it every 30 seconds, and lets go of a client silent for 90.
 
 ## 0.3.0 — 2026-11-18
 

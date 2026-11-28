@@ -154,7 +154,7 @@ async fn upgrade(
             auth: &auth,
             checks: &checks,
         };
-        if let Err(e) = open(Socket::Ws(socket), &vms, admission, &id, stopping).await {
+        if let Err(e) = open(Socket::direct(socket), &vms, admission, &id, stopping).await {
             warn!(%peer, id, error = %format!("{e:#}"), "viewer session ended");
         }
     })

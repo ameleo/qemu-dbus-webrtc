@@ -288,31 +288,71 @@ async fn granted(vms: &Vms, grant: &crate::host::access::Grant, uuid: &str) -> b
     false
 }
 
+/// How often a client's WebSocket is pinged: once the session is set up, it carries nothing for
+/// long stretches, and a proxy, a NAT or a firewall on the way drops a TCP connection it has seen
+/// idle for a while (nginx's stream proxy after ten minutes, by default). The broker's link has
+/// its own keepalive.
+const PING_EVERY: Duration = Duration::from_secs(30);
+/// A client heard of for this long, not even a pong, is gone.
+const SILENCE: Duration = Duration::from_secs(90);
+
 /// A client's signalling: its WebSocket, or a connection the broker relays (`host/broker.rs`),
 /// which carries the same messages.
 pub enum Socket {
-    Ws(WebSocket),
+    Ws(Direct),
     Relayed(crate::host::broker::Relayed),
 }
 
+/// A client's own WebSocket, pinged every `PING_EVERY` while the server waits for its messages.
+pub struct Direct {
+    socket: WebSocket,
+    ping: tokio::time::Interval,
+    heard: tokio::time::Instant,
+}
+
 impl Socket {
+    pub fn direct(socket: WebSocket) -> Self {
+        let now = tokio::time::Instant::now();
+        let mut ping = tokio::time::interval_at(now + PING_EVERY, PING_EVERY);
+        ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        Self::Ws(Direct {
+            socket,
+            ping,
+            heard: now,
+        })
+    }
+
     async fn send_binary(&mut self, bytes: Vec<u8>) -> Result<()> {
         match self {
-            Self::Ws(socket) => socket.send(WsMessage::Binary(bytes.into())).await?,
+            Self::Ws(direct) => direct.socket.send(WsMessage::Binary(bytes.into())).await?,
             Self::Relayed(relayed) => relayed.send(bytes).await?,
         }
         Ok(())
     }
 
-    /// The next binary message; `None` when the client has gone.
+    /// The next binary message; `None` when the client has gone, or has been silent for
+    /// `SILENCE`. Cancel-safe: dropped while it pings, the ping goes with the next message.
     async fn receive_binary(&mut self) -> Result<Option<Vec<u8>>> {
         match self {
-            Self::Ws(socket) => loop {
-                match socket.recv().await {
-                    None | Some(Ok(WsMessage::Close(_))) => return Ok(None),
-                    Some(Ok(WsMessage::Binary(bytes))) => return Ok(Some(bytes.into())),
-                    Some(Ok(_)) => continue,
-                    Some(Err(e)) => return Err(e.into()),
+            Self::Ws(direct) => loop {
+                tokio::select! {
+                    biased;
+                    message = direct.socket.recv() => {
+                        direct.heard = tokio::time::Instant::now();
+                        match message {
+                            None | Some(Ok(WsMessage::Close(_))) => return Ok(None),
+                            Some(Ok(WsMessage::Binary(bytes))) => return Ok(Some(bytes.into())),
+                            Some(Ok(_)) => continue,
+                            Some(Err(e)) => return Err(e.into()),
+                        }
+                    }
+                    _ = direct.ping.tick() => {
+                        if direct.heard.elapsed() >= SILENCE {
+                            info!(seconds = direct.heard.elapsed().as_secs(), "the client's WebSocket went silent");
+                            return Ok(None);
+                        }
+                        direct.socket.send(WsMessage::Ping(Default::default())).await?;
+                    }
                 }
             },
             Self::Relayed(relayed) => relayed.receive().await,
@@ -321,12 +361,12 @@ impl Socket {
 
     async fn close(&mut self, code: u16) {
         match self {
-            Self::Ws(socket) => {
+            Self::Ws(direct) => {
                 let frame = axum::extract::ws::CloseFrame {
                     code,
                     reason: "".into(),
                 };
-                let _ = socket.send(WsMessage::Close(Some(frame))).await;
+                let _ = direct.socket.send(WsMessage::Close(Some(frame))).await;
             }
             Self::Relayed(relayed) => relayed.close(code).await,
         }
@@ -369,5 +409,71 @@ pub(crate) async fn receive(socket: &mut Socket) -> Result<Option<client_message
         if message.is_some() {
             return Ok(message);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message as ClientMessage;
+
+    /// A server whose one WebSocket waits for a message with `receive_binary`: what it got
+    /// comes back on the channel.
+    async fn serve() -> (
+        String,
+        tokio::sync::mpsc::UnboundedReceiver<Option<Vec<u8>>>,
+    ) {
+        let (got, received) = tokio::sync::mpsc::unbounded_channel();
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::get(move |upgrade: axum::extract::WebSocketUpgrade| {
+                let got = got.clone();
+                async move {
+                    upgrade.on_upgrade(move |socket| async move {
+                        let mut socket = Socket::direct(socket);
+                        let _ = got.send(socket.receive_binary().await.ok().flatten());
+                    })
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        (url, received)
+    }
+
+    /// An idle client is pinged; answering (its library does, as browsers), it stays.
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_client_is_pinged_and_stays() {
+        let (url, mut received) = serve().await;
+        let (mut client, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        for _ in 0..4 {
+            // Reading answers the ping.
+            match client.next().await {
+                Some(Ok(ClientMessage::Ping(_))) => {}
+                other => panic!("not a ping: {other:?}"),
+            }
+        }
+        assert!(received.try_recv().is_err(), "the client was let go");
+        client
+            .send(ClientMessage::Binary(vec![7].into()))
+            .await
+            .unwrap();
+        assert_eq!(received.recv().await.unwrap(), Some(vec![7]));
+    }
+
+    /// A client that answers nothing is gone after `SILENCE`.
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_client_is_let_go() {
+        let (url, mut received) = serve().await;
+        let (_client, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let start = tokio::time::Instant::now();
+        assert_eq!(received.recv().await.unwrap(), None);
+        assert!(
+            start.elapsed() >= SILENCE,
+            "let go after {:?}",
+            start.elapsed()
+        );
     }
 }
