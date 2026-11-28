@@ -32,8 +32,8 @@ shadow = true
 # Address of the client page and signaling endpoint. Default: 127.0.0.1:8090 (local only).
 address = "0.0.0.0:8090"
 # Required: the server only serves HTTPS (plain HTTP would expose the sessions, and browsers
-# require HTTPS for microphone, camera and clipboard access). With [acme], the paths where the
-# obtained certificate is written (these by default).
+# require HTTPS for microphone, camera and clipboard access). From an ACME client of your own
+# (certbot, step...), the server restarted once it is renewed.
 certificate = "/etc/qemu-dbus-webrtc/tls/cert.pem"
 key = "/etc/qemu-dbus-webrtc/tls/key.pem"
 # For clients outside the host's network, behind a NAT (a home or office router): the media
@@ -63,10 +63,6 @@ key = "/etc/qemu-dbus-webrtc/tls/key.pem"
 # urls = ["turns:turn.example.com:443?transport=tcp", "turn:turn.example.com:3478"]
 # secret = "..."
 
-# Certificate from an ACME CA, public or private (step-ca, OpenBao, FreeIPA...), renewed after
-# two thirds of its lifetime and reloaded without a restart. Authorizations the CA already holds
-# as valid need no challenge; otherwise the server answers HTTP-01 challenges on `http` during
-# validation (a private CA can reach servers on private addresses).
 # A connection broker (ameleo-broker): the deployment's entry point, where users sign in and open
 # their VMs. The host connects to it, over gRPC in TLS, and keeps the connection: it announces its
 # VMs there and serves the connections the broker relays, the broker having checked the user and
@@ -77,7 +73,7 @@ key = "/etc/qemu-dbus-webrtc/tls/key.pem"
 # the system's.
 # A connection broker, the deployment's one entry point: the host then serves its VMs through
 # it only, and opens no port. Either a broker or direct access, not both: with [broker], the
-# host refuses [auth], [[account]], [acme], [[turn]] and [listen]'s address, certificate and
+# host refuses [auth], [[account]], [[turn]] and [listen]'s address, certificate and
 # key (its public_address, udp_ports and stun stay, for the media).
 # [broker]
 # url = "https://broker.example.com:8443"
@@ -91,20 +87,6 @@ key = "/etc/qemu-dbus-webrtc/tls/key.pem"
 # # The TPM, its TCTI; "none" for a host the broker enrolled without a TPM.
 # tpm = "device:/dev/tpmrm0"
 # state_dir = "/var/lib/qemu-dbus-webrtc/broker"
-
-# [acme]
-# directory = "https://ca.example.com/acme/acme/directory"
-# domains = ["vdi.example.com"]
-# contact = ["mailto:admin@example.com"]
-# # External Account Binding, if the CA requires it.
-# eab_kid = "..."
-# eab_hmac_key = "..."
-# # Root certificates of a private CA's own HTTPS endpoint.
-# ca_bundle = "/etc/pki/ca-trust/source/anchors/internal-root.pem"
-# # Address for HTTP-01 challenges. Default: 0.0.0.0:80.
-# http = "0.0.0.0:80"
-# # ACME account directory. Default: /etc/qemu-dbus-webrtc/acme.
-# dir = "/etc/qemu-dbus-webrtc/acme"
 
 [video]
 # Video encoding, for all VMs.

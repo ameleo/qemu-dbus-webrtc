@@ -31,6 +31,14 @@ What each release brings. The packages are on the
 - ameleo-display-protocol 0.4, which drops the Windows agent's companion link; the interfaces
   between the host and the guest agent are unchanged.
 
+### Removed
+
+- `[acme]`: the server no longer gets its own certificate from an ACME CA, nor answers HTTP-01
+  challenges on port 80. Give it the certificate as files, from an ACME client of your own
+  (certbot, step...), and restart it once renewed; a configuration with `[acme]` is refused,
+  saying so. A host behind a broker is not concerned: its certificate to the broker comes from
+  the broker's ACME server, as before.
+
 ### Fixed
 
 - A session broken by its VM stopping (shut down from the guest) before the server saw the VM

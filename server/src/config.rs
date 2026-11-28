@@ -35,11 +35,6 @@ const MIN_BITRATE: u32 = 4_000;
 const START_BITRATE: u32 = 10_000;
 const MAX_BITRATE: u32 = 30_000;
 
-/// Where the certificate goes by default, with ACME, and the ACME account.
-const DEFAULT_CERTIFICATE: &str = "/etc/qemu-dbus-webrtc/tls/cert.pem";
-const DEFAULT_KEY: &str = "/etc/qemu-dbus-webrtc/tls/key.pem";
-const DEFAULT_ACME_DIR: &str = "/etc/qemu-dbus-webrtc/acme";
-
 /// The STUN server by default, as WebRTC clients commonly use: without one, a client outside
 /// the host's network, behind a NAT, reaches no session unless the router forwards ports to it.
 const DEFAULT_STUN: &str = "stun.l.google.com:19302";
@@ -55,7 +50,8 @@ const PROXMOX_CONF_DIR: &str = "/etc/pve/qemu-server";
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct File {
-    acme: Option<AcmeFile>,
+    /// Removed: its own ACME client gave the server its certificate. Named, for a clear error.
+    acme: Option<serde::de::IgnoredAny>,
     auth: AuthFile,
     listen: Listen,
     video: Video,
@@ -161,25 +157,6 @@ struct AuthFile {
     user: Option<String>,
     /// Its Argon2id hash: `qemu-dbus-webrtc hash-password`.
     password: Option<String>,
-}
-
-/// The server's certificate from an ACME authority.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AcmeFile {
-    directory: String,
-    domains: Vec<String>,
-    #[serde(default)]
-    contact: Vec<String>,
-    /// External Account Binding: the key id and the MAC key (base64url), both or neither.
-    eab_kid: Option<String>,
-    eab_hmac_key: Option<String>,
-    /// The roots of a private authority's own HTTPS certificate.
-    ca_bundle: Option<PathBuf>,
-    /// Where to answer the HTTP-01 challenges: 0.0.0.0:80 by default.
-    http: Option<SocketAddr>,
-    /// Where the account is kept: /etc/qemu-dbus-webrtc/acme by default.
-    dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -303,8 +280,6 @@ pub struct Config {
     tls: Option<session::Tls>,
     /// Where the VMs are found.
     pub providers: Providers,
-    /// The certificate from an ACME authority, if one gives it.
-    pub acme: Option<crate::host::acme::Acme>,
     /// The connection broker the host reaches, if it has one.
     pub broker: Option<crate::host::broker::Settings>,
     /// How the host gets its certificate from the broker's ACME server, if it does.
@@ -330,6 +305,12 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
             bail!(USAGE)
         };
         file = read(Path::new(path))?;
+    }
+    if file.acme.is_some() {
+        bail!(
+            "[acme] is no longer supported: get the certificate with an ACME client of your own \
+             (certbot, step...) and give its files in [listen] certificate and key"
+        );
     }
     let mut listen = file.listen;
     let mut video = file.video;
@@ -447,9 +428,6 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
         if listen.certificate.is_some() || listen.key.is_some() {
             direct.push("[listen] certificate and key (--tls)");
         }
-        if file.acme.is_some() {
-            direct.push("[acme]");
-        }
         if file.auth.method.is_some() || file.auth.user.is_some() || file.auth.password.is_some() {
             direct.push("[auth]");
         }
@@ -467,41 +445,10 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
         }
     }
 
-    // With ACME, the certificate is the one it gets, where [listen] says or by default.
-    if file.acme.is_some() {
-        listen
-            .certificate
-            .get_or_insert_with(|| DEFAULT_CERTIFICATE.into());
-        listen.key.get_or_insert_with(|| DEFAULT_KEY.into());
-    }
     let tls = match (listen.certificate, listen.key) {
         (Some(certificate), Some(key)) => Some(session::Tls { certificate, key }),
         (None, None) => None,
         _ => bail!("HTTPS takes a certificate and its key"),
-    };
-    let acme = match (file.acme, &tls) {
-        (Some(acme), Some(tls)) => {
-            if acme.domains.is_empty() {
-                bail!("[acme] takes the domains the certificate is for");
-            }
-            let eab = match (acme.eab_kid, acme.eab_hmac_key) {
-                (Some(kid), Some(key)) => Some((kid, key)),
-                (None, None) => None,
-                _ => bail!("[acme] External Account Binding takes both eab_kid and eab_hmac_key"),
-            };
-            Some(crate::host::acme::Acme {
-                directory: acme.directory,
-                domains: acme.domains,
-                contact: acme.contact,
-                eab,
-                ca_bundle: acme.ca_bundle,
-                http: acme.http.unwrap_or_else(|| ([0, 0, 0, 0], 80).into()),
-                dir: acme.dir.unwrap_or_else(|| DEFAULT_ACME_DIR.into()),
-                certificate: tls.certificate.clone(),
-                key: tls.key.clone(),
-            })
-        }
-        _ => None,
     };
     let network = transport::Network {
         public_address: match listen.public_address {
@@ -625,7 +572,6 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
         listen,
         tls,
         providers,
-        acme,
         broker,
         attestation,
     })
@@ -867,6 +813,27 @@ mod tests {
         );
     }
 
+    /// `[acme]` is gone: a configuration that still has it is told what to do instead.
+    #[test]
+    fn acme_is_gone() {
+        let dir = std::env::temp_dir().join(format!("qdw-config-acme-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "[acme]\ndirectory = \"https://ca/d\"\ndomains = [\"h\"]\n",
+        )
+        .unwrap();
+        let error = format!(
+            "{:#}",
+            parse(args(&format!("--config {}", path.display())))
+                .err()
+                .expect("refused")
+        );
+        assert!(error.contains("[acme] is no longer supported"), "{error}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// With [broker], the host serves through the broker only: whatever would open its own
     /// pages, or add a relay of its own, is refused; the media's own settings stay.
     #[test]
@@ -910,11 +877,6 @@ mod tests {
                 format!("[[account]]\nuser = \"a\"\npassword = \"x\"\nvms = [\"*\"]\n{broker}"),
                 "",
                 "[[account]]",
-            ),
-            (
-                format!("[acme]\ndirectory = \"https://ca/d\"\ndomains = [\"h\"]\n{broker}"),
-                "",
-                "[acme]",
             ),
             (
                 format!("[[turn]]\nurls = [\"turn:r:3478\"]\nsecret = \"s\"\n{broker}"),

@@ -157,9 +157,9 @@ name (libvirt domain, or Proxmox VM ID or name). The list of VMs is only shown t
 clients. The server attaches to a VM when its first client connects and detaches one minute
 after the last one leaves, so that a client can reconnect.
 
-The server only serves HTTPS and needs a certificate and its private key. `[acme]` obtains and
-renews them from an ACME CA, public or private (External Account Binding supported). For
-testing, a self-signed certificate works:
+The server only serves HTTPS and needs a certificate and its private key, as files: from an
+ACME client of your own (certbot, step...) for a public or private CA, restarting the server
+once renewed. For testing, a self-signed certificate works:
 `openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj /CN=localhost -keyout key.pem -out cert.pem`
 
 Clients authenticate with an account before the server starts or attaches to a VM. Each
@@ -266,20 +266,9 @@ LoadCredential=cert.pem:/etc/qemu-dbus-webrtc/tls/cert.pem
 LoadCredentialEncrypted=key.pem:/etc/qemu-dbus-webrtc/tls/key.pem.cred
 ```
 
-With `[acme]`, the service writes the certificate itself and answers HTTP-01 challenges on port
-80. Replace the credentials with write access to those directories and the port capability:
-
-```
-[Service]
-LoadCredential=
-ExecStart=
-ExecStart=/usr/bin/qemu-dbus-webrtc --config /etc/qemu-dbus-webrtc/config.toml
-ReadWritePaths=/etc/qemu-dbus-webrtc/tls /etc/qemu-dbus-webrtc/acme
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-```
-
-Both directories must be owned by `qemu-dbus-webrtc`.
+An ACME client renewing the certificate restarts the service afterwards, for instance with
+certbot's `--deploy-hook "systemctl restart qemu-dbus-webrtc"`; the clients connected then
+reconnect by themselves, to a guest session locked as on any departure.
 
 ## Goals
 

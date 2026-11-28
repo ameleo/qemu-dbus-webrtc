@@ -37,7 +37,6 @@ serde_json.workspace = true
 str0m.workspace = true
 str0m-rust-crypto.workspace = true
 if-addrs.workspace = true
-instant-acme.workspace = true
 x509-parser.workspace = true
 zbus.workspace = true
 axum.workspace = true

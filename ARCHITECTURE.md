@@ -38,7 +38,7 @@ libvirt, plain QEMU) starts and stops VMs.
   only when no direct pair works (`?relay` in the page's address forces it).
 - **Connection broker:** with `[broker]`, the host serves its VMs through the broker only,
   and opens no port: the configuration refuses, beside it, whatever would open its own pages
-  (`[auth]`, `[[account]]`, `[acme]`, `[listen]`'s address and certificate) or add a relay of
+  (`[auth]`, `[[account]]`, `[listen]`'s address and certificate) or add a relay of
   its own (`[[turn]]`). The host keeps a gRPC connection to the broker
   (`qdw_protocol::broker`, `proto/broker.proto`), which it opens in mutual TLS, with the
   certificate the broker's ACME server issued it (`attestation`: its key in the TPM, proven by
