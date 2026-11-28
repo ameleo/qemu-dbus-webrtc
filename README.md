@@ -172,10 +172,12 @@ requires its own logon. For many users, a connection broker that hands out token
 is planned: the accounts suit a single host.
 
 Clients outside the host's network reach it through the router, which forwards the HTTPS port
-(TCP) to the host. For the media, where STUN does not do (below), forward a range of UDP ports
-too, keeping their numbers, and set them in `[listen]`: `udp_ports = "40000-40099"` and
-`public_address`, the router's public address or a name for it. The sessions then take their
-UDP ports in that range and announce the public address on them.
+(TCP) to the host. For the media, where STUN does not do (below), forward one UDP port too,
+keeping its number, and set it in `[listen]`: `udp_port = 3478` and `public_address`, the
+router's public address or a name for it. Every session then takes its media through that
+port, which the server sorts by session, and announces the public address on it. 3478, the
+port of STUN and TURN, is often open in office firewalls. A range of ports, one per session
+(`udp_ports = "40000-40099"`), also works, instead.
 
 Most often, no port needs forwarding: each session asks a STUN server for the
 public address and port its router gives it, the clients ask it for theirs, and both sides

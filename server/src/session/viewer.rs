@@ -135,6 +135,7 @@ pub(crate) async fn viewer(
             mic: (!shadow).then(|| shared.mic.clone()),
             bitrates: shared.bitrates,
             udp_ports: shared.network.udp_ports,
+            mux: shared.network.udp_port.map(crate::network::mux::shared),
             public,
             stun,
         },

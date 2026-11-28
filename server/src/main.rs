@@ -66,6 +66,14 @@ async fn main() -> Result<()> {
     }
     // Fail now, saying why, rather than at the first frame.
     gpus::check(&found, &vm.settings)?;
+    // The one UDP port for every session, bound now: one already taken fails the start, not
+    // the first session.
+    if let Some(port) = vm.network.udp_port {
+        let addresses = session::peer::host_addresses()?;
+        if network::mux::shared(port).sockets(&addresses).is_empty() {
+            anyhow::bail!("[listen] udp_port: no address of the host could take UDP port {port}");
+        }
+    }
 
     // With a broker, the host serves its VMs through it only, and opens no port at all: the
     // broker relays its users (the configuration refuses anything else beside [broker]).

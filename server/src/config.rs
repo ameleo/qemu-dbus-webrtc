@@ -169,6 +169,8 @@ struct Listen {
     public_address: Option<String>,
     /// The UDP ports of the sessions, "first-last".
     udp_ports: Option<String>,
+    /// One UDP port for every session, instead.
+    udp_port: Option<u16>,
     /// A STUN server, "host:port" (see `transport::Network`): `DEFAULT_STUN` when absent, none
     /// when empty.
     stun: Option<String>,
@@ -461,6 +463,15 @@ pub fn parse(args: Vec<String>) -> Result<Config> {
             .map(udp_ports)
             .transpose()
             .context("in [listen] udp_ports")?,
+        udp_port: match (listen.udp_port, &listen.udp_ports) {
+            (Some(_), Some(_)) => {
+                bail!("[listen]: udp_port (one port for every session) or udp_ports, not both")
+            }
+            (Some(port), None) => {
+                Some(crate::network::mux::check_port(port).context("in [listen]")?)
+            }
+            (None, _) => None,
+        },
         stun: match listen.stun.as_deref().map(str::trim) {
             None => Some(DEFAULT_STUN.to_owned()),
             Some("") => None,
@@ -740,6 +751,16 @@ mod tests {
         assert!(udp_ports("0-10").is_err());
         assert!(udp_ports("40000-70000").is_err());
         assert!(udp_ports("udp").is_err());
+    }
+
+    /// One UDP port for every session: a port, alone.
+    #[test]
+    fn one_udp_port() {
+        let config = parse_file_listen("udp_port = 3478\n").unwrap();
+        assert_eq!(config.vm.network.udp_port, Some(3478));
+        assert!(parse_file_listen("udp_port = 0\n").is_err());
+        let both = parse_file_listen("udp_port = 3478\nudp_ports = \"40000-40099\"\n");
+        assert!(format!("{:#}", both.err().expect("refused")).contains("not both"));
     }
 
     #[test]

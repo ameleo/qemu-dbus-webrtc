@@ -22,7 +22,7 @@ qdw-protocol = { workspace = true, features = ["broker"] }
 qdw-web.workspace = true
 qdw-qemu.workspace = true
 qdw-video.workspace = true
-rustix = { workspace = true, features = ["fs"] }
+rustix = { workspace = true, features = ["fs", "net"] }
 ring.workspace = true
 rustls.workspace = true
 serde.workspace = true

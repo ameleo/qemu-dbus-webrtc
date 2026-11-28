@@ -16,6 +16,7 @@ const BINDING_REQUEST: u16 = 0x0001;
 const BINDING_SUCCESS: u16 = 0x0101;
 /// The attributes read (RFC 8489 18.3).
 const MAPPED_ADDRESS: u16 = 0x0001;
+const USERNAME: u16 = 0x0006;
 const XOR_MAPPED_ADDRESS: u16 = 0x0020;
 /// The address families (RFC 8489 14.1).
 const IPV4: u8 = 0x01;
@@ -23,8 +24,8 @@ const IPV6: u8 = 0x02;
 
 /// How long the server has to answer each request, and the requests sent: a lost one is sent
 /// again, as RFC 8489 6.2.1 has a client retransmit; a server that answers neither is left out.
-const WAIT: Duration = Duration::from_millis(250);
-const TRIES: u32 = 2;
+pub(crate) const WAIT: Duration = Duration::from_millis(250);
+pub(crate) const TRIES: u32 = 2;
 
 /// A Binding request, with no attribute, for the transaction `id`.
 pub fn request(id: &[u8; 12]) -> [u8; 20] {
@@ -64,6 +65,57 @@ pub fn mapped_address(message: &[u8], id: &[u8; 12]) -> Option<SocketAddr> {
         at += 4 + size.next_multiple_of(4);
     }
     xored.or(plain)
+}
+
+/// The class of a Binding message (RFC 8489 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Class {
+    Request,
+    Indication,
+    Success,
+    Error,
+}
+
+/// The class and the transaction of a Binding message: `None` for anything else (DTLS, RTP,
+/// another STUN method).
+pub fn binding(message: &[u8]) -> Option<(Class, [u8; 12])> {
+    if message.len() < 20 || message[4..8] != MAGIC_COOKIE.to_be_bytes() {
+        return None;
+    }
+    let class = match u16::from_be_bytes([message[0], message[1]]) {
+        0x0001 => Class::Request,
+        0x0011 => Class::Indication,
+        0x0101 => Class::Success,
+        0x0111 => Class::Error,
+        _ => return None,
+    };
+    Some((class, message[8..20].try_into().ok()?))
+}
+
+/// The receiver's username fragment of an ICE connectivity check: a Binding request's
+/// USERNAME is "<receiver's fragment>:<sender's fragment>" (RFC 8445 7.2.2). `None` for any
+/// other message, or one without it.
+pub fn check_receiver(message: &[u8]) -> Option<&str> {
+    if message.len() < 20
+        || u16::from_be_bytes([message[0], message[1]]) != BINDING_REQUEST
+        || message[4..8] != MAGIC_COOKIE.to_be_bytes()
+    {
+        return None;
+    }
+    let length = usize::from(u16::from_be_bytes([message[2], message[3]]));
+    let attributes = message.get(20..20 + length)?;
+    let mut at = 0;
+    while at + 4 <= attributes.len() {
+        let kind = u16::from_be_bytes([attributes[at], attributes[at + 1]]);
+        let size = usize::from(u16::from_be_bytes([attributes[at + 2], attributes[at + 3]]));
+        let value = attributes.get(at + 4..at + 4 + size)?;
+        if kind == USERNAME {
+            let username = std::str::from_utf8(value).ok()?;
+            return username.split_once(':').map(|(receiver, _)| receiver);
+        }
+        at += 4 + size.next_multiple_of(4);
+    }
+    None
 }
 
 /// A MAPPED-ADDRESS value, or an XOR-MAPPED-ADDRESS one when `xor` gives its transaction:
@@ -148,6 +200,28 @@ mod tests {
         0xb7, 0xe7, 0xa7, 0x01, 0xbc, 0x34, 0xd6, 0x86, 0xfa, 0x87, 0xdf, 0xae,
     ];
 
+    /// RFC 5769 2.1, the sample request: USERNAME "evtj:h6vY", whose receiver is "evtj".
+    #[test]
+    fn rfc5769_request_receiver() {
+        let request = bytes(
+            "00 01 00 58 21 12 a4 42 b7 e7 a7 01 bc 34 d6 86 fa 87 df ae \
+             80 22 00 10 53 54 55 4e 20 74 65 73 74 20 63 6c 69 65 6e 74 \
+             00 24 00 04 6e 00 01 ff \
+             80 29 00 08 93 2f f9 b1 51 26 3b 36 \
+             00 06 00 09 65 76 74 6a 3a 68 36 76 59 20 20 20 \
+             00 08 00 14 9a ea a7 0c bf d8 cb 56 78 1e f2 b5 b2 d3 f2 49 c1 b5 71 a2 \
+             80 28 00 04 e5 7a 3b cf",
+        );
+        assert_eq!(check_receiver(&request), Some("evtj"));
+        // A request without USERNAME, and a response, have none.
+        assert_eq!(check_receiver(&super::request(&ID)), None);
+        assert_eq!(
+            binding(&request),
+            Some((Class::Request, request[8..20].try_into().unwrap()))
+        );
+        assert_eq!(binding(&[0x80; 40]), None);
+    }
+
     /// RFC 5769 2.2, the sample IPv4 response: 192.0.2.1 port 32853.
     #[test]
     fn rfc5769_ipv4_response() {
@@ -162,6 +236,8 @@ mod tests {
             mapped_address(&response, &ID),
             Some("192.0.2.1:32853".parse().unwrap())
         );
+        assert_eq!(binding(&response), Some((Class::Success, ID)));
+        assert_eq!(check_receiver(&response), None);
         // Another transaction's response is not ours.
         let mut other = ID;
         other[0] ^= 1;
