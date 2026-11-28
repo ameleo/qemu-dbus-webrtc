@@ -117,6 +117,23 @@ connection details, disconnect), files and folders dropped on it go to the guest
 a paste there, and it connects again by itself after a lost connection. The client protocol is defined in Protocol Buffers
 ([qdw.proto](crates/protocol/proto/qdw.proto)), so other clients can be implemented from it.
 
+### A GPU in the guest
+
+A GPU passed through to the VM (VFIO) works alongside the virtio-gpu display the server
+streams, with no change to the server. Tried with an Intel Arc A380, no monitor attached, in a
+Windows 11 guest: Windows ran its applications on the Arc (Chrome's GPU acceleration included)
+while the server streamed the virtio-gpu display as usual. Not taken further:
+
+- With the host's only GPU passed through, the server encoded on the CPU (VP9 with libvpx),
+  which then shared the cores with the VM.
+- Video playback gained nothing: the guest composes its desktop in software and copies the
+  frames to the virtio-gpu display, either way. Only heavy 3D should gain; it was not measured.
+- One GPU for several VMs needs SR-IOV (Intel Arc Pro B-series, Flex), which the A380 does not
+  have: not tried yet.
+
+Without GL on the host, the VM's virtio-gpu needs `gl` off, and `blob` off before QEMU 11.2
+(without GL, QEMU 11.1 hands over file descriptor 0 for a blob resource instead of its memory).
+
 ## Usage
 
 Runtime dependencies: libva with the GPU's VA driver (Intel `iHD` or Mesa for AMD), libvpx,
