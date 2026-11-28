@@ -56,3 +56,5 @@ tonic = { workspace = true, features = ["codegen", "channel", "router", "server"
 tokio-stream = { workspace = true, features = ["net"] }
 # Time paused and advanced by hand, for the waits of the guest's consent.
 tokio = { workspace = true, features = ["test-util"] }
+# A WebSocket client, for the keepalive of the clients' WebSockets (as axum, no TLS).
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
