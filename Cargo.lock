@@ -48,8 +48,8 @@ dependencies = [
 
 [[package]]
 name = "ameleo-display-protocol"
-version = "0.3.0"
-source = "git+https://github.com/ameleo/ameleo-display-protocol?tag=v0.3.0#838513af48e89a70d3ad9c83526f1e15411bcfa6"
+version = "0.4.0"
+source = "git+https://github.com/ameleo/ameleo-display-protocol?tag=v0.4.0#8d4ff1f795b7fea821b1a65a4551faa1ecde67e3"
 dependencies = [
  "zbus",
 ]
