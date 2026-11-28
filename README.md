@@ -287,6 +287,12 @@ under `/etc/letsencrypt/`, which a copy of the disk or a backup holds: the seali
 protects the key the service uses. The clients connected reconnect by themselves after the
 restart, to a guest session locked as on any departure.
 
+Certbot runs a deploy hook once, right after the renewal: a hook that fails (logged in
+`/var/log/letsencrypt/letsencrypt.log`) is not run again before the next renewal, and the
+server keeps its old certificate until then, which may expire first. Run the hook again by hand
+once the cause is fixed: `RENEWED_LINEAGE=/etc/letsencrypt/live/vdi.example.com
+/etc/letsencrypt/renewal-hooks/deploy/qemu-dbus-webrtc`.
+
 ## Goals
 
 - Hardware video encoding on the host (VA-API first: Intel and AMD GPUs, integrated ones
