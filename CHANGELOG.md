@@ -28,6 +28,8 @@ What each release brings. The packages are on the
   five seconds.
 - Shadow clients no longer end when the console's user leaves, but when the guest's user stops
   them; anyone who may open a VM no longer may watch it.
+- ameleo-display-protocol 0.4, which drops the Windows agent's companion link; the interfaces
+  between the host and the guest agent are unchanged.
 
 ### Fixed
 
