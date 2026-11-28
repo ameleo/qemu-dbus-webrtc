@@ -28,13 +28,12 @@ if-addrs = "0.15"
 base64 = "0.23"
 bindgen = "0.73"
 futures-util = "0.3"
-instant-acme = { version = "0.8", default-features = false, features = ["ring", "hyper-rustls", "rcgen"] }
 prost = "0.14"
 prost-build = "0.14"
 protox = "0.10"
 pkg-config = "0.3"
 ring = "0.17"
-# The host's ACME client to its broker: HTTP/2 with rustls and ring.
+# The host's ACME client to its broker (device-attest-01): HTTP/2 with rustls and ring.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
 # CBOR, for the WebAuthn attestation object of ACME device-attest-01.
 ciborium = "0.2"

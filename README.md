@@ -157,9 +157,9 @@ name (libvirt domain, or Proxmox VM ID or name). The list of VMs is only shown t
 clients. The server attaches to a VM when its first client connects and detaches one minute
 after the last one leaves, so that a client can reconnect.
 
-The server only serves HTTPS and needs a certificate and its private key. `[acme]` obtains and
-renews them from an ACME CA, public or private (External Account Binding supported). For
-testing, a self-signed certificate works:
+The server only serves HTTPS and needs a certificate and its private key, as files: from an
+ACME client of your own (certbot, step...) for a public or private CA, restarting the server
+once renewed. For testing, a self-signed certificate works:
 `openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj /CN=localhost -keyout key.pem -out cert.pem`
 
 Clients authenticate with an account before the server starts or attaches to a VM. Each
@@ -266,20 +266,32 @@ LoadCredential=cert.pem:/etc/qemu-dbus-webrtc/tls/cert.pem
 LoadCredentialEncrypted=key.pem:/etc/qemu-dbus-webrtc/tls/key.pem.cred
 ```
 
-With `[acme]`, the service writes the certificate itself and answers HTTP-01 challenges on port
-80. Replace the credentials with write access to those directories and the port capability:
+An ACME client renews its own files: copy them into place, then restart the service. With
+certbot, a deploy hook, `/etc/letsencrypt/renewal-hooks/deploy/qemu-dbus-webrtc` (executable),
+which certbot runs for every certificate it renews: it only deploys the server's own
+(`vdi.example.com` here).
 
 ```
-[Service]
-LoadCredential=
-ExecStart=
-ExecStart=/usr/bin/qemu-dbus-webrtc --config /etc/qemu-dbus-webrtc/config.toml
-ReadWritePaths=/etc/qemu-dbus-webrtc/tls /etc/qemu-dbus-webrtc/acme
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+#!/bin/sh
+set -e
+[ "$RENEWED_LINEAGE" = /etc/letsencrypt/live/vdi.example.com ] || exit 0
+install -m 0600 "$RENEWED_LINEAGE/fullchain.pem" /etc/qemu-dbus-webrtc/tls/cert.pem
+install -m 0600 "$RENEWED_LINEAGE/privkey.pem" /etc/qemu-dbus-webrtc/tls/key.pem
+systemctl restart qemu-dbus-webrtc
 ```
 
-Both directories must be owned by `qemu-dbus-webrtc`.
+With the key sealed to the TPM, the hook seals the new key instead of copying it:
+`systemd-creds encrypt --with-key=tpm2 --name=key.pem "$RENEWED_LINEAGE/privkey.pem"
+/etc/qemu-dbus-webrtc/tls/key.pem.cred`. Certbot still keeps its own copy of the key in clear
+under `/etc/letsencrypt/`, which a copy of the disk or a backup holds: the sealing then only
+protects the key the service uses. The clients connected reconnect by themselves after the
+restart, to a guest session locked as on any departure.
+
+Certbot runs a deploy hook once, right after the renewal: a hook that fails (logged in
+`/var/log/letsencrypt/letsencrypt.log`) is not run again before the next renewal, and the
+server keeps its old certificate until then, which may expire first. Run the hook again by hand
+once the cause is fixed: `RENEWED_LINEAGE=/etc/letsencrypt/live/vdi.example.com
+/etc/letsencrypt/renewal-hooks/deploy/qemu-dbus-webrtc`.
 
 ## Goals
 

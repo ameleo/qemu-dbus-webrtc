@@ -14,10 +14,10 @@ mod session;
 mod tools;
 mod vms;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tracing::{info, warn};
 
-use crate::host::{acme, attestation, broker};
+use crate::host::{attestation, broker};
 
 use qdw_video::encode::Codec;
 use qdw_video::gpus;
@@ -81,9 +81,7 @@ async fn main() -> Result<()> {
         tokio::spawn(broker::keep(settings, vms.clone()));
     }
     let mut serving = match pages {
-        Some((tls, auth)) => {
-            serve_pages(config.listen, tls, auth, config.acme, vms.clone()).await?
-        }
+        Some((tls, auth)) => serve_pages(config.listen, tls, auth, vms.clone()).await?,
         // Nothing to serve: only a signal stops the server.
         None => tokio::spawn(std::future::pending()),
     };
@@ -126,43 +124,17 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Serve the VMs' own pages on `listen`, with `tls` (from ACME first, when `acme` gives it and
-/// none in place can serve) and `auth`.
+/// Serve the VMs' own pages on `listen`, with `tls` and `auth`.
 async fn serve_pages(
     listen: std::net::SocketAddr,
     tls: session::Tls,
     auth: config::Auth,
-    acme: Option<acme::Acme>,
     vms: std::sync::Arc<vms::Vms>,
 ) -> Result<tokio::task::JoinHandle<Result<()>>> {
     if matches!(auth, config::Auth::None) && !listen.ip().is_loopback() {
         warn!(%listen, "[auth] method is none: anyone who reaches this address sees the VMs");
     }
-    // The certificate from ACME first, when none in place can serve (none, expired, for other
-    // names, or without its key): the pages need one. One that can serve, even due for renewal,
-    // serves at once, and is renewed while it does (`acme::keep`): the start does not wait for
-    // the authority.
-    if let Some(acme) = &acme
-        && !acme.usable()
-    {
-        acme.renew().await.context("no certificate")?;
-    }
     let rustls = session::load_tls(&tls).await?;
-    if let Some(acme) = acme {
-        let (rustls, tls) = (rustls.clone(), tls.clone());
-        tokio::spawn(acme::keep(acme, move || {
-            let (rustls, tls) = (rustls.clone(), tls.clone());
-            tokio::spawn(async move {
-                match rustls
-                    .reload_from_pem_file(&tls.certificate, &tls.key)
-                    .await
-                {
-                    Ok(()) => info!("the pages serve the new certificate"),
-                    Err(e) => warn!(error = %e, "the new certificate is not served"),
-                }
-            });
-        }));
-    }
     Ok(tokio::spawn(session::serve(listen, rustls, vms, auth)))
 }
 
