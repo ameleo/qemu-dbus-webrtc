@@ -267,11 +267,14 @@ LoadCredentialEncrypted=key.pem:/etc/qemu-dbus-webrtc/tls/key.pem.cred
 ```
 
 An ACME client renews its own files: copy them into place, then restart the service. With
-certbot, a deploy hook, `/etc/letsencrypt/renewal-hooks/deploy/qemu-dbus-webrtc` (executable):
+certbot, a deploy hook, `/etc/letsencrypt/renewal-hooks/deploy/qemu-dbus-webrtc` (executable),
+which certbot runs for every certificate it renews: it only deploys the server's own
+(`vdi.example.com` here).
 
 ```
 #!/bin/sh
 set -e
+[ "$RENEWED_LINEAGE" = /etc/letsencrypt/live/vdi.example.com ] || exit 0
 install -m 0600 "$RENEWED_LINEAGE/fullchain.pem" /etc/qemu-dbus-webrtc/tls/cert.pem
 install -m 0600 "$RENEWED_LINEAGE/privkey.pem" /etc/qemu-dbus-webrtc/tls/key.pem
 systemctl restart qemu-dbus-webrtc
@@ -279,8 +282,10 @@ systemctl restart qemu-dbus-webrtc
 
 With the key sealed to the TPM, the hook seals the new key instead of copying it:
 `systemd-creds encrypt --with-key=tpm2 --name=key.pem "$RENEWED_LINEAGE/privkey.pem"
-/etc/qemu-dbus-webrtc/tls/key.pem.cred`. The clients connected reconnect by themselves after
-the restart, to a guest session locked as on any departure.
+/etc/qemu-dbus-webrtc/tls/key.pem.cred`. Certbot still keeps its own copy of the key in clear
+under `/etc/letsencrypt/`, which a copy of the disk or a backup holds: the sealing then only
+protects the key the service uses. The clients connected reconnect by themselves after the
+restart, to a guest session locked as on any departure.
 
 ## Goals
 
